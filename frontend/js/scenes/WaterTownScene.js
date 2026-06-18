@@ -9,7 +9,7 @@ class WaterTownScene extends Phaser.Scene {
         this.background = new Background(this);
 
         // 创建玩家
-        this.player = new Player(this, 300, this.scene.scale.height * 0.7);
+        this.player = new Player(this, 300, GAME_CONFIG.height * 0.7);
 
         // 创建 NPC 导游
         this.npc = new NPCGuide(this, NPC_CONFIG.guide.position.x, NPC_CONFIG.guide.position.y, {
@@ -19,14 +19,14 @@ class WaterTownScene extends Phaser.Scene {
         });
 
         // 创建对话框
-        this.dialogBox = new DialogBox(this, 0, this.scale.height - 100, {
+        this.dialogBox = new DialogBox(this, 0, GAME_CONFIG.height - 100, {
             width: 800,
             height: 150,
         });
         this.dialogBox.setVisible(false);
 
         // 创建输入框
-        this.inputBox = new InputBox(this, 0, this.scale.height - 250, {
+        this.inputBox = new InputBox(this, 0, GAME_CONFIG.height - 250, {
             width: 600,
             height: 50,
             placeholder: '输入问题向导游小荷提问...',
@@ -168,10 +168,10 @@ class WaterTownScene extends Phaser.Scene {
         this.wsClient.sendChatMessage(text, this.playerId);
 
         // NPC 转向玩家
-        this.npc.flipX = this.player.x < this.npc.x;
+        this.npc.setFlipX(this.player.x < this.npc.x);
 
         // NPC 点头
-        this.scene.tweens.add({
+        this.tweens.add({
             targets: this.npc,
             rotation: -0.1,
             duration: 150,
@@ -195,7 +195,7 @@ class WaterTownScene extends Phaser.Scene {
 
             // 距离太近时让 NPC 面向玩家
             if (distance < 200) {
-                this.npc.flipX = this.player.x < this.npc.x;
+                this.npc.setFlipX(this.player.x < this.npc.x);
             }
         }
     }

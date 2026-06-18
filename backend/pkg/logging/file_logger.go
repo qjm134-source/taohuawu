@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -86,7 +87,10 @@ func (h *FileHook) Levels() []logrus.Level {
 }
 
 func (h *FileHook) Fire(entry *logrus.Entry) error {
-	msg := []byte(entry.Message + "\n")
+	msg := []byte(fmt.Sprintf("[%s] [%s] %s\n",
+		entry.Time.Format("2006-01-02 15:04:05"),
+		entry.Level.String(),
+		entry.Message))
 	if _, err := h.fileHook.Write(msg); err != nil {
 		return err
 	}

@@ -3,24 +3,109 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>江南水乡 - 智能导游系统</title>
-    <link rel="stylesheet" href="css/styles.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.80.1/phaser.min.js"></script>
+    <title>江南水乡 - 智能导游</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%238b7355'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='18' fill='white'%3E莲%3C/text%3E%3C/svg%3E">
+    <!-- Google Fonts: 古风字体 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=ZCOOL+XiaoWei&family=Noto+Serif+SC:wght@300;400;700&family=Ma+Shan+Zheng&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-    <div id="game-container"></div>
+    <!-- ========== 背景层 ========== -->
+    <div class="background-layer"></div>
 
-    <!-- 游戏脚本 -->
-    <script src="js/utils/const.js"></script>
-    <script src="js/network/WebSocketClient.js"></script>
-    <script src="js/ui/Typewriter.js"></script>
-    <script src="js/ui/DialogBox.js"></script>
-    <script src="js/ui/InputBox.js"></script>
-    <script src="js/entities/NPCGuide.js"></script>
-    <script src="js/entities/Player.js"></script>
-    <script src="js/entities/Background.js"></script>
-    <script src="js/scenes/BootScene.js"></script>
-    <script src="js/scenes/WaterTownScene.js"></script>
-    <script src="js/main.js"></script>
+    <!-- ========== 欢迎词区域（右上角） ========== -->
+    <div class="welcome-area" id="welcomeArea">
+        <div class="welcome-text" id="welcomeText"></div>
+        <span class="welcome-cursor" id="welcomeCursor">|</span>
+    </div>
+
+    <!-- ========== 导游头像区域（左下角） ========== -->
+    <div class="guide-area" id="guideArea">
+        <!-- 对话气泡 -->
+        <div class="speech-bubble" id="speechBubble">
+            <div class="bubble-content" id="bubbleContent">
+                <span class="bubble-thinking">小荷正在思考...</span>
+            </div>
+            <div class="bubble-tail"></div>
+        </div>
+
+        <!-- 头像和名字 -->
+        <div class="guide-avatar-group">
+            <div class="avatar-wrapper">
+                <div class="avatar-ring"></div>
+                <div class="avatar-inner">
+                    <!-- 水墨荷花 SVG 头像 -->
+                    <svg class="avatar-placeholder" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="50" cy="50" r="48" fill="#f5f0e8" stroke="#8b7355" stroke-width="2"/>
+                        <ellipse cx="50" cy="55" rx="20" ry="14" fill="#e8d5c4"/>
+                        <circle cx="50" cy="38" r="12" fill="#e8d5c4"/>
+                        <circle cx="42" cy="35" r="3" fill="#5c4a3a"/>
+                        <circle cx="58" cy="35" r="3" fill="#5c4a3a"/>
+                        <path d="M46 44 Q50 48 54 44" stroke="#c4956a" stroke-width="1.5" fill="none"/>
+                        <text x="50" y="78" text-anchor="middle" font-size="12" fill="#8b7355" font-family="serif">小荷</text>
+                    </svg>
+                </div>
+            </div>
+            <span class="guide-name">小荷</span>
+            <button class="history-btn" id="historyBtn" title="对话历史">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <circle cx="12" cy="12" r="10"/>
+                    <polyline points="12 6 12 12 16 14"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <!-- ========== 输入框区域（底部居中） ========== -->
+    <div class="input-area" id="inputArea">
+        <div class="input-wrapper">
+            <textarea
+                class="chat-input"
+                id="chatInput"
+                placeholder="向小荷询问..."
+                rows="1"
+                autocomplete="off"
+            ></textarea>
+            <button class="send-btn" id="sendBtn" title="发送">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="2" x2="12" y2="22"/>
+                    <path d="M2 12 L12 2 L22 12"/>
+                </svg>
+            </button>
+        </div>
+        <div class="input-hint">按 Enter 发送，Shift + Enter 换行</div>
+    </div>
+
+    <!-- ========== 连接状态指示器 ========== -->
+    <div class="connection-status" id="connectionStatus">
+        <span class="status-dot"></span>
+        <span class="status-text">连接中...</span>
+    </div>
+
+    <!-- ========== 对话历史侧边栏 ========== -->
+    <div class="history-overlay" id="historyOverlay"></div>
+    <div class="history-sidebar" id="historySidebar">
+        <div class="history-header">
+            <h3 class="history-title">对话历史</h3>
+            <button class="history-close" id="historyClose">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18"/>
+                    <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+            </button>
+        </div>
+        <div class="history-list" id="historyList">
+            <div class="history-empty">暂无对话记录</div>
+        </div>
+    </div>
+
+    <!-- ========== JavaScript ========== -->
+    <script src="js/websocket.js"></script>
+    <script src="js/typewriter.js"></script>
+    <script src="js/ui.js"></script>
+    <script src="js/app.js"></script>
 </body>
 </html>

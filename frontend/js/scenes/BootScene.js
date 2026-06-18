@@ -73,10 +73,14 @@ class BootScene extends Phaser.Scene {
 
         // 模拟加载进度
         let progress = 0;
+        let isDestroyed = false;
         const progressInterval = setInterval(() => {
+            if (isDestroyed) return;
+            
             progress += Math.random() * 10;
             if (progress >= 100) {
                 progress = 100;
+                isDestroyed = true;
                 clearInterval(progressInterval);
 
                 // 完成后过渡到下一个场景

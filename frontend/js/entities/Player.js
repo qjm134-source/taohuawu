@@ -8,29 +8,27 @@ class Player extends Phaser.GameObjects.Container {
 
         // 配置
         this.speed = options.speed || 200;
-        this.scale = options.scale || 1;
+        this.charScale = options.scale || 1;
 
-        // 创建身体
-        this.body = scene.add.ellipse(0, 0, 35 * this.scale, 70 * this.scale, 0x4169E1);
-        this.body.setStrokeStyle(2, 0x000000);
+        const s = this.charScale;
 
-        // 创建头部
-        this.head = scene.add.circle(0, -40 * this.scale, 22 * this.scale, 0xFFE0BD);
-        this.head.setStrokeStyle(2, 0x000000);
+        // 创建纹理
+        const bodyKey    = createEllipseTexture(scene, 35 * s, 70 * s, 0x4169E1, 1, 2, 0x000000);
+        const headKey    = createCircleTexture(scene, 22 * s, 0xFFE0BD, 1, 2, 0x000000);
+        const eyeKey     = createCircleTexture(scene, 3 * s, 0x000000);
+        const mouthKey   = createEllipseTexture(scene, 10 * s, 5 * s, 0xFF6B6B, 1, 1.5, 0x000000);
+        const shadowKey  = createEllipseTexture(scene, 45 * s, 8 * s, 0x000000, 0.2);
 
-        // 创建眼睛
-        this.leftEye = scene.add.circle(-7 * this.scale, -43 * this.scale, 3 * this.scale, 0x000000);
-        this.rightEye = scene.add.circle(7 * this.scale, -43 * this.scale, 3 * this.scale, 0x000000);
-
-        // 创建嘴巴
-        this.mouth = scene.add.arc(0, -35 * this.scale, 6 * this.scale, 0, Math.PI, false, 0xFF6B6B);
-        this.mouth.setStrokeStyle(2, 0x000000);
+        // 创建身体部件（使用 Image 替代 Shape）
+        this.body = scene.add.image(0, 0, bodyKey).setOrigin(0.5, 0.5);
+        this.head = scene.add.image(0, -40 * s, headKey).setOrigin(0.5, 0.5);
+        this.leftEye = scene.add.image(-7 * s, -43 * s, eyeKey).setOrigin(0.5, 0.5);
+        this.rightEye = scene.add.image(7 * s, -43 * s, eyeKey).setOrigin(0.5, 0.5);
+        this.mouth = scene.add.image(0, -33 * s, mouthKey).setOrigin(0.5, 0.5);
+        this.shadow = scene.add.image(0, 45 * s, shadowKey).setOrigin(0.5, 0.5);
 
         // 添加所有元素到容器
-        this.add([this.body, this.head, this.leftEye, this.rightEye, this.mouth]);
-
-        // 添加阴影
-        this.shadow = scene.add.ellipse(0, 45 * this.scale, 45 * this.scale, 8 * this.scale, 0x000000, 0.2);
+        this.add([this.shadow, this.body, this.head, this.leftEye, this.rightEye, this.mouth]);
 
         // 移动状态
         this.isMoving = false;
@@ -77,10 +75,6 @@ class Player extends Phaser.GameObjects.Container {
         } else {
             this.isMoving = false;
         }
-
-        // 更新阴影位置
-        this.shadow.x = this.x;
-        this.shadow.y = this.y + 45 * this.scale;
     }
 
     clampPosition() {
@@ -88,12 +82,12 @@ class Player extends Phaser.GameObjects.Container {
         this.x = Phaser.Math.Clamp(
             this.x,
             margin,
-            this.scene.scale.width - margin
+            GAME_CONFIG.width - margin
         );
         this.y = Phaser.Math.Clamp(
             this.y,
             margin,
-            this.scene.scale.height - margin
+            GAME_CONFIG.height - margin
         );
     }
 
@@ -117,8 +111,6 @@ class Player extends Phaser.GameObjects.Container {
                 ease: 'Linear',
                 onUpdate: () => {
                     this.isMoving = true;
-                    this.shadow.x = this.x;
-                    this.shadow.y = this.y + 45 * this.scale;
                 },
                 onComplete: () => {
                     this.isMoving = false;
@@ -128,9 +120,6 @@ class Player extends Phaser.GameObjects.Container {
     }
 
     destroy() {
-        if (this.shadow) {
-            this.shadow.destroy();
-        }
         super.destroy();
     }
 }

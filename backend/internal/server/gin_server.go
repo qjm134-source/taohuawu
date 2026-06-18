@@ -72,6 +72,7 @@ func (s *Server) setupRouter() {
 	s.router = gin.New()
 	s.router.Use(gin.Recovery())
 	s.router.Use(s.loggingMiddleware())
+	s.router.Use(s.corsMiddleware())
 
 	// 健康检查
 	s.router.GET("/health", s.healthCheck)
@@ -87,6 +88,16 @@ func (s *Server) setupRouter() {
 
 	// WebSocket
 	s.router.GET(s.config.WebSocket.Path, s.handleWebSocket)
+
+	// 静态文件服务 - 前端页面
+	s.router.Static("/css", "./frontend/css")
+	s.router.Static("/js", "./frontend/js")
+	s.router.Static("/assets", "./frontend/assets")
+	s.router.StaticFile("/", "./frontend/index.html")
+	s.router.StaticFile("/favicon.ico", "./frontend/assets/favicon.ico")
+	s.router.NoRoute(func(c *gin.Context) {
+		c.File("./frontend/index.html")
+	})
 }
 
 // Start 启动服务器
@@ -191,6 +202,20 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 			"status", c.Writer.Status(),
 			"duration", duration,
 		)
+	}
+}
+
+// corsMiddleware CORS 中间件
+func (s *Server) corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
 	}
 }
 
