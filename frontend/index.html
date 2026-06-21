@@ -83,6 +83,35 @@
         <span class="status-text">连接中...</span>
     </div>
 
+    <!-- ========== 调试面板 ========== -->
+    <div class="debug-panel" id="debugPanel">
+        <button class="debug-toggle" id="debugToggle" title="调试信息">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                <path d="M2 17l10 5 10-5"/>
+                <path d="M2 12l10 5 10-5"/>
+            </svg>
+        </button>
+        <div class="debug-content" id="debugContent">
+            <div class="debug-row">
+                <span class="debug-label">模型</span>
+                <span class="debug-value" id="debugModel">—</span>
+            </div>
+            <div class="debug-row">
+                <span class="debug-label">耗时</span>
+                <span class="debug-value" id="debugLatency">—</span>
+            </div>
+            <div class="debug-row">
+                <span class="debug-label">Token</span>
+                <span class="debug-value" id="debugTokens">—</span>
+            </div>
+            <div class="debug-row">
+                <span class="debug-label">费用</span>
+                <span class="debug-value" id="debugCost">—</span>
+            </div>
+        </div>
+    </div>
+
     <!-- ========== 对话历史侧边栏 ========== -->
     <div class="history-overlay" id="historyOverlay"></div>
     <div class="history-sidebar" id="historySidebar">

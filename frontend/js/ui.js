@@ -265,6 +265,61 @@ const UI = (() => {
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     }
 
+    /**
+     * 更新调试面板
+     * @param {Object} stats - LLM 统计信息
+     * @param {string} stats.model - 模型名称
+     * @param {number} stats.latencyMs - 耗时(毫秒)
+     * @param {number} stats.inputTokens - 输入 token 数
+     * @param {number} stats.outputTokens - 输出 token 数
+     * @param {number} stats.totalTokens - 总 token 数
+     * @param {number} stats.cost - 费用(元)
+     */
+    function updateDebugPanel(stats) {
+        if (!stats) return;
+
+        var modelEl = document.getElementById('debugModel');
+        var latencyEl = document.getElementById('debugLatency');
+        var tokensEl = document.getElementById('debugTokens');
+        var costEl = document.getElementById('debugCost');
+
+        if (modelEl) modelEl.textContent = stats.model || '—';
+        if (latencyEl) latencyEl.textContent = stats.latencyMs ? (stats.latencyMs / 1000).toFixed(1) + 's' : '—';
+        if (tokensEl) {
+            var input = stats.inputTokens || 0;
+            var output = stats.outputTokens || 0;
+            var total = stats.totalTokens || (input + output);
+            tokensEl.textContent = total + ' (输入 ' + input + ' + 输出 ' + output + ')';
+        }
+        if (costEl) costEl.textContent = stats.cost != null ? '¥' + stats.cost.toFixed(3) : '—';
+
+        // 自动展开调试面板
+        var content = document.getElementById('debugContent');
+        var toggle = document.getElementById('debugToggle');
+        if (content && !content.classList.contains('visible')) {
+            content.classList.add('visible');
+            if (toggle) toggle.classList.add('active');
+        }
+    }
+
+    /**
+     * 切换调试面板显示/隐藏
+     */
+    function toggleDebugPanel() {
+        var content = document.getElementById('debugContent');
+        var toggle = document.getElementById('debugToggle');
+        if (!content || !toggle) return;
+
+        var isVisible = content.classList.contains('visible');
+        if (isVisible) {
+            content.classList.remove('visible');
+            toggle.classList.remove('active');
+        } else {
+            content.classList.add('visible');
+            toggle.classList.add('active');
+        }
+    }
+
     // 公共 API
     return {
         init,
@@ -279,5 +334,7 @@ const UI = (() => {
         toggleHistory,
         closeHistory,
         autoResizeInput,
+        updateDebugPanel,
+        toggleDebugPanel,
     };
 })();

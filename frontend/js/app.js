@@ -114,6 +114,11 @@
 
             // 更新气泡显示回复
             UI.updateBubble(reply);
+
+            // 更新调试面板
+            if (payload.stats) {
+                UI.updateDebugPanel(payload.stats);
+            }
         } catch (err) {
             console.error('[App] Failed to handle NPC reply:', err);
         }
@@ -245,6 +250,12 @@
             historyOverlay.addEventListener('click', UI.closeHistory);
         }
 
+        // 调试面板切换
+        const debugToggle = document.getElementById('debugToggle');
+        if (debugToggle) {
+            debugToggle.addEventListener('click', UI.toggleDebugPanel);
+        }
+
         // ESC 关闭历史
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
@@ -255,14 +266,15 @@
         // 点击页面任意位置（除输入框外）聚焦输入框
         document.addEventListener('click', (e) => {
             const target = e.target;
-            // 不响应按钮、链接、输入框、侧边栏的点击
+            // 不响应按钮、链接、输入框、侧边栏、调试面板的点击
             if (
                 target.closest('button') ||
                 target.closest('a') ||
                 target.closest('textarea') ||
                 target.closest('input') ||
                 target.closest('.history-sidebar') ||
-                target.closest('.history-overlay')
+                target.closest('.history-overlay') ||
+                target.closest('.debug-panel')
             ) {
                 return;
             }

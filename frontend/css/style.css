@@ -431,6 +431,93 @@ html, body {
     color: #c99a94;
 }
 
+/* ---------- Debug Panel ---------- */
+.debug-panel {
+    position: fixed;
+    top: 48px;
+    left: 16px;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+}
+
+.debug-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: 1px solid rgba(139, 115, 85, 0.25);
+    background: rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    color: var(--ink-faint);
+    cursor: pointer;
+    transition: all var(--transition-medium);
+}
+
+.debug-toggle:hover {
+    background: rgba(139, 115, 85, 0.2);
+    border-color: var(--bronze);
+    color: var(--bronze-light);
+}
+
+.debug-toggle.active {
+    background: rgba(139, 115, 85, 0.25);
+    border-color: var(--bronze);
+    color: var(--bronze-light);
+}
+
+.debug-content {
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(139, 115, 85, 0.15);
+    min-width: 200px;
+    animation: debugFadeIn 0.2s ease;
+}
+
+.debug-content.visible {
+    display: flex;
+}
+
+@keyframes debugFadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.debug-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.debug-label {
+    font-size: 11px;
+    color: var(--ink-faint);
+    opacity: 0.7;
+    font-family: var(--font-body);
+    letter-spacing: 0.06em;
+    flex-shrink: 0;
+}
+
+.debug-value {
+    font-size: 12px;
+    color: #a0b89a;
+    font-family: 'Menlo', 'Consolas', monospace;
+    letter-spacing: 0.02em;
+    text-align: right;
+}
+
 /* ---------- History Sidebar ---------- */
 .history-overlay {
     position: fixed;
@@ -614,6 +701,16 @@ html, body {
         font-size: 10px;
     }
 
+    .debug-panel {
+        top: 42px;
+        left: 10px;
+    }
+
+    .debug-content {
+        min-width: 170px;
+        padding: 8px 10px;
+    }
+
     .history-sidebar {
         width: 100vw;
     }
@@ -676,6 +773,7 @@ html, body {
     .background-layer,
     .input-area,
     .connection-status,
+    .debug-panel,
     .history-btn,
     .history-overlay,
     .history-sidebar {
