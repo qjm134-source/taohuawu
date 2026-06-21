@@ -13,6 +13,17 @@ import (
 	"github.com/watertown/guide/pkg/utils"
 )
 
+// LLMStats LLM 调用统计信息
+type LLMStats struct {
+	Model        string
+	LatencyMs    int64
+	InputTokens  int
+	OutputTokens int
+	TotalTokens  int
+	Cost         float64
+	CacheHit     bool
+}
+
 // Runtime Agent 运行时
 type Runtime struct {
 	llmAdapter      llm.Adapter
@@ -124,11 +135,14 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 }
 
 // HandleChat 处理聊天
-func (r *Runtime) HandleChat(ctx context.Context, session *Session, message string) (string, string, error) {
+func (r *Runtime) HandleChat(ctx context.Context, session *Session, message string) (string, string, *LLMStats, error) {
 	r.logger.Info("[HandleChat] Start", "sessionId", session.ID, "message", message)
 
 	ctx, cancel := utils.WithTimeoutFrom(ctx, r.config.Timeout)
 	defer cancel()
+
+	// 初始化统计信息
+	stats := &LLMStats{}
 
 	// 检测情绪
 	em := r.emotionDetector.Detect(message)
@@ -140,7 +154,8 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
 		r.logger.Info("[HandleChat] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		session.AddMessage("assistant", cached, emotionStr, nil)
-		return cached, emotionStr, nil
+		stats.CacheHit = true
+		return cached, emotionStr, stats, nil
 	}
 
 	// 获取历史消息
@@ -172,6 +187,7 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 
 	var response *llm.LLMResponse
 	var err error
+	startTime := time.Now()
 
 	// 尝试主 LLM，使用独立超时确保给 fallback 留出时间
 	r.logger.Info("[HandleChat] Checking LLM health", "healthy", r.llmAdapter.IsHealthy())
@@ -195,13 +211,22 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 
 	if err != nil {
 		r.logger.Error("[HandleChat] All LLM calls failed", "error", err)
-		return "", "", fmt.Errorf("failed to get response: %w", err)
+		return "", "", nil, fmt.Errorf("failed to get response: %w", err)
 	}
 
 	r.logger.Info("[HandleChat] LLM response received", "choices_count", len(response.Choices))
 
 	// 提取回复
 	reply := strings.TrimSpace(response.Choices[0].Message.Content)
+
+	// 填充统计信息
+	stats.Model = response.Model
+	stats.LatencyMs = time.Since(startTime).Milliseconds()
+	stats.InputTokens = response.Usage.PromptTokens
+	stats.OutputTokens = response.Usage.CompletionTokens
+	stats.TotalTokens = response.Usage.TotalTokens
+	stats.Cost = cost.CalculateCost(response.Model, response.Usage.PromptTokens, response.Usage.CompletionTokens)
+	stats.CacheHit = false
 
 	// 添加到会话历史
 	session.AddMessage("user", message, emotionStr, nil)
@@ -210,9 +235,9 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	// 缓存回复（使用 session ID 隔离）
 	r.optimizer.SetCache(cacheKey, reply)
 
-	r.logger.Info("[HandleChat] Complete", "reply_length", len(reply))
+	r.logger.Info("[HandleChat] Complete", "reply_length", len(reply), "model", stats.Model, "tokens", stats.TotalTokens, "cost", stats.Cost)
 
-	return reply, emotionStr, nil
+	return reply, emotionStr, stats, nil
 }
 
 // GetSession 获取会话

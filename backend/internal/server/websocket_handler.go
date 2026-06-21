@@ -80,10 +80,13 @@ func (h *WebSocketHandler) handleMessage(client *websocket.Client, message []byt
 
 	switch msg.Type {
 	case websocket.MessageTypeConnection:
+		h.logger.Info("Routing message to connection handler", "type", msg.Type)
 		h.handleConnection(client, &msg)
 	case websocket.MessageTypeChatMessage:
+		h.logger.Info("Routing message to chat handler", "type", msg.Type)
 		h.handleChatMessage(client, &msg)
 	case websocket.MessageTypePing:
+		h.logger.Info("Routing message to ping handler", "type", msg.Type)
 		h.handlePing(client, &msg)
 	default:
 		h.logger.Warn("Unknown message type", "type", msg.Type)
@@ -252,7 +255,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 
 	// 处理聊天
 	h.logger.Info("Calling LLM for chat", "player_id", player.ID, "message", payload.Message)
-	reply, emotion, err := h.runtime.HandleChat(context.Background(), session, payload.Message)
+	reply, emotion, stats, err := h.runtime.HandleChat(context.Background(), session, payload.Message)
 	if err != nil {
 		h.logger.Error("Failed to handle chat", "error", err, "player_id", player.ID)
 
@@ -270,12 +273,12 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		return
 	}
 
-	h.logger.Info("Chat response received", "reply_length", len(reply), "emotion", emotion)
+	h.logger.Info("Chat response received", "reply_length", len(reply), "emotion", emotion, "model", stats.Model, "tokens", stats.TotalTokens)
 
 	// 增加对话计数
 	_ = h.playerRepo.IncrementDialogues(player.ID)
 
-	// 保存对话记录
+	// 保存对话记录（包含 LLM 统计信息）
 	conv := &database.Conversation{
 		ID:          uuid.New().String(),
 		PlayerID:    player.ID,
@@ -284,11 +287,49 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		UserMessage: payload.Message,
 		AIMessage:   reply,
 		Emotion:     emotion,
+		LLMModel:    stats.Model,
+		LLMTokens:   stats.TotalTokens,
+		Cost:        stats.Cost,
+		CacheHit:    stats.CacheHit,
 		CreatedAt:   time.Now(),
 	}
-	_ = h.convRepo.Create(conv)
+	if err := h.convRepo.Create(conv); err != nil {
+		h.logger.Error("Failed to create conversation", "error", err)
+	} else {
+		h.logger.Info("Conversation saved", "convId", conv.ID)
+	}
 
-	// 构建回复消息
+	// 记录审计日志
+	if h.auditRepo == nil {
+		h.logger.Error("auditRepo is nil, cannot create audit log")
+	} else {
+		auditLog := &database.AuditLog{
+			ID:             uuid.New().String(),
+			TenantID:       msg.TenantID,
+			PlayerID:       player.ID,
+			Action:         "chat",
+			RequestPayload: database.JSON{Data: map[string]string{"message": payload.Message}},
+			ResponsePayload: database.JSON{Data: map[string]interface{}{
+				"reply":       reply,
+				"model":       stats.Model,
+				"totalTokens": stats.TotalTokens,
+				"latencyMs":   stats.LatencyMs,
+				"cost":        stats.Cost,
+				"cacheHit":    stats.CacheHit,
+			}},
+			Status:    "success",
+			LatencyMs: int(stats.LatencyMs),
+			CreatedAt: time.Now(),
+		}
+		h.logger.Info("Preparing to save audit log", "auditId", auditLog.ID, "tenantId", auditLog.TenantID, "playerId", auditLog.PlayerID)
+		if err := h.auditRepo.Create(auditLog); err != nil {
+			h.logger.Error("Failed to create audit log", "error", err, "auditId", auditLog.ID)
+		} else {
+			h.logger.Info("Audit log saved successfully", "auditId", auditLog.ID, "tenantId", auditLog.TenantID)
+		}
+	}
+
+	// 构建回复消息（包含 LLM 统计信息）
 	replyMsg, _ := websocket.NewMessage(
 		websocket.MessageTypeNPCReply,
 		msg.RequestID,
@@ -298,6 +339,15 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 			Message:   reply,
 			Emotion:   emotion,
 			Actions:   []string{},
+			Stats: &websocket.LLMStats{
+				Model:        stats.Model,
+				LatencyMs:    stats.LatencyMs,
+				InputTokens:  stats.InputTokens,
+				OutputTokens: stats.OutputTokens,
+				TotalTokens:  stats.TotalTokens,
+				Cost:         stats.Cost,
+				CacheHit:     stats.CacheHit,
+			},
 		},
 	)
 

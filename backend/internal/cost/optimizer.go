@@ -7,6 +7,41 @@ import (
 	"time"
 )
 
+// 模型定价（每 1K tokens，单位：美元）
+var modelPricing = map[string]struct {
+	Input  float64
+	Output float64
+}{
+	"deepseek-chat":            {Input: 0.0001, Output: 0.0002},  // DeepSeek
+	"deepseek-reasoner":        {Input: 0.00055, Output: 0.00219},
+	"gpt-4o":                   {Input: 0.0025, Output: 0.01},    // OpenAI
+	"gpt-4o-mini":              {Input: 0.00015, Output: 0.0006},
+	"gpt-3.5-turbo":            {Input: 0.0005, Output: 0.0015},
+	"claude-3-5-sonnet":        {Input: 0.003, Output: 0.015},    // Anthropic
+	"claude-3-haiku":           {Input: 0.00025, Output: 0.00125},
+	"qwen-turbo":               {Input: 0.0002, Output: 0.0006},  // 阿里云
+	"qwen-plus":                {Input: 0.0004, Output: 0.0012},
+	"qwen-max":                 {Input: 0.002, Output: 0.006},
+	"doubao-pro-32k":           {Input: 0.0008, Output: 0.005},   // 字节跳动
+	"doubao-pro-128k":          {Input: 0.005, Output: 0.009},
+	"glm-4":                    {Input: 0.01, Output: 0.01},      // 智谱
+	"glm-4-flash":              {Input: 0.0001, Output: 0.0001},
+}
+
+// CalculateCost 计算 LLM 调用成本
+func CalculateCost(model string, inputTokens, outputTokens int) float64 {
+	pricing, ok := modelPricing[model]
+	if !ok {
+		// 默认使用较低的价格估算
+		pricing = modelPricing["gpt-3.5-turbo"]
+	}
+
+	inputCost := float64(inputTokens) / 1000 * pricing.Input
+	outputCost := float64(outputTokens) / 1000 * pricing.Output
+
+	return inputCost + outputCost
+}
+
 // Optimizer 成本优化器
 type Optimizer struct {
 	cache        *Cache

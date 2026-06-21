@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -23,7 +24,35 @@ func NewAuditRepository(db *gorm.DB) AuditRepository {
 }
 
 func (r *auditRepository) Create(log *AuditLog) error {
-	return r.db.Create(log).Error
+	if r.db == nil {
+		return fmt.Errorf("database connection is nil")
+	}
+
+	// 检查日志数据
+	if log.ID == "" {
+		return fmt.Errorf("audit log ID is empty")
+	}
+	if log.TenantID == "" {
+		return fmt.Errorf("audit log TenantID is empty")
+	}
+	if log.Action == "" {
+		return fmt.Errorf("audit log Action is empty")
+	}
+	if log.Status == "" {
+		return fmt.Errorf("audit log Status is empty")
+	}
+
+	result := r.db.Create(log)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create audit log: %w", result.Error)
+	}
+
+	// 检查是否真的写入了
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("expected 1 row affected, got %d", result.RowsAffected)
+	}
+
+	return nil
 }
 
 func (r *auditRepository) GetByTenantID(tenantID string, startDate, endDate time.Time, page, pageSize int) ([]*AuditLog, int64, error) {

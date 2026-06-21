@@ -54,10 +54,22 @@ type WelcomePayload struct {
 
 // NPCReplyPayload NPC回复负载
 type NPCReplyPayload struct {
-	GuideName string   `json:"guideName"`
-	Message   string   `json:"message"`
-	Emotion   string   `json:"emotion"`
-	Actions   []string `json:"actions"`
+	GuideName string     `json:"guideName"`
+	Message   string     `json:"message"`
+	Emotion   string     `json:"emotion"`
+	Actions   []string   `json:"actions"`
+	Stats     *LLMStats  `json:"stats,omitempty"`
+}
+
+// LLMStats LLM 调用统计信息
+type LLMStats struct {
+	Model        string  `json:"model"`
+	LatencyMs    int64   `json:"latencyMs"`
+	InputTokens  int     `json:"inputTokens"`
+	OutputTokens int     `json:"outputTokens"`
+	TotalTokens  int     `json:"totalTokens"`
+	Cost         float64 `json:"cost"`
+	CacheHit     bool    `json:"cacheHit"`
 }
 
 // ErrorPayload 错误消息负载
