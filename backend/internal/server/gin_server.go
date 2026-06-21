@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/watertown/guide/internal/agent"
+	"github.com/watertown/guide/internal/agent/tools"
 	"github.com/watertown/guide/internal/config"
 	"github.com/watertown/guide/internal/cost"
 	"github.com/watertown/guide/internal/database"
@@ -273,12 +274,12 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 	fallbackAdapter := llm.NewFallbackAdapter()
 
 	// 创建工具注册表
-	var toolRegistry *agent.ToolRegistry
+	var toolRegistry *tools.ToolRegistry
 	if knowledgeBase != nil {
-		toolRegistry = agent.NewToolRegistry(knowledgeBase)
+		toolRegistry = tools.NewToolRegistry(knowledgeBase)
 	} else {
 		s.logger.Warn("KnowledgeBase is nil, creating empty tool registry")
-		toolRegistry = agent.NewToolRegistry(nil)
+		toolRegistry = tools.NewToolRegistry(nil)
 	}
 
 	// 创建成本优化器

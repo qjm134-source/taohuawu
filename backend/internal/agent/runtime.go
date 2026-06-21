@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/watertown/guide/internal/agent/tools"
 	"github.com/watertown/guide/internal/cost"
 	"github.com/watertown/guide/internal/emotion"
 	"github.com/watertown/guide/internal/llm"
@@ -28,7 +30,7 @@ type LLMStats struct {
 type Runtime struct {
 	llmAdapter      llm.Adapter
 	fallbackAdapter llm.Adapter
-	toolRegistry    *ToolRegistry
+	toolRegistry    *tools.ToolRegistry
 	sessionManager  *SessionManager
 	optimizer       *cost.Optimizer
 	emotionDetector emotion.Detector
@@ -47,7 +49,7 @@ type Config struct {
 // NewRuntime 创建运行时
 func NewRuntime(
 	llmAdapter, fallbackAdapter llm.Adapter,
-	toolRegistry *ToolRegistry,
+	toolRegistry *tools.ToolRegistry,
 	sessionManager *SessionManager,
 	optimizer *cost.Optimizer,
 	emotionDetector emotion.Detector,
@@ -176,13 +178,17 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		Content: message,
 	})
 
-	r.logger.Info("[HandleChat] Building LLM request", "message_count", len(messages))
+	// 把工具注册表中的工具注册给 LLM
+	tools := tools.ConvertAllTools(r.toolRegistry)
+
+	r.logger.Info("[HandleChat] Building LLM request", "message_count", len(messages), "tools_count", len(tools))
 
 	req := &llm.LLMRequest{
 		Messages:    messages,
 		Model:       "", // 留空，让路由根据策略自动选择模型
 		Temperature: 0.7,
 		MaxTokens:   300,
+		Tools:       tools,
 	}
 
 	var response *llm.LLMResponse
@@ -214,6 +220,16 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		return "", "", nil, fmt.Errorf("failed to get response: %w", err)
 	}
 
+	// 如果 LLM 要求调用工具，执行工具并再次请求
+	if response.HasToolCalls() {
+		r.logger.Info("[HandleChat] LLM requested tool calls", "count", len(response.GetToolCalls()))
+		response, err = r.handleToolCalls(ctx, response, messages, tools, stats)
+		if err != nil {
+			r.logger.Error("[HandleChat] Tool call handling failed", "error", err)
+			return "", "", nil, fmt.Errorf("failed to handle tool calls: %w", err)
+		}
+	}
+
 	r.logger.Info("[HandleChat] LLM response received", "choices_count", len(response.Choices))
 
 	// 提取回复
@@ -238,6 +254,74 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	r.logger.Info("[HandleChat] Complete", "reply_length", len(reply), "model", stats.Model, "tokens", stats.TotalTokens, "cost", stats.Cost)
 
 	return reply, emotionStr, stats, nil
+}
+
+// handleToolCalls 执行 LLM 请求的工具调用，并将结果再次提交给 LLM 生成最终回复。
+func (r *Runtime) handleToolCalls(
+	ctx context.Context,
+	firstResponse *llm.LLMResponse,
+	messages []llm.Message,
+	tools []llm.LLMTool,
+	stats *LLMStats,
+) (*llm.LLMResponse, error) {
+	// 把 assistant 的工具调用请求加入对话历史
+	assistantMsg := llm.Message{
+		Role:      "assistant",
+		Content:   firstResponse.Choices[0].Message.Content,
+		ToolCalls: firstResponse.GetToolCalls(),
+	}
+	messages = append(messages, assistantMsg)
+
+	// 执行每个工具调用
+	for _, tc := range firstResponse.GetToolCalls() {
+		if tc.Type != "function" && tc.Type != "" {
+			r.logger.Warn("[HandleChat] Unsupported tool call type", "type", tc.Type)
+			continue
+		}
+
+		var args map[string]interface{}
+		if tc.Function.Arguments != "" {
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				r.logger.Error("[HandleChat] Failed to parse tool arguments", "error", err, "arguments", tc.Function.Arguments)
+				args = map[string]interface{}{}
+			}
+		}
+
+		r.logger.Info("[HandleChat] Executing tool", "name", tc.Function.Name, "args", args)
+		result, err := r.toolRegistry.Execute(ctx, tc.Function.Name, args)
+		if err != nil {
+			r.logger.Error("[HandleChat] Tool execution failed", "name", tc.Function.Name, "error", err)
+			result = map[string]interface{}{"error": err.Error()}
+		}
+
+		resultJSON, _ := json.Marshal(result)
+		messages = append(messages, llm.Message{
+			Role:       "tool",
+			Content:    string(resultJSON),
+			ToolCallID: tc.ID,
+		})
+	}
+
+	// 再次请求 LLM，让模型基于工具结果生成回复
+	req := &llm.LLMRequest{
+		Messages:    messages,
+		Model:       "",
+		Temperature: 0.7,
+		MaxTokens:   300,
+		Tools:       tools,
+	}
+
+	r.logger.Info("[HandleChat] Calling LLM after tool execution")
+	llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
+	defer llmCancel()
+
+	response, err := r.llmAdapter.Chat(llmCtx, req)
+	if err != nil {
+		r.logger.Error("[HandleChat] LLM after tool calls failed", "error", err)
+		return nil, err
+	}
+
+	return response, nil
 }
 
 // GetSession 获取会话

@@ -39,13 +39,15 @@ func (a *FallbackAdapter) Chat(ctx context.Context, req *LLMRequest) (*LLMRespon
 
 	return &LLMResponse{
 		Choices: []struct {
-			Message Message `json:"message"`
+			Message      Message `json:"message"`
+			FinishReason string  `json:"finish_reason"`
 		}{
 			{
 				Message: Message{
 					Role:    "assistant",
 					Content: response,
 				},
+				FinishReason: "stop",
 			},
 		},
 		Usage: struct {

@@ -13,6 +13,7 @@ const (
 2. 回答玩家关于游戏玩法、操作、任务等问题
 3. 记住玩家的名字和之前对话的内容
 4. 根据玩家的情绪调整回复的语气
+5. 当玩家询问某个城市的天气时，你可以调用 get_weather 工具。如果玩家未指定城市或询问水乡/当地天气，默认查询杭州。
 
 江南水乡背景：
 这里是典型的江南古镇，有小桥流水、乌篷船、青石板路。白墙黛瓦的民居错落有致，天空湛蓝，白云悠悠。望月桥下流水潺潺，桥上人来人往。
@@ -52,7 +53,7 @@ const (
 
 // BuildWelcomePrompt 构建欢迎提示
 func BuildWelcomePrompt(nickname string) string {
-	return fmt.Sprintf(WelcomePrompt + "%s", nickname)
+	return fmt.Sprintf(WelcomePrompt+"%s", nickname)
 }
 
 // BuildChatPrompt 构建聊天提示
@@ -66,7 +67,7 @@ func BuildChatPrompt(nickname, emotion, message string, history []Message) strin
 		historyStr += fmt.Sprintf("%s: %s\n", role, msg.Content)
 	}
 
-	return fmt.Sprintf(ChatPrompt + "%s %s\n%s %s", nickname, emotion, historyStr, message)
+	return fmt.Sprintf(ChatPrompt+"%s %s\n%s %s", nickname, emotion, historyStr, message)
 }
 
 // GetEmotionAdjust 获取情绪调整提示

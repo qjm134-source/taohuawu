@@ -58,6 +58,7 @@
 | **多模型智能路由** | 6 种路由策略（Fixed / Cost / Latency / Capability / Fallback / Weighted），支持自动降级 |
 | **EMA 运行时统计** | 指数移动平均跟踪模型延迟与错误率，动态优化路由决策 |
 | **任务分类器** | 根据消息内容自动识别 Code / Reasoning / Chinese / LongText / General 任务类型 |
+| **实时工具调用** | 支持 Function Calling，例如询问天气时自动调用 `get_weather` 工具 |
 | **成本优化** | 相似问题缓存、历史消息摘要、Token 估算、成本计算 |
 | **企业级可用性** | 熔断器 + 多模型降级链 + 自动重试 + FallbackAdapter 兜底 |
 | **可观测性** | Prometheus 指标 + OpenTelemetry 分布式追踪 + 审计日志 |
@@ -323,7 +324,6 @@ npm run dev
 
 ### 你可以重点讲这些技术点
 
-
 1. **多模型路由架构**
    - 为什么要做路由层？解耦应用层和具体模型。
    - 6 种策略分别解决了什么问题？成本、延迟、可用性、A/B 测试。
@@ -338,22 +338,29 @@ npm run dev
    - 优先级：Code > Reasoning > Chinese > LongText > General
    - 让不同模型各司其职，例如 Claude 处理代码、OpenAI 处理中文对话。
 
-4. **成本优化**
+4. **Function Calling 工具调用 + Agent 设计模式**
+   - 以天气查询为例，演示 LLM 如何自动决策并调用外部 API。
+   - 工具注册表（Registry）集中管理工具，策略模式（Strategy）让不同工具实现统一接口。
+   - 适配器模式（Adapter）通过 `llm.Adapter` 统一接入 Claude / OpenAI / Fallback。
+   - 依赖注入（DI）让 `Runtime` 依赖通过构造函数传入，便于测试和替换。
+   - ReAct 循环：LLM 决策 → 工具执行 → 结果回传 → 生成最终回复。
+
+5. **成本优化**
    - 相似问题缓存：命中缓存直接返回，减少 API 调用。
    - 历史消息摘要：长对话超过阈值后自动摘要，减少 token 消耗。
    - Token 估算：每 4 字符约 1 token，中文按字节估算，无需调用即可估算成本。
 
-5. **高可用设计**
+6. **高可用设计**
    - 熔断器：连续失败达到一定阈值后快速失败，半开恢复。
    - 多模型降级：单模型故障不影响服务。
    - FallbackAdapter：所有模型失败时返回预设兜底回复。
 
-6. **可观测性**
+7. **可观测性**
    - Prometheus 指标暴露 `/metrics`。
    - OpenTelemetry 分布式追踪接入。
    - 审计日志支持多租户查询。
 
-7. **前端游戏化交互**
+8. **前端游戏化交互**
    - Phaser 3 2D 场景 + 像素风。
    - WebSocket 实时通信 + 自动重连 + 心跳保活。
    - 打字机效果、情绪状态展示提升沉浸感。

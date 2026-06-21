@@ -1,4 +1,4 @@
-package agent
+package tools
 
 import (
 	"context"
@@ -6,92 +6,7 @@ import (
 	"time"
 
 	"github.com/watertown/guide/internal/knowledge"
-	"github.com/watertown/guide/pkg/utils"
 )
-
-// Tool 工具接口
-type Tool interface {
-	Name() string
-	Description() string
-	Execute(ctx context.Context, params map[string]interface{}) (interface{}, error)
-	Timeout() time.Duration
-}
-
-// ToolRegistry 工具注册表
-type ToolRegistry struct {
-	tools map[string]Tool
-}
-
-// NewToolRegistry 创建工具注册表
-func NewToolRegistry(kb *knowledge.KnowledgeBase) *ToolRegistry {
-	registry := &ToolRegistry{
-		tools: make(map[string]Tool),
-	}
-
-	// 注册内置工具
-	registry.Register(&GetPlayerInfoTool{})
-	registry.Register(&GetGameGuideTool{KB: kb})
-	registry.Register(&GetQuestInfoTool{KB: kb})
-	registry.Register(&GetScenarioInfoTool{KB: kb})
-
-	return registry
-}
-
-// Register 注册工具
-func (r *ToolRegistry) Register(tool Tool) {
-	r.tools[tool.Name()] = tool
-}
-
-// Get 获取工具
-func (r *ToolRegistry) Get(name string) (Tool, bool) {
-	tool, ok := r.tools[name]
-	return tool, ok
-}
-
-// List 列出所有工具
-func (r *ToolRegistry) List() []Tool {
-	result := make([]Tool, 0, len(r.tools))
-	for _, tool := range r.tools {
-		result = append(result, tool)
-	}
-	return result
-}
-
-// Execute 执行工具
-func (r *ToolRegistry) Execute(ctx context.Context, name string, params map[string]interface{}) (interface{}, error) {
-	tool, ok := r.Get(name)
-	if !ok {
-		return nil, fmt.Errorf("tool not found: %s", name)
-	}
-
-	ctx, cancel := utils.WithTimeoutFrom(ctx, tool.Timeout())
-	defer cancel()
-
-	select {
-	case result := <-r.executeAsync(ctx, tool, params):
-		return result.result, result.err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("tool execution timeout")
-	}
-}
-
-type toolResult struct {
-	result interface{}
-	err    error
-}
-
-func (r *ToolRegistry) executeAsync(ctx context.Context, tool Tool, params map[string]interface{}) chan toolResult {
-	resultCh := make(chan toolResult, 1)
-
-	go func() {
-		result, err := tool.Execute(ctx, params)
-		resultCh <- toolResult{result: result, err: err}
-	}()
-
-	return resultCh
-}
-
-// ===================== 工具实现 =====================
 
 // GetPlayerInfoTool 获取玩家信息
 type GetPlayerInfoTool struct{}
@@ -216,7 +131,7 @@ func (t *GetScenarioInfoTool) Execute(ctx context.Context, params map[string]int
 	return map[string]interface{}{
 		"background": desc.Background,
 		"npc": map[string]interface{}{
-			"name": desc.NPC.Name,
+			"name":        desc.NPC.Name,
 			"description": desc.NPC.Description,
 		},
 	}, nil

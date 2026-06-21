@@ -111,6 +111,59 @@ sequenceDiagram
     WS->>C: WebSocket 推送
 ```
 
+## Agent 设计模式
+
+### 1. 策略模式（Strategy Pattern）
+
+`tools.Tool` 接口统一所有可调用工具的契约。天气查询、玩家信息、游戏指南等具体工具实现同一接口，`Runtime` 运行时只依赖接口，不依赖实现，便于扩展和替换。
+
+```go
+type Tool interface {
+    Name() string
+    Description() string
+    Execute(ctx context.Context, params map[string]interface{}) (interface{}, error)
+    Timeout() time.Duration
+}
+```
+
+### 2. 注册表模式（Registry Pattern）
+
+`ToolRegistry` 集中管理所有工具，按名称注册和查找。新增工具只需实现 `Tool` 接口并在 `NewToolRegistry` 中注册，无需改动 `Runtime` 调用逻辑。
+
+### 3. 适配器模式（Adapter Pattern）
+
+`Runtime` 通过 `llm.Adapter` 接口调用大模型，通过 `llm.Adapter` 兜底适配器处理失败场景。底层可以对接 Claude、OpenAI 或 Fallback，上层代码无需感知具体 Provider。
+
+### 4. 依赖注入（Dependency Injection）
+
+`Runtime` 的所有依赖（LLM 适配器、工具注册表、会话管理器、成本优化器、情绪检测器）都通过 `NewRuntime` 构造函数注入，方便单元测试、Mock 和替换实现。
+
+### 5. ReAct / 工具调用循环（Agent Loop）
+
+`HandleChat` 实现了典型的 ReAct 流程：
+
+1. **Reason**：把工具列表随对话上下文一起发送给 LLM，让模型判断是否需要调用工具
+2. **Act**：LLM 返回 `tool_calls` 时，`Runtime` 从 `ToolRegistry` 查找并执行对应工具
+3. **Observe**：将工具执行结果以 `tool` 角色消息回传给 LLM
+4. **Respond**：LLM 综合工具结果生成最终自然语言回复
+
+```mermaid
+sequenceDiagram
+    participant RT as Agent Runtime
+    participant LLM as LLM Adapter
+    participant TR as ToolRegistry
+    participant T as Tool
+
+    RT->>LLM: 发送消息 + 可用工具列表
+    LLM-->>RT: 返回 tool_calls
+    RT->>TR: Execute(name, args)
+    TR->>T: 执行具体工具
+    T-->>TR: 返回结果
+    TR-->>RT: 返回结果
+    RT->>LLM: 再次请求，附带 tool 结果
+    LLM-->>RT: 返回最终回复
+```
+
 ## 架构设计亮点
 
 ### 1. 多模型路由为什么是自研？

@@ -53,8 +53,10 @@ func (a *RouterAdapter) convertRequest(req *LLMRequest) *model.ChatRequest {
 	messages := make([]model.Message, 0, len(req.Messages))
 	for _, msg := range req.Messages {
 		messages = append(messages, model.Message{
-			Role:    model.Role(msg.Role),
-			Content: msg.Content,
+			Role:       model.Role(msg.Role),
+			Content:    msg.Content,
+			ToolCallID: msg.ToolCallID,
+			ToolCalls:  a.convertToolCallsToModel(msg.ToolCalls),
 		})
 	}
 
@@ -63,23 +65,82 @@ func (a *RouterAdapter) convertRequest(req *LLMRequest) *model.ChatRequest {
 		Messages:    messages,
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
+		Tools:       a.convertToolsToModel(req.Tools),
 	}
+}
+
+func (a *RouterAdapter) convertToolCallsToModel(calls []ToolCall) []model.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]model.ToolCall, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, model.ToolCall{
+			ID:   c.ID,
+			Type: c.Type,
+			Function: model.FunctionCall{
+				Name:      c.Function.Name,
+				Arguments: c.Function.Arguments,
+			},
+		})
+	}
+	return out
+}
+
+func (a *RouterAdapter) convertToolsToModel(tools []LLMTool) []model.Tool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]model.Tool, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, model.Tool{
+			Type: t.Type,
+			Function: model.FunctionDef{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				Parameters:  t.Function.Parameters,
+			},
+		})
+	}
+	return out
+}
+
+func (a *RouterAdapter) convertToolCallsFromModel(calls []model.ToolCall) []ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, ToolCall{
+			ID:   c.ID,
+			Type: c.Type,
+			Function: ToolCallFunction{
+				Name:      c.Function.Name,
+				Arguments: c.Function.Arguments,
+			},
+		})
+	}
+	return out
 }
 
 // convertResponse 将 model.ChatResponse 转换为 LLMResponse。
 func (a *RouterAdapter) convertResponse(resp *model.ChatResponse) *LLMResponse {
 	choices := make([]struct {
-		Message Message `json:"message"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
 	}, 0, len(resp.Choices))
 
 	for _, c := range resp.Choices {
 		choices = append(choices, struct {
-			Message Message `json:"message"`
+			Message      Message `json:"message"`
+			FinishReason string  `json:"finish_reason"`
 		}{
 			Message: Message{
-				Role:    string(c.Message.Role),
-				Content: c.Message.Content,
+				Role:      string(c.Message.Role),
+				Content:   c.Message.Content,
+				ToolCalls: a.convertToolCallsFromModel(c.Message.ToolCalls),
 			},
+			FinishReason: c.FinishReason,
 		})
 	}
 
