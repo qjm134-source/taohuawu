@@ -162,13 +162,12 @@ func (d timeDuration) MarshalYAML() (interface{}, error) {
 
 // Load 加载配置
 func Load() (*Config, error) {
-	// 加载 .env 文件
-	err := godotenv.Load()
-	if err != nil {
-		return nil, fmt.Errorf("failed to load .env: %w", err)
-	}
+	// 加载 .env 文件（如果存在），Render 等环境通过环境变量直接注入
+	_ = godotenv.Load()
 
 	cfg := &Config{}
+
+
 
 	// 从 YAML 文件加载基础配置
 	configFile := os.Getenv("CONFIG_FILE")

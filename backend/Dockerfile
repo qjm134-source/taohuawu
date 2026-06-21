@@ -1,5 +1,5 @@
 # 构建阶段
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
@@ -21,12 +21,15 @@ FROM alpine:latest
 
 RUN apk --no-cache add ca-certificates
 
-WORKDIR /root/
+WORKDIR /app
 
-# 复制二进制文件
+# 复制二进制文件、数据和配置
 COPY --from=builder /app/server .
 COPY --from=builder /app/data ./data
 COPY --from=builder /app/configs ./configs
+
+# 创建日志目录
+RUN mkdir -p /app/logs
 
 # 暴露端口
 EXPOSE 8080

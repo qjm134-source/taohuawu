@@ -16,12 +16,28 @@ const NPC_CONFIG = {
     },
 };
 
-// WebSocket 配置
+// WebSocket 配置（支持本地开发和 Render 部署）
+const getWebSocketUrl = () => {
+    const backendUrl = window.BACKEND_URL || window.location.hostname;
+    const isProduction = window.location.hostname.includes('.onrender.com');
+
+    if (isProduction) {
+        const wsHost = backendUrl.includes('://')
+            ? backendUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+            : backendUrl;
+        return `wss://${wsHost}/ws/game`;
+    }
+
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${window.location.hostname}:8080/ws/game`;
+};
+
 const WS_CONFIG = {
-    url: `ws://${window.location.hostname}:8080/ws/game`,
+    url: getWebSocketUrl(),
     reconnectInterval: 3000,
     pingInterval: 30000,
 };
+
 
 // 消息类型
 const MESSAGE_TYPES = {

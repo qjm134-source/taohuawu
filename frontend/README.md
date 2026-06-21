@@ -109,6 +109,70 @@ NPC 导游实体，包含：
 - **半透明 UI**：现代化的对话框设计
 - **打字机效果**：逐字显示对话内容
 
+## 前端游戏流程图
+
+```mermaid
+sequenceDiagram
+    participant P as 玩家
+    participant Scene as WaterTownScene
+    participant NPC as NPCGuide
+    participant Input as InputBox
+    participant WS as WebSocketClient
+    participant Backend as 后端
+
+    P->>Scene: 点击 NPC 或输入区域
+    Scene->>Input: 激活输入框
+    P->>Input: 输入问题
+    Input->>WS: 发送消息
+    WS->>Backend: WebSocket 推送
+    Backend-->>WS: 返回回复
+    WS->>Scene: 触发 MESSAGE 事件
+    Scene->>NPC: 更新情绪 / 动作
+    Scene->>Dialog: 显示对话框
+    Dialog->>Typewriter: 启动打字机
+    Typewriter->>P: 逐字展示回复
+```
+
+## 前端技术亮点
+
+### 1. 为什么选择 Phaser 3？
+
+- 专门的 2D 游戏引擎，内置场景、动画、碰撞、输入处理。
+- 原生 JavaScript 即可使用，无需复杂前端框架。
+- 适合像素风、轻量级游戏场景。
+
+### 2. WebSocket 客户端如何保障稳定性？
+
+| 机制 | 作用 |
+|------|------|
+| 自动重连 | 断线后按指数退避重试 |
+| 心跳保活 | 定时发送 Ping，防止中间件断开连接 |
+| 消息队列 | 断线时缓存消息，恢复后批量发送 |
+| 玩家 ID 同步 | 重连后恢复会话状态 |
+
+### 3. 打字机效果如何提升用户体验？
+
+- 将 NPC 回复逐字显示，模拟真实对话节奏。
+- 支持多行文本自动换行、情绪状态展示。
+- 增强游戏沉浸感和"小荷"角色生命力。
+
+### 4. 前后端交互协议设计
+
+```json
+{
+  "type": "CHAT",
+  "requestId": "req_001",
+  "tenantId": "tenant_001",
+  "timestamp": 1718457600000,
+  "payload": { "content": "苏州有什么好玩的？" }
+}
+```
+
+- `type`：消息类型，便于前端路由处理。
+- `requestId`：用于请求追踪和日志串联。
+- `tenantId`：支持多租户隔离。
+- `payload`：业务数据，结构灵活。
+
 ## Docker 运行
 
 ```bash

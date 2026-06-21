@@ -84,6 +84,72 @@ backend/
    └─────────────────┘  └─────────────────┘
 ```
 
+## 后端请求处理流程
+
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant WS as WebSocket Handler
+    participant SM as Session Manager
+    participant RT as Agent Runtime
+    participant ED as 情绪检测
+    participant KB as 知识库
+    participant LLM as LLM Router
+    participant DB as MySQL
+
+    C->>WS: WebSocket 消息
+    WS->>WS: 解析 / 校验 / 路由
+    WS->>SM: 获取会话
+    WS->>RT: 执行对话
+    RT->>ED: 检测情绪
+    RT->>KB: 检索知识 / 工具
+    RT->>LLM: 发送统一 ChatRequest
+    LLM->>LLM: 策略选择 + Provider 选择
+    LLM-->>RT: 返回 ChatResponse
+    RT->>DB: 持久化对话
+    RT-->>WS: 返回回复
+    WS->>C: WebSocket 推送
+```
+
+## 架构设计亮点
+
+### 1. 多模型路由为什么是自研？
+
+- **解耦**：应用层通过 `llm.Adapter` 接口调用，不感知具体模型。
+- **灵活**：6 种策略可随时切换，无需改动业务代码。
+- **可观测**：集中收集延迟、错误率、成本等指标。
+- **轻量**：仅依赖 `anthropic-sdk-go` 和 `go-openai` 两个 SDK，避免 LangChain 的过度抽象。
+
+### 2. EMA 算法在路由中的作用
+
+```
+newEMA = 0.3 × currentSample + 0.7 × previousEMA
+Score  = Latency + ErrorRate × 10000
+```
+
+- 30% 新数据权重保证快速响应模型状态变化。
+- 70% 历史权重保证不会因为一次抖动就改变决策。
+- 错误率放大 10000 倍，确保高错误模型被快速降级。
+
+### 3. 降级链设计如何保证高可用？
+
+```
+主模型（Claude Sonnet） → 通用备选（OpenAI GPT-4o） → 低成本兜底（Haiku / GPT-4o-mini）
+```
+
+- 可用性优先于成本：请求失败比使用更贵的模型更糟糕。
+- 熔断器保护：连续失败达到阈值后快速失败，半开恢复。
+- 兜底回复：所有模型都失败时返回预设回复，避免服务空转。
+
+### 4. 成本控制手段
+
+| 手段 | 说明 |
+|------|------|
+| 相似问题缓存 | 命中缓存直接返回，减少 API 调用 |
+| 历史消息摘要 | 长对话自动压缩，减少 token 消耗 |
+| Token 估算 | 本地估算，无需调用即可预估成本 |
+| Cost 策略 | 自动选择单价最低的模型 |
+
 ## 快速开始
 
 ### 环境要求

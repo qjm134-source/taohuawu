@@ -111,7 +111,7 @@ multiRouter.SetFallbackChain([]string{
 })
 ```
 
-**面试亮点**：降级链容忍更高错误率，确保可用性优先于成本。
+**设计亮点**：降级链容忍更高错误率，确保可用性优先于成本。
 
 ### 3. 基于成本的路由
 
@@ -134,7 +134,7 @@ multiRouter.SetStrategy(router.StrategyLatency)
 // 公式：newEMA = 0.3 * currentSample + 0.7 * previousEMA
 ```
 
-**面试亮点**：EMA 算法平衡了对新数据的响应速度和稳定性。
+**设计亮点**：EMA 算法平衡了对新数据的响应速度和稳定性。
 
 ### 5. 基于任务类型的路由
 
@@ -293,7 +293,7 @@ if err != nil {
 }
 ```
 
-## 面试亮点总结
+## 设计亮点总结
 
 ### 1. EMA（指数移动平均）算法
 ```go
