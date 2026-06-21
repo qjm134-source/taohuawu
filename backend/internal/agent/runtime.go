@@ -24,6 +24,7 @@ type LLMStats struct {
 	TotalTokens  int
 	Cost         float64
 	CacheHit     bool
+	ToolsUsed    []string // 本次对话调用的工具名称列表
 }
 
 // Runtime Agent 运行时
@@ -286,6 +287,9 @@ func (r *Runtime) handleToolCalls(
 				args = map[string]interface{}{}
 			}
 		}
+
+		// 记录本次调用了哪些工具
+		stats.ToolsUsed = append(stats.ToolsUsed, tc.Function.Name)
 
 		r.logger.Info("[HandleChat] Executing tool", "name", tc.Function.Name, "args", args)
 		result, err := r.toolRegistry.Execute(ctx, tc.Function.Name, args)

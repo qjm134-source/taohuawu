@@ -278,7 +278,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 	// 增加对话计数
 	_ = h.playerRepo.IncrementDialogues(player.ID)
 
-	// 保存对话记录（包含 LLM 统计信息）
+	// 保存对话记录（包含 LLM 统计信息和工具使用记录）
 	conv := &database.Conversation{
 		ID:          uuid.New().String(),
 		PlayerID:    player.ID,
@@ -287,6 +287,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		UserMessage: payload.Message,
 		AIMessage:   reply,
 		Emotion:     emotion,
+		ToolsUsed:   database.JSON{Data: stats.ToolsUsed},
 		LLMModel:    stats.Model,
 		LLMTokens:   stats.TotalTokens,
 		Cost:        stats.Cost,
