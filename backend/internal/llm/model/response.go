@@ -27,6 +27,9 @@ type ChatResponse struct {
 
 // StreamChunk 表示 SSE 流式输出中的单个数据块。
 type StreamChunk struct {
+	// Model 是生成该响应的模型名称。
+	Model string `json:"model"`
+
 	// Index 是该 chunk 在流中的序号，从 0 开始。
 	Index int
 

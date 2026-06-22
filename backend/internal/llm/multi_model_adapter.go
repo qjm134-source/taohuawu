@@ -41,6 +41,40 @@ func (a *RouterAdapter) Chat(ctx context.Context, req *LLMRequest) (*LLMResponse
 	return a.convertResponse(modelResp), nil
 }
 
+// StreamChat 发起一次流式聊天请求，通过 Router 选择合适的 provider。
+func (a *RouterAdapter) StreamChat(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error) {
+	// 转换请求格式
+	modelReq := a.convertRequest(req)
+
+	// 通过路由选择 provider 并执行流式请求
+	modelStream, err := a.router.RouteRequestStream(ctx, modelReq)
+	if err != nil {
+		return nil, err
+	}
+
+	// 创建输出 channel
+	out := make(chan StreamChunk)
+
+	go func() {
+		defer close(out)
+
+		for chunk := range modelStream {
+			streamChunk := StreamChunk{
+				Content:      chunk.Content,
+				FinishReason: chunk.FinishReason,
+				Model:        chunk.Model,
+			}
+			out <- streamChunk
+
+			if chunk.Done || chunk.FinishReason != "" {
+				return
+			}
+		}
+	}()
+
+	return out, nil
+}
+
 // IsHealthy 检查路由器是否健康（至少有一个 provider 可用）。
 func (a *RouterAdapter) IsHealthy() bool {
 	// 简化实现：检查默认 provider 是否可用
@@ -279,7 +313,14 @@ func initializeOpenAIProvider(cfg ProviderConfig) (model.Provider, error) {
 // 降级链按配置顺序排列，优先使用排在前面的模型。
 func NewRouterFromConfig(cfg config.LLMConfig, logger logging.Logger) Adapter {
 	r := router.NewRouter(logger)
-	r.SetStrategy(router.StrategyFallback)
+
+	// 设置路由策略
+	strategy := parseStrategy(cfg.Strategy)
+	r.SetStrategy(strategy)
+	logger.Info("Router strategy set", "strategy", strategy)
+
+	// 设置能力映射（用于 Capability 策略）
+	initializeCapabilityMap(r, logger)
 
 	var fallbackChain []string
 
@@ -337,6 +378,56 @@ func NewRouterFromConfig(cfg config.LLMConfig, logger logging.Logger) Adapter {
 	}
 
 	return NewRouterAdapter(r)
+}
+
+// parseStrategy 解析策略配置字符串。
+func parseStrategy(strategy string) router.Strategy {
+	switch strings.ToLower(strategy) {
+	case "fixed":
+		return router.StrategyFixed
+	case "cost":
+		return router.StrategyCost
+	case "latency":
+		return router.StrategyLatency
+	case "capability":
+		return router.StrategyCapability
+	case "weighted":
+		return router.StrategyWeighted
+	case "fallback", "":
+		return router.StrategyFallback
+	default:
+		return router.StrategyFallback
+	}
+}
+
+// initializeCapabilityMap 初始化能力映射。
+// 根据已注册的 provider 类型，设置任务类型到 provider 的映射关系。
+func initializeCapabilityMap(r *router.Router, logger logging.Logger) {
+	// 获取默认的能力映射
+	defaultCaps := model.GetProviderCapabilities()
+
+	// 获取已注册的 provider 名称
+	providerNames := r.GetRegisteredProviders()
+	providerNameSet := make(map[string]bool)
+	for _, name := range providerNames {
+		providerNameSet[name] = true
+	}
+
+	// 为每种任务类型设置映射
+	for taskType, providers := range defaultCaps {
+		// 过滤出已注册的 provider
+		var availableProviders []string
+		for _, p := range providers {
+			if providerNameSet[p] {
+				availableProviders = append(availableProviders, p)
+			}
+		}
+		// 只设置有可用 provider 的任务类型
+		if len(availableProviders) > 0 {
+			r.SetCapabilityMap(taskType, availableProviders)
+			logger.Info("Capability map set", "task_type", taskType, "providers", availableProviders)
+		}
+	}
 }
 
 // inferProviderType 根据模型名称和 BaseURL 推断 provider 类型。

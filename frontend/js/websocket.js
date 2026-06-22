@@ -47,6 +47,7 @@ const WSClient = (() => {
         PING: 'PING',
         WELCOME: 'WELCOME',
         NPC_REPLY: 'NPC_REPLY',
+        NPC_REPLY_CHUNK: 'NPC_REPLY_CHUNK', // 流式响应片段
         ERROR: 'ERROR',
         PONG: 'PONG',
     };

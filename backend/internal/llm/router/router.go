@@ -168,6 +168,12 @@ func (r *Router) RouteRequest(ctx context.Context, req *model.ChatRequest) (*mod
 		"provider", provider.Name(),
 		"latency", latency)
 
+	// 如果响应中的模型名称为空，使用 provider 的名称作为模型名称
+	if resp.Model == "" {
+		resp.Model = provider.Name()
+		r.logger.Info("[Router] Model name was empty, set to", "model", resp.Model)
+	}
+
 	return resp, nil
 }
 
@@ -181,16 +187,33 @@ func (r *Router) RouteRequestStream(ctx context.Context, req *model.ChatRequest)
 		return nil, err
 	}
 
+	r.logger.Info("[Router] Starting stream chat", "provider", provider.Name())
+
 	// 第二步：在锁外执行流式请求
 	startTime := nowTime()
 	stream, err := provider.StreamChat(ctx, req)
 
-	// 启动 goroutine 记录统计信息
+	if err != nil {
+		r.logger.Error("[Router] Stream chat failed", "provider", provider.Name(), "error", err)
+		if r.hasFallback() {
+			return r.tryFallbackStream(ctx, req, provider.Name())
+		}
+		return nil, err
+	}
+
+	// 使用 tee 模式复制 stream：一个用于统计，一个用于返回
+	out := make(chan model.StreamChunk)
 	go func() {
+		defer close(out)
 		var firstChunkTime time.Time
 		var hasError bool
+		chunkCount := 0
 
 		for chunk := range stream {
+			chunkCount++
+			r.logger.Info("[Router] Stream chunk received", "count", chunkCount, "content_len", len(chunk.Content), "model", chunk.Model, "done", chunk.Done)
+
+			// 记录统计信息
 			if !chunk.Done && !hasError {
 				if chunk.Index == 0 {
 					firstChunkTime = nowTime()
@@ -199,24 +222,21 @@ func (r *Router) RouteRequestStream(ctx context.Context, req *model.ChatRequest)
 					hasError = true
 				}
 			}
+
+			// 发送到输出 channel
+			out <- chunk
 		}
 
-		if firstChunkTime.IsZero() {
-			return
-		}
+		r.logger.Info("[Router] Stream completed", "total_chunks", chunkCount, "has_error", hasError)
 
-		latency := firstChunkTime.Sub(startTime)
-		r.recordStats(provider.Name(), latency, hasError)
+		// 记录统计信息
+		if !firstChunkTime.IsZero() {
+			latency := firstChunkTime.Sub(startTime)
+			r.recordStats(provider.Name(), latency, hasError)
+		}
 	}()
 
-	if err != nil {
-		if r.hasFallback() {
-			return r.tryFallbackStream(ctx, req, provider.Name())
-		}
-		return nil, err
-	}
-
-	return stream, nil
+	return out, nil
 }
 
 // selectProvider 根据当前策略选择 provider。
@@ -472,4 +492,16 @@ var nowTime = func() time.Time {
 // randFloat 生成随机浮点数，便于测试时注入 mock。
 var randFloat = func() float64 {
 	return rand.Float64()
+}
+
+// GetRegisteredProviders 返回所有已注册的 provider 名称。
+func (r *Router) GetRegisteredProviders() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	names := make([]string, 0, len(r.providers))
+	for name := range r.providers {
+		names = append(names, name)
+	}
+	return names
 }

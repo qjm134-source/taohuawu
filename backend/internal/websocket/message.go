@@ -1,8 +1,8 @@
 package websocket
 
 import (
-	"time"
 	"encoding/json"
+	"time"
 )
 
 // MessageType 消息类型
@@ -15,19 +15,20 @@ const (
 	MessageTypePing        MessageType = "PING"
 
 	// 服务器→客户端
-	MessageTypeWelcome  MessageType = "WELCOME"
-	MessageTypeNPCReply MessageType = "NPC_REPLY"
-	MessageTypeError    MessageType = "ERROR"
-	MessageTypePong     MessageType = "PONG"
+	MessageTypeWelcome       MessageType = "WELCOME"
+	MessageTypeNPCReply      MessageType = "NPC_REPLY"
+	MessageTypeNPCReplyChunk MessageType = "NPC_REPLY_CHUNK" // 流式响应片段
+	MessageTypeError         MessageType = "ERROR"
+	MessageTypePong          MessageType = "PONG"
 )
 
 // Message WebSocket 消息
 type Message struct {
-	Type      MessageType         `json:"type"`
-	RequestID string              `json:"requestId"`
-	TenantID  string              `json:"tenantId"`
-	Timestamp int64               `json:"timestamp"`
-	Payload   json.RawMessage     `json:"payload"`
+	Type      MessageType     `json:"type"`
+	RequestID string          `json:"requestId"`
+	TenantID  string          `json:"tenantId"`
+	Timestamp int64           `json:"timestamp"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 // ConnectionPayload 连接负载
@@ -54,11 +55,24 @@ type WelcomePayload struct {
 
 // NPCReplyPayload NPC回复负载
 type NPCReplyPayload struct {
-	GuideName string     `json:"guideName"`
-	Message   string     `json:"message"`
-	Emotion   string     `json:"emotion"`
-	Actions   []string   `json:"actions"`
-	Stats     *LLMStats  `json:"stats,omitempty"`
+	GuideName string    `json:"guideName"`
+	Message   string    `json:"message"`
+	Emotion   string    `json:"emotion"`
+	Actions   []string  `json:"actions"`
+	Stats     *LLMStats `json:"stats,omitempty"`
+}
+
+// NPCReplyChunkPayload 流式NPC回复片段负载
+type NPCReplyChunkPayload struct {
+	GuideName    string  `json:"guideName"`
+	Chunk        string  `json:"chunk"`   // 当前片段内容
+	IsFinal      bool    `json:"isFinal"` // 是否是最后一个片段
+	Emotion      string  `json:"emotion,omitempty"`
+	Model        string  `json:"model,omitempty"`
+	InputTokens  int     `json:"inputTokens,omitempty"`
+	OutputTokens int     `json:"outputTokens,omitempty"`
+	TotalTokens  int     `json:"totalTokens,omitempty"`
+	Cost         float64 `json:"cost,omitempty"`
 }
 
 // LLMStats LLM 调用统计信息

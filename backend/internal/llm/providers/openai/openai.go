@@ -96,7 +96,7 @@ func (p *Provider) MaxContextLength() int { return p.maxContextLength }
 
 // Chat 发起一次非流式对话请求。
 func (p *Provider) Chat(ctx context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
-	openaiReq := p.convertRequest(req)
+	openaiReq := p.convertRequest(req, false)
 
 	resp, err := p.client.CreateChatCompletion(ctx, openaiReq)
 	if err != nil {
@@ -108,7 +108,7 @@ func (p *Provider) Chat(ctx context.Context, req *model.ChatRequest) (*model.Cha
 
 // StreamChat 发起一次 SSE 流式对话请求。
 func (p *Provider) StreamChat(ctx context.Context, req *model.ChatRequest) (<-chan model.StreamChunk, error) {
-	openaiReq := p.convertRequest(req)
+	openaiReq := p.convertRequest(req, true)
 	stream, err := p.client.CreateChatCompletionStream(ctx, openaiReq)
 	if err != nil {
 		return nil, fmt.Errorf("openai stream chat failed: %w", err)
@@ -150,7 +150,7 @@ func (p *Provider) StreamChat(ctx context.Context, req *model.ChatRequest) (<-ch
 }
 
 // convertRequest 将统一的 ChatRequest 转换为 OpenAI 请求。
-func (p *Provider) convertRequest(req *model.ChatRequest) openai.ChatCompletionRequest {
+func (p *Provider) convertRequest(req *model.ChatRequest, stream bool) openai.ChatCompletionRequest {
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = p.defaultMaxTokens
@@ -167,6 +167,7 @@ func (p *Provider) convertRequest(req *model.ChatRequest) openai.ChatCompletionR
 		Temperature: float32(req.Temperature),
 		MaxTokens:   maxTokens,
 		Messages:    p.convertMessages(req.Messages),
+		Stream:      stream,
 	}
 
 	if len(req.Tools) > 0 {
@@ -305,6 +306,7 @@ func (p *Provider) convertStreamChunk(chunk openai.ChatCompletionStreamResponse)
 	if len(delta.ToolCalls) > 0 {
 		toolCalls := p.convertToolCallsFromStream(delta.ToolCalls)
 		return &model.StreamChunk{
+			Model:        p.model,
 			ToolCalls:    toolCalls,
 			FinishReason: string(choice.FinishReason),
 		}
@@ -313,6 +315,7 @@ func (p *Provider) convertStreamChunk(chunk openai.ChatCompletionStreamResponse)
 	// 处理文本增量
 	if delta.Content != "" {
 		return &model.StreamChunk{
+			Model:        p.model,
 			Content:      delta.Content,
 			FinishReason: string(choice.FinishReason),
 		}
@@ -321,6 +324,7 @@ func (p *Provider) convertStreamChunk(chunk openai.ChatCompletionStreamResponse)
 	// 处理结束
 	if string(choice.FinishReason) != "" {
 		return &model.StreamChunk{
+			Model:        p.model,
 			FinishReason: string(choice.FinishReason),
 		}
 	}

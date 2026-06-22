@@ -43,9 +43,13 @@
 
 ![游戏主界面](./docs/images/game-main.png)
 
-### NPC 对话效果
+### NPC使用实时天气工具
 
 ![NPC 使用实时天气工具](./docs/images/game-weather.png)
+
+### NPC使用rag查询游戏规则
+
+![NPC 使用rag查询游戏规则](./docs/images/game-rag.png)
 
 ---
 

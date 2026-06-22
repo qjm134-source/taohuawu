@@ -77,8 +77,21 @@ type Message struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool 角色消息对应调用的 ID
 }
 
+// StreamChunk 流式响应片段
+type StreamChunk struct {
+	Content      string
+	FinishReason string
+	Model        string
+	Usage        struct {
+		PromptTokens     int
+		CompletionTokens int
+		TotalTokens      int
+	}
+}
+
 // Adapter LLM 适配器接口
 type Adapter interface {
 	Chat(ctx context.Context, req *LLMRequest) (*LLMResponse, error)
+	StreamChat(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error)
 	IsHealthy() bool
 }

@@ -137,13 +137,6 @@ func (c *Client) WritePump() {
 			}
 			w.Write(message)
 
-			// 队列中还有更多消息，一起发送
-			n := len(c.Send)
-			for i := 0; i < n; i++ {
-				w.Write([]byte{'\n'})
-				w.Write(<-c.Send)
-			}
-
 			if err := w.Close(); err != nil {
 				return
 			}

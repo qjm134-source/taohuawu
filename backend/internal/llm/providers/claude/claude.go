@@ -155,7 +155,7 @@ func (p *Provider) buildParams(req *model.ChatRequest) (*anthropic.MessageNewPar
 	}
 
 	params := &anthropic.MessageNewParams{
-		Model:     req.Model,
+		Model:     p.model, // 使用 Provider 配置的模型名称，而不是请求中的模型名称
 		MaxTokens: maxTokens,
 		Messages:  messages,
 	}
@@ -239,11 +239,30 @@ func (p *Provider) convertTools(tools []model.Tool) ([]anthropic.ToolUnionParam,
 			schema = map[string]any{}
 		}
 
+		// 提取 properties（Anthropic API 的 properties 字段必须是对象，不能包含整个 schema）
+		properties, _ := schema["properties"].(map[string]any)
+		if properties == nil {
+			properties = map[string]any{}
+		}
+
+		// 提取 required
+		required := []string{}
+		if req, ok := schema["required"].([]string); ok {
+			required = req
+		} else if reqIface, ok := schema["required"].([]interface{}); ok {
+			for _, v := range reqIface {
+				if s, ok := v.(string); ok {
+					required = append(required, s)
+				}
+			}
+		}
+
 		toolParam := anthropic.ToolParam{
 			Name:        t.Function.Name,
 			Description: anthropic.String(t.Function.Description),
 			InputSchema: anthropic.ToolInputSchemaParam{
-				Properties: schema,
+				Properties: properties,
+				Required:   required,
 				Type:       "object",
 			},
 		}
@@ -308,7 +327,10 @@ func (p *Provider) convertStreamEvent(event anthropic.MessageStreamEventUnion) *
 	if event.Type == "content_block_delta" {
 		text := event.Delta.Text
 		if text != "" {
-			return &model.StreamChunk{Content: text}
+			return &model.StreamChunk{
+				Model:   p.model,
+				Content: text,
+			}
 		}
 	}
 	return nil

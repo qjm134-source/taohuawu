@@ -62,6 +62,7 @@ type LLMConfig struct {
 	MaxRetries int           `yaml:"max_retries"`
 	RetryDelay timeDuration  `yaml:"retry_delay"`
 	AutoSwitch bool          `yaml:"auto_switch"`
+	Strategy   string        `yaml:"strategy"` // 路由策略: fixed/cost/latency/capability/fallback/weighted
 }
 
 type CircuitConfig struct {

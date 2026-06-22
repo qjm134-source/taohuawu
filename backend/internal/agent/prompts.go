@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 )
 
 const (
@@ -53,7 +54,7 @@ const (
 
 // BuildWelcomePrompt 构建欢迎提示
 func BuildWelcomePrompt(nickname string) string {
-	return fmt.Sprintf(WelcomePrompt+"%s", nickname)
+	return strings.ReplaceAll(WelcomePrompt, "{{.Nickname}}", nickname)
 }
 
 // BuildChatPrompt 构建聊天提示
@@ -67,7 +68,22 @@ func BuildChatPrompt(nickname, emotion, message string, history []Message) strin
 		historyStr += fmt.Sprintf("%s: %s\n", role, msg.Content)
 	}
 
-	return fmt.Sprintf(ChatPrompt+"%s %s\n%s %s", nickname, emotion, historyStr, message)
+	prompt := ChatPrompt
+	prompt = strings.ReplaceAll(prompt, "{{.Nickname}}", nickname)
+	prompt = strings.ReplaceAll(prompt, "{{.Emotion}}", emotion)
+	prompt = strings.ReplaceAll(prompt, "{{.Message}}", message)
+
+	// 将 {{range .History}}...{{end}} 模板块替换为实际历史记录
+	rangeStart := "{{range .History}}\n"
+	rangeEnd := "{{end}}\n"
+	if startIdx := strings.Index(prompt, rangeStart); startIdx != -1 {
+		if endIdx := strings.Index(prompt[startIdx:], rangeEnd); endIdx != -1 {
+			endIdx += startIdx + len(rangeEnd)
+			prompt = prompt[:startIdx] + historyStr + prompt[endIdx:]
+		}
+	}
+
+	return prompt
 }
 
 // GetEmotionAdjust 获取情绪调整提示

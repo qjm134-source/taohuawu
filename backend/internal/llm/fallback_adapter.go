@@ -102,6 +102,42 @@ func findSubstring(s, substr string) bool {
 	return false
 }
 
+// StreamChat 发送流式聊天请求
+func (a *FallbackAdapter) StreamChat(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error) {
+	// 分析用户意图，返回匹配的兜底回复
+	userMessage := ""
+	if len(req.Messages) > 0 {
+		for _, msg := range req.Messages {
+			if msg.Role == "user" {
+				userMessage = msg.Content
+				break
+			}
+		}
+	}
+
+	response := a.matchResponse(userMessage)
+
+	// 创建 channel 并异步发送
+	chunkChan := make(chan StreamChunk, 10)
+	go func() {
+		defer close(chunkChan)
+
+		// 将响应分块发送（模拟流式）
+		chunkSize := 10
+		for i := 0; i < len(response); i += chunkSize {
+			end := i + chunkSize
+			if end > len(response) {
+				end = len(response)
+			}
+			chunkChan <- StreamChunk{
+				Content: response[i:end],
+			}
+		}
+	}()
+
+	return chunkChan, nil
+}
+
 // IsHealthy 总是返回 true
 func (a *FallbackAdapter) IsHealthy() bool {
 	return true

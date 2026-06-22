@@ -137,7 +137,7 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 	return reply, nil
 }
 
-// HandleChat 处理聊天
+// HandleChat 处理聊天（非流式）
 func (r *Runtime) HandleChat(ctx context.Context, session *Session, message string) (string, string, *LLMStats, error) {
 	r.logger.Info("[HandleChat] Start", "sessionId", session.ID, "message", message)
 
@@ -257,6 +257,158 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	return reply, emotionStr, stats, nil
 }
 
+// HandleChatStream 处理聊天（流式）
+func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, message string) (<-chan string, <-chan *LLMStats, error) {
+	r.logger.Info("[HandleChatStream] Start", "sessionId", session.ID, "message", message)
+
+	// 检测情绪
+	em := r.emotionDetector.Detect(message)
+	emotionStr := string(em)
+
+	// 检查缓存（使用 session ID 隔离）
+	cacheKey := session.ID + "_" + message
+	if cached, hit := r.optimizer.GetCache(cacheKey); hit && cached != "" {
+		r.logger.Info("[HandleChatStream] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		contentChan := make(chan string, 1)
+		statsChan := make(chan *LLMStats, 1)
+		contentChan <- cached
+		close(contentChan)
+		statsChan <- &LLMStats{CacheHit: true}
+		close(statsChan)
+		return contentChan, statsChan, nil
+	}
+
+	// 获取历史消息
+	history := session.GetMessages(10)
+	messages := []llm.Message{{Role: "system", Content: SystemPrompt}}
+
+	// 添加历史
+	for _, msg := range history {
+		messages = append(messages, llm.Message{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+	}
+
+	// 添加当前消息
+	messages = append(messages, llm.Message{
+		Role:    "user",
+		Content: message,
+	})
+
+	// 把工具注册表中的工具注册给 LLM
+	tools := tools.ConvertAllTools(r.toolRegistry)
+
+	r.logger.Info("[HandleChatStream] Building LLM request", "message_count", len(messages))
+
+	req := &llm.LLMRequest{
+		Messages:    messages,
+		Model:       "", // 留空，让路由根据策略自动选择模型
+		Temperature: 0.7,
+		MaxTokens:   300,
+		Tools:       tools,
+	}
+
+	startTime := time.Now()
+
+	// 尝试流式调用主 LLM
+	var stream <-chan llm.StreamChunk
+	var err error
+
+	r.logger.Info("[HandleChatStream] Checking LLM health", "healthy", r.llmAdapter.IsHealthy())
+	if r.llmAdapter.IsHealthy() {
+		r.logger.Info("[HandleChatStream] Calling primary LLM stream")
+		stream, err = r.llmAdapter.StreamChat(ctx, req)
+
+		if err != nil {
+			r.logger.Error("[HandleChatStream] Primary LLM stream failed", "error", err)
+			// 降级到备用适配器
+			r.logger.Info("[HandleChatStream] Trying fallback adapter stream")
+			stream, err = r.fallbackAdapter.StreamChat(ctx, req)
+		}
+	} else {
+		r.logger.Warn("[HandleChatStream] Primary LLM unhealthy, using fallback")
+		stream, err = r.fallbackAdapter.StreamChat(ctx, req)
+	}
+
+	if err != nil {
+		r.logger.Error("[HandleChatStream] All LLM stream calls failed", "error", err)
+		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
+	}
+
+	// 创建输出 channels
+	contentChan := make(chan string)
+	statsChan := make(chan *LLMStats, 1)
+
+	go func() {
+		defer close(contentChan)
+
+		var fullReply strings.Builder
+		stats := &LLMStats{
+			CacheHit: false,
+		}
+
+		chunkCount := 0
+		for chunk := range stream {
+			chunkCount++
+			r.logger.Info("[HandleChatStream] Received chunk", "index", chunkCount, "content_len", len(chunk.Content), "model", chunk.Model, "finish_reason", chunk.FinishReason)
+
+			if chunk.Content != "" {
+				contentChan <- chunk.Content
+				fullReply.WriteString(chunk.Content)
+			}
+
+			// 提取模型信息（可能在第一个 chunk 中）
+			if chunk.Model != "" && stats.Model == "" {
+				stats.Model = chunk.Model
+				r.logger.Info("[HandleChatStream] Model detected", "model", stats.Model)
+			}
+
+			// 提取 token 使用信息
+			if chunk.Usage.TotalTokens > 0 {
+				stats.InputTokens = chunk.Usage.PromptTokens
+				stats.OutputTokens = chunk.Usage.CompletionTokens
+				stats.TotalTokens = chunk.Usage.TotalTokens
+			}
+
+			if chunk.FinishReason != "" {
+				break
+			}
+		}
+
+		// 如果流式调用返回空数据，降级到非流式调用
+		if fullReply.Len() == 0 {
+			r.logger.Warn("[HandleChatStream] Stream returned empty data, falling back to non-streaming")
+			r.handleNonStreamChat(ctx, req, contentChan, &fullReply, stats)
+		}
+
+		if stats.Model == "" {
+			r.logger.Warn("[HandleChatStream] No model detected in stream")
+		}
+
+		// 填充统计信息
+		stats.LatencyMs = time.Since(startTime).Milliseconds()
+		// 注意：流式响应通常不会返回 token 使用信息，需要单独获取或估算
+		stats.Cost = cost.CalculateCost(stats.Model, stats.InputTokens, stats.OutputTokens)
+
+		// 添加到会话历史
+		session.AddMessage("user", message, emotionStr, nil)
+		session.AddMessage("assistant", fullReply.String(), emotionStr, nil)
+
+		// 缓存回复（不缓存空内容）
+		if fullReply.Len() > 0 {
+			r.optimizer.SetCache(cacheKey, fullReply.String())
+		}
+
+		statsChan <- stats
+		close(statsChan)
+
+		r.logger.Info("[HandleChatStream] Complete", "reply_length", fullReply.Len(), "latency", stats.LatencyMs)
+	}()
+
+	return contentChan, statsChan, nil
+}
+
 // handleToolCalls 执行 LLM 请求的工具调用，并将结果再次提交给 LLM 生成最终回复。
 func (r *Runtime) handleToolCalls(
 	ctx context.Context,
@@ -326,6 +478,52 @@ func (r *Runtime) handleToolCalls(
 	}
 
 	return response, nil
+}
+
+// handleNonStreamChat 处理非流式调用，并模拟流式响应
+func (r *Runtime) handleNonStreamChat(ctx context.Context, req *llm.LLMRequest, contentChan chan string, fullReply *strings.Builder, stats *LLMStats) {
+	var resp *llm.LLMResponse
+	var err error
+
+	if r.llmAdapter.IsHealthy() {
+		r.logger.Info("[HandleChatStream] Calling primary LLM (non-streaming)")
+		resp, err = r.llmAdapter.Chat(ctx, req)
+		if err != nil {
+			r.logger.Error("[HandleChatStream] Primary LLM failed", "error", err)
+			r.logger.Info("[HandleChatStream] Trying fallback adapter (non-streaming)")
+			resp, err = r.fallbackAdapter.Chat(ctx, req)
+		}
+	} else {
+		r.logger.Info("[HandleChatStream] Using fallback adapter (non-streaming)")
+		resp, err = r.fallbackAdapter.Chat(ctx, req)
+	}
+
+	if err != nil {
+		r.logger.Error("[HandleChatStream] Non-streaming chat failed", "error", err)
+		return
+	}
+
+	// 获取回复内容
+	content := ""
+	if len(resp.Choices) > 0 && len(resp.Choices[0].Message.Content) > 0 {
+		content = resp.Choices[0].Message.Content
+	}
+
+	// 模拟流式响应：逐字符发送
+	if content != "" {
+		stats.Model = resp.Model
+		stats.InputTokens = resp.Usage.PromptTokens
+		stats.OutputTokens = resp.Usage.CompletionTokens
+		stats.TotalTokens = resp.Usage.TotalTokens
+
+		r.logger.Info("[HandleChatStream] Simulating stream from non-streaming response", "content_len", len(content), "model", resp.Model)
+
+		// 逐字符发送以模拟流式效果
+		for _, char := range content {
+			contentChan <- string(char)
+			fullReply.WriteRune(char)
+		}
+	}
 }
 
 // GetSession 获取会话

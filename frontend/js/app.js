@@ -24,6 +24,10 @@
 
     // ========== WebSocket 事件处理 ==========
 
+    // 流式响应缓存
+    let streamingReply = '';
+    let streamingStats = null;
+
     /**
      * 处理服务器消息
      */
@@ -37,6 +41,10 @@
 
             case WSClient.MSG_TYPE.NPC_REPLY:
                 handleNPCReply(message);
+                break;
+
+            case WSClient.MSG_TYPE.NPC_REPLY_CHUNK:
+                handleNPCReplyChunk(message);
                 break;
 
             case WSClient.MSG_TYPE.ERROR:
@@ -103,7 +111,7 @@
     }
 
     /**
-     * 处理 NPC 回复
+     * 处理 NPC 回复（非流式）
      */
     function handleNPCReply(message) {
         try {
@@ -121,6 +129,58 @@
             }
         } catch (err) {
             console.error('[App] Failed to handle NPC reply:', err);
+        }
+    }
+
+    /**
+     * 处理 NPC 回复片段（流式）
+     */
+    function handleNPCReplyChunk(message) {
+        try {
+            const payload = message.payload;
+            const chunk = payload.chunk || '';
+            const isFinal = payload.isFinal || false;
+
+            console.log('[App] NPC reply chunk:', chunk, 'isFinal:', isFinal);
+            console.log('[App] Payload:', payload);
+
+            // 累加片段
+            streamingReply += chunk;
+
+            // 更新气泡显示当前累积的回复
+            UI.updateBubble(streamingReply);
+
+            // 如果是最后一个片段
+            if (isFinal) {
+                // 更新调试面板
+                console.log('[App] Final payload model:', payload.model);
+                const stats = {
+                    model: payload.model || 'unknown',
+                    inputTokens: payload.inputTokens || 0,
+                    outputTokens: payload.outputTokens || 0,
+                    totalTokens: payload.totalTokens || 0,
+                    cost: payload.cost || 0,
+                    latencyMs: 0,
+                    cacheHit: false,
+                };
+                UI.updateDebugPanel(stats);
+
+                // 保存到历史记录
+                const userMsg = window._lastUserMessage;
+                if (userMsg) {
+                    UI.addToHistory(userMsg, streamingReply);
+                    window._lastUserMessage = null;
+                }
+
+                // 重置缓存
+                streamingReply = '';
+                streamingStats = null;
+            }
+        } catch (err) {
+            console.error('[App] Failed to handle NPC reply chunk:', err);
+            // 重置缓存以防出错
+            streamingReply = '';
+            streamingStats = null;
         }
     }
 
@@ -169,27 +229,17 @@
         }
     }
 
-    // 包装 handleNPCReply 以保存对话历史
-    const originalOnMessage = WSClient.onMessage;
-    WSClient.onMessage = (message) => {
-        // 先调用原始处理器
-        if (message.type === WSClient.MSG_TYPE.NPC_REPLY) {
-            const userMsg = window._lastUserMessage;
-            if (userMsg) {
-                try {
-                    const payload = message.payload;
-                    UI.addToHistory(userMsg, payload.message || '');
-                } catch (e) {
-                    // ignore
-                }
-                window._lastUserMessage = null;
-            }
-        }
+    // 重置流式缓存的函数
+    function resetStreamingCache() {
+        streamingReply = '';
+        streamingStats = null;
+    }
 
-        // 调用原始处理器
-        if (originalOnMessage) {
-            originalOnMessage(message);
-        }
+    // 发送消息时重置流式缓存
+    const originalSendChatMessage = WSClient.sendChatMessage.bind(WSClient);
+    WSClient.sendChatMessage = function(text) {
+        resetStreamingCache();
+        return originalSendChatMessage(text);
     };
 
     /**

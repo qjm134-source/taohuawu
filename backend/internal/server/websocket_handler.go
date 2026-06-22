@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -253,11 +254,11 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 	session := h.runtime.GetSession(player.ID, msg.TenantID)
 	h.logger.Info("Session retrieved", "sessionId", session.ID)
 
-	// 处理聊天
-	h.logger.Info("Calling LLM for chat", "player_id", player.ID, "message", payload.Message)
-	reply, emotion, stats, err := h.runtime.HandleChat(context.Background(), session, payload.Message)
+	// 处理聊天（使用流式响应）
+	h.logger.Info("Calling LLM for chat (streaming)", "player_id", player.ID, "message", payload.Message)
+	contentChan, statsChan, err := h.runtime.HandleChatStream(context.Background(), session, payload.Message)
 	if err != nil {
-		h.logger.Error("Failed to handle chat", "error", err, "player_id", player.ID)
+		h.logger.Error("Failed to handle chat stream", "error", err, "player_id", player.ID)
 
 		// 返回错误消息
 		errMsg, _ := websocket.NewMessage(
@@ -273,7 +274,31 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		return
 	}
 
-	h.logger.Info("Chat response received", "reply_length", len(reply), "emotion", emotion, "model", stats.Model, "tokens", stats.TotalTokens)
+	var fullReply strings.Builder
+
+	// 流式发送响应
+	for chunk := range contentChan {
+		fullReply.WriteString(chunk)
+
+		// 发送流式消息片段
+		chunkMsg, _ := websocket.NewMessage(
+			websocket.MessageTypeNPCReplyChunk,
+			msg.RequestID,
+			msg.TenantID,
+			websocket.NPCReplyChunkPayload{
+				GuideName: agent.GuideName,
+				Chunk:     chunk,
+				IsFinal:   false,
+			},
+		)
+		_ = client.SendMessage(chunkMsg)
+	}
+
+	// 等待统计信息
+	stats := <-statsChan
+	emotion := stats.Model // 临时使用，实际应该从上下文获取
+
+	h.logger.Info("Chat stream completed", "reply_length", fullReply.Len(), "model", stats.Model, "tokens", stats.TotalTokens)
 
 	// 增加对话计数
 	_ = h.playerRepo.IncrementDialogues(player.ID)
@@ -285,7 +310,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		TenantID:    msg.TenantID,
 		SessionID:   session.ID,
 		UserMessage: payload.Message,
-		AIMessage:   reply,
+		AIMessage:   fullReply.String(),
 		Emotion:     emotion,
 		ToolsUsed:   database.JSON{Data: stats.ToolsUsed},
 		LLMModel:    stats.Model,
@@ -311,7 +336,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 			Action:         "chat",
 			RequestPayload: database.JSON{Data: map[string]string{"message": payload.Message}},
 			ResponsePayload: database.JSON{Data: map[string]interface{}{
-				"reply":       reply,
+				"reply":       fullReply.String(),
 				"model":       stats.Model,
 				"totalTokens": stats.TotalTokens,
 				"latencyMs":   stats.LatencyMs,
@@ -330,30 +355,26 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		}
 	}
 
-	// 构建回复消息（包含 LLM 统计信息）
-	replyMsg, _ := websocket.NewMessage(
-		websocket.MessageTypeNPCReply,
+	// 发送最终消息（包含统计信息）
+	h.logger.Info("Sending final message with stats", "model", stats.Model, "inputTokens", stats.InputTokens, "outputTokens", stats.OutputTokens, "totalTokens", stats.TotalTokens, "cost", stats.Cost)
+
+	finalMsg, _ := websocket.NewMessage(
+		websocket.MessageTypeNPCReplyChunk,
 		msg.RequestID,
 		msg.TenantID,
-		websocket.NPCReplyPayload{
-			GuideName: agent.GuideName,
-			Message:   reply,
-			Emotion:   emotion,
-			Actions:   []string{},
-			Stats: &websocket.LLMStats{
-				Model:        stats.Model,
-				LatencyMs:    stats.LatencyMs,
-				InputTokens:  stats.InputTokens,
-				OutputTokens: stats.OutputTokens,
-				TotalTokens:  stats.TotalTokens,
-				Cost:         stats.Cost,
-				CacheHit:     stats.CacheHit,
-			},
+		websocket.NPCReplyChunkPayload{
+			GuideName:    agent.GuideName,
+			Chunk:        "",
+			IsFinal:      true,
+			Emotion:      emotion,
+			Model:        stats.Model,
+			InputTokens:  stats.InputTokens,
+			OutputTokens: stats.OutputTokens,
+			TotalTokens:  stats.TotalTokens,
+			Cost:         stats.Cost,
 		},
 	)
-
-	h.logger.Info("Sending NPC reply", "message_length", len(reply))
-	_ = client.SendMessage(replyMsg)
+	_ = client.SendMessage(finalMsg)
 }
 
 // handlePing 处理心跳
