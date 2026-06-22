@@ -23,13 +23,13 @@ llm:
   # 模型配置列表，按优先级排序
   models:
     - name: mimo-v2.5-pro
-      base_url: https://api.xiaomimimo.com/v1
+      base_url: https://token-plan-cn.xiaomimimo.com/anthropic
       api_key: ${MIMO_API_KEY}
       enabled: true
       max_tokens: 300
       temperature: 0.7
 
-    - name: qwen-plus
+    - name: qwen-flash
       base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
       api_key: ${BAILIAN_API_KEY}
       enabled: true

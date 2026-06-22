@@ -107,6 +107,7 @@ func (s *ModelStats) Score() float64 {
 
 	latencyScore := s.avgLatency
 	if s.totalRequests == 0 {
+		// 初始延迟设为 1000ms，避免冷启动时被过度打压
 		latencyScore = 1000.0
 	}
 

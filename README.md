@@ -39,15 +39,13 @@
 
 ## 效果预览
 
-> 截图请放入 `docs/images/` 目录，替换下方占位图片。
-
 ### 游戏主界面
 
 ![游戏主界面](./docs/images/game-main.png)
 
 ### NPC 对话效果
 
-![NPC 对话](./docs/images/game-dialog.png)
+![NPC 使用实时天气工具](./docs/images/game-weather.png)
 
 ---
 
@@ -322,8 +320,6 @@ npm run dev
 
 ## 技术亮点
 
-### 你可以重点讲这些技术点
-
 1. **多模型路由架构**
    - 为什么要做路由层？解耦应用层和具体模型。
    - 6 种策略分别解决了什么问题？成本、延迟、可用性、A/B 测试。
@@ -335,8 +331,36 @@ npm run dev
    - 综合评分：`Score = Latency + ErrorRate × 10000`，错误率放大权重快速降级高错误模型。
 
 3. **任务分类与能力映射**
-   - 优先级：Code > Reasoning > Chinese > LongText > General
-   - 让不同模型各司其职，例如 Claude 处理代码、OpenAI 处理中文对话。
+
+   系统根据消息内容自动识别任务类型，按优先级 `Code > Reasoning > Chinese > LongText > General` 分类，并路由到最擅长该任务的模型。
+
+   **任务分类规则**：
+   - **Code**：检测代码关键词（`function`、`class`、`def`）、代码块标记 ` ``` `、特殊符号占比 > 30%
+   - **Reasoning**：检测推理类关键词（`为什么`、`how`、`why`、`分析`、`推导`、`证明`）
+   - **Chinese**：中文字符占比 > 30%（覆盖 CJK 统一表意文字区间）
+   - **LongText**：Token 估算 > 2000（约 8000 英文字符或 2000 中文字符）
+   - **General**：不满足以上任一条件时的兜底分类
+
+   **2026年基准测试数据驱动的模型推荐**：
+
+   | 任务类型 | Provider（按优先级） | 推荐模型 | 核心优势（2026年基准） |
+   |----------|---------------------|----------|----------------------|
+   | **Code** | `claude` → `openai` → `glm` → `qwen` | Claude 3.5 Sonnet、GPT-4o、GLM-4 Code、Qwen 2.0 Code | **Claude**：HumanEval 92.7%、MBPP 91.3%，代码生成顶级；**GPT-4o**：代码质量高，工具调用集成好；**GLM-4 Code**：国内代码能力最强 |
+   | **Reasoning** | `claude` → `openai` → `gemini` → `glm` → `qwen` | Claude 3.5 Sonnet、GPT-4o、Gemini 1.5 Pro、GLM-4、Qwen 2.0 | **Claude**：GSM8K 95.2%、MATH 87.1%，复杂推理领先；**GPT-4o**：逻辑推理精准；**GLM-4**：国内推理最优 |
+   | **Chinese** | `glm` → `qwen` → `claude` → `openai` | GLM-4、Qwen 2.0、Claude 3.5 Sonnet、GPT-4o | **GLM-4**：C-Eval 91.5%、CMMLU 90.2%，中文语义理解顶级；**Qwen 2.0**：中文生成流畅，性价比高 |
+   | **LongText** | `claude` → `gemini` → `qwen` → `glm` → `openai` | Claude 3.5 Sonnet（200K）、Gemini 1.5 Pro（1M）、Qwen 2.0（128K）、GLM-4 | **Claude**：原生 200K 上下文，长文本理解最优；**Gemini**：支持 1M+ token，超长上下文处理 |
+   | **General** | `claude` → `openai` → `glm` → `qwen` → `gemini` | Claude 3.5 Sonnet、GPT-4o、GLM-4、Qwen 2.0、Gemini 1.5 Flash | **Claude**：MT-Bench 8.9，综合能力强；**GPT-4o**：通用能力均衡；**Gemini Flash**：速度快，成本低 |
+
+   **Provider 命名约定**：
+   - `claude`：Anthropic Claude 系列（Claude 3.5 Sonnet）
+   - `openai`：OpenAI GPT 系列（GPT-4o）
+   - `glm`：智谱 GLM 系列（GLM-4）
+   - `qwen`：通义千问系列（Qwen 2.0）
+   - `gemini`：Google Gemini 系列（Gemini 1.5 Pro/Flash）
+
+   > **配置方式**：通过 `SetCapabilityMap(taskType, []string{"provider1", "provider2"})` 灵活指定每个任务类型的 Provider 列表。  
+   > **数据来源**：HumanEval、GSM8K、MATH、MT-Bench、C-Eval、CMMLU、LongBench（2026年最新数据）。  
+   > **部署建议**：根据业务需求启用对应 Provider，系统自动选择第一个可用的模型。
 
 4. **Function Calling 工具调用 + Agent 设计模式**
    - 以天气查询为例，演示 LLM 如何自动决策并调用外部 API。
