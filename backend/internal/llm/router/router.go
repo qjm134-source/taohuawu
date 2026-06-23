@@ -174,6 +174,12 @@ func (r *Router) RouteRequest(ctx context.Context, req *model.ChatRequest) (*mod
 		r.logger.Info("[Router] Model name was empty, set to", "model", resp.Model)
 	}
 
+	// 检查响应是否为空内容，如果是空的并且有降级链，则尝试降级
+	if isEmptyResponse(resp) && r.hasFallback() {
+		r.logger.Warn("[Router] Provider returned empty response, trying fallback", "provider", provider.Name())
+		return r.tryFallback(ctx, req, provider.Name())
+	}
+
 	return resp, nil
 }
 
@@ -482,6 +488,22 @@ func (r *Router) messagesToString(msgs []model.Message) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// isEmptyResponse 检查响应是否为空内容。
+func isEmptyResponse(resp *model.ChatResponse) bool {
+	if resp == nil {
+		return true
+	}
+	if len(resp.Choices) == 0 {
+		return true
+	}
+	for _, choice := range resp.Choices {
+		if choice.Message.Content != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // nowTime 获取当前时间，便于测试时注入 mock。
