@@ -38,6 +38,7 @@ func (a *FallbackAdapter) Chat(ctx context.Context, req *LLMRequest) (*LLMRespon
 	response := a.matchResponse(userMessage)
 
 	return &LLMResponse{
+		Model: "fallback",
 		Choices: []struct {
 			Message      Message `json:"message"`
 			FinishReason string  `json:"finish_reason"`

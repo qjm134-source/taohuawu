@@ -24,11 +24,11 @@ const (
 
 // Message WebSocket 消息
 type Message struct {
-	Type      MessageType     `json:"type"`
-	RequestID string          `json:"requestId"`
-	TenantID  string          `json:"tenantId"`
-	Timestamp int64           `json:"timestamp"`
-	Payload   json.RawMessage `json:"payload"`
+	Type      MessageType `json:"type"`
+	RequestID string      `json:"requestId"`
+	TenantID  string      `json:"tenantId"`
+	Timestamp int64       `json:"timestamp"`
+	Payload   interface{} `json:"payload"`
 }
 
 // ConnectionPayload 连接负载
@@ -73,6 +73,7 @@ type NPCReplyChunkPayload struct {
 	OutputTokens int     `json:"outputTokens,omitempty"`
 	TotalTokens  int     `json:"totalTokens,omitempty"`
 	Cost         float64 `json:"cost,omitempty"`
+	LatencyMs    int64   `json:"latencyMs,omitempty"` // 耗时（毫秒）
 }
 
 // LLMStats LLM 调用统计信息
@@ -99,23 +100,22 @@ type PongPayload struct {
 
 // NewMessage 创建消息
 func NewMessage(msgType MessageType, requestID, tenantID string, payload interface{}) (*Message, error) {
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-
 	return &Message{
 		Type:      msgType,
 		RequestID: requestID,
 		TenantID:  tenantID,
 		Timestamp: time.Now().UnixMilli(),
-		Payload:   payloadBytes,
+		Payload:   payload,
 	}, nil
 }
 
 // ParsePayload 解析负载
 func (m *Message) ParsePayload(v interface{}) error {
-	return json.Unmarshal(m.Payload, v)
+	payloadBytes, err := json.Marshal(m.Payload)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(payloadBytes, v)
 }
 
 // String 返回消息的字符串表示

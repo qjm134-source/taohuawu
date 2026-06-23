@@ -314,6 +314,8 @@ func (r *Router) selectByLatency(req *model.ChatRequest) (model.Provider, error)
 func (r *Router) selectByCapability(req *model.ChatRequest) (model.Provider, error) {
 	taskType := model.ClassifyTask(r.messagesToString(req.Messages))
 
+	r.logger.Info("[Router] task type(selectByCapability): %s", taskType)
+
 	// 获取适合该任务的 provider 列表
 	providers, ok := r.capabilityMap[taskType]
 	if !ok || len(providers) == 0 {

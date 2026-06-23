@@ -40,6 +40,19 @@ func (t *GetWeatherTool) Description() string {
 	return "查询指定城市的实时天气，包括温度、天气状况和风力。当玩家询问天气时调用。如果玩家未指定城市或询问水乡/当地天气，默认查询杭州。"
 }
 
+func (t *GetWeatherTool) ParametersSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"city": map[string]interface{}{
+				"type":        "string",
+				"description": "城市名称，例如 苏州、上海、杭州",
+			},
+		},
+		"required": []string{"city"},
+	}
+}
+
 func (t *GetWeatherTool) Timeout() time.Duration {
 	return weatherAPITimeout
 }

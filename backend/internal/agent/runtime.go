@@ -509,20 +509,26 @@ func (r *Runtime) handleNonStreamChat(ctx context.Context, req *llm.LLMRequest, 
 		content = resp.Choices[0].Message.Content
 	}
 
+	// 始终填充统计信息（即使内容为空）
+	if resp.Model != "" {
+		stats.Model = resp.Model
+	}
+	stats.InputTokens = resp.Usage.PromptTokens
+	stats.OutputTokens = resp.Usage.CompletionTokens
+	stats.TotalTokens = resp.Usage.TotalTokens
+
+	r.logger.Info("[HandleChatStream] Non-streaming response received", "content_len", len(content), "model", resp.Model, "inputTokens", resp.Usage.PromptTokens, "outputTokens", resp.Usage.CompletionTokens)
+
 	// 模拟流式响应：逐字符发送
 	if content != "" {
-		stats.Model = resp.Model
-		stats.InputTokens = resp.Usage.PromptTokens
-		stats.OutputTokens = resp.Usage.CompletionTokens
-		stats.TotalTokens = resp.Usage.TotalTokens
-
-		r.logger.Info("[HandleChatStream] Simulating stream from non-streaming response", "content_len", len(content), "model", resp.Model)
-
 		// 逐字符发送以模拟流式效果
 		for _, char := range content {
 			contentChan <- string(char)
 			fullReply.WriteRune(char)
 		}
+	} else {
+		// 如果内容为空，发送一个空字符通知前端
+		contentChan <- ""
 	}
 }
 

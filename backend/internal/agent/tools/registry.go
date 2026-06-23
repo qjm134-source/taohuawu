@@ -16,6 +16,7 @@ import (
 type Tool interface {
 	Name() string
 	Description() string
+	ParametersSchema() map[string]interface{} // 返回 JSON Schema 格式的参数定义，用于告诉 LLM 该工具接受哪些参数
 	Execute(ctx context.Context, params map[string]interface{}) (interface{}, error)
 	Timeout() time.Duration
 }
@@ -96,6 +97,7 @@ func (r *ToolRegistry) executeAsync(ctx context.Context, tool Tool, params map[s
 }
 
 // ConvertAllTools 将注册表中所有工具转换为 LLM 可用的工具定义。
+// 每个工具的 JSON Schema 参数由各自的 ParametersSchema() 方法返回。
 func ConvertAllTools(registry *ToolRegistry) []llm.LLMTool {
 	tools := registry.List()
 	out := make([]llm.LLMTool, 0, len(tools))
@@ -105,16 +107,7 @@ func ConvertAllTools(registry *ToolRegistry) []llm.LLMTool {
 			Function: llm.LLMFunctionDef{
 				Name:        tool.Name(),
 				Description: tool.Description(),
-				Parameters: map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"city": map[string]interface{}{
-							"type":        "string",
-							"description": "城市名称，例如 苏州、上海、杭州",
-						},
-					},
-					"required": []string{"city"},
-				},
+				Parameters:  tool.ParametersSchema(),
 			},
 		})
 	}

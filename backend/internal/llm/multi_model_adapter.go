@@ -408,18 +408,18 @@ func initializeCapabilityMap(r *router.Router, logger logging.Logger) {
 
 	// 获取已注册的 provider 名称
 	providerNames := r.GetRegisteredProviders()
-	providerNameSet := make(map[string]bool)
-	for _, name := range providerNames {
-		providerNameSet[name] = true
-	}
 
 	// 为每种任务类型设置映射
-	for taskType, providers := range defaultCaps {
-		// 过滤出已注册的 provider
+	for taskType, capabilities := range defaultCaps {
+		// 过滤出已注册的 provider（使用前缀匹配）
 		var availableProviders []string
-		for _, p := range providers {
-			if providerNameSet[p] {
-				availableProviders = append(availableProviders, p)
+		for _, capability := range capabilities {
+			for _, name := range providerNames {
+				// 使用前缀匹配：capability 是 "glm"，name 可能是 "glm-4-7"
+				if strings.HasPrefix(name, capability) || strings.Contains(name, capability) {
+					availableProviders = append(availableProviders, name)
+					break // 每个 capability 只匹配一个 provider
+				}
 			}
 		}
 		// 只设置有可用 provider 的任务类型

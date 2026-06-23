@@ -295,7 +295,9 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 	}
 
 	// 等待统计信息
+	h.logger.Info("Waiting for stats from statsChan")
 	stats := <-statsChan
+	h.logger.Info("Received stats from statsChan", "model", stats.Model, "latencyMs", stats.LatencyMs, "inputTokens", stats.InputTokens, "outputTokens", stats.OutputTokens, "totalTokens", stats.TotalTokens, "cost", stats.Cost)
 	emotion := stats.Model // 临时使用，实际应该从上下文获取
 
 	h.logger.Info("Chat stream completed", "reply_length", fullReply.Len(), "model", stats.Model, "tokens", stats.TotalTokens)
@@ -372,6 +374,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 			OutputTokens: stats.OutputTokens,
 			TotalTokens:  stats.TotalTokens,
 			Cost:         stats.Cost,
+			LatencyMs:    stats.LatencyMs,
 		},
 	)
 	_ = client.SendMessage(finalMsg)

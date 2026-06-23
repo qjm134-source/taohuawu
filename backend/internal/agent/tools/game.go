@@ -23,6 +23,19 @@ func (t *GetPlayerInfoTool) Timeout() time.Duration {
 	return 5 * time.Second
 }
 
+func (t *GetPlayerInfoTool) ParametersSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"player_id": map[string]interface{}{
+				"type":        "string",
+				"description": "需要查询的玩家 ID",
+			},
+		},
+		"required": []string{"player_id"},
+	}
+}
+
 func (t *GetPlayerInfoTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
 	playerID, ok := params["player_id"].(string)
 	if !ok {
@@ -55,12 +68,19 @@ func (t *GetGameGuideTool) Timeout() time.Duration {
 	return 5 * time.Second
 }
 
+func (t *GetGameGuideTool) ParametersSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
 func (t *GetGameGuideTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
 	// 从知识库返回基础操作信息
 	for _, cat := range t.KB.Categories {
 		if cat.Name == "基础操作" {
 			return map[string]interface{}{
-				"category": cat.Name,
+				"category":  cat.Name,
 				"questions": cat.Questions,
 			}, nil
 		}
@@ -88,11 +108,18 @@ func (t *GetQuestInfoTool) Timeout() time.Duration {
 	return 5 * time.Second
 }
 
+func (t *GetQuestInfoTool) ParametersSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
 func (t *GetQuestInfoTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
 	for _, cat := range t.KB.Categories {
 		if cat.Name == "任务系统" {
 			return map[string]interface{}{
-				"category": cat.Name,
+				"category":  cat.Name,
 				"questions": cat.Questions,
 			}, nil
 		}
@@ -118,6 +145,13 @@ func (t *GetScenarioInfoTool) Description() string {
 
 func (t *GetScenarioInfoTool) Timeout() time.Duration {
 	return 5 * time.Second
+}
+
+func (t *GetScenarioInfoTool) ParametersSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
 }
 
 func (t *GetScenarioInfoTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {

@@ -153,16 +153,23 @@
             // 如果是最后一个片段
             if (isFinal) {
                 // 更新调试面板
+                console.log('[App] Final payload:', JSON.stringify(payload));
                 console.log('[App] Final payload model:', payload.model);
+                console.log('[App] Final payload latencyMs:', payload.latencyMs);
+                console.log('[App] Final payload inputTokens:', payload.inputTokens);
+                console.log('[App] Final payload outputTokens:', payload.outputTokens);
+                console.log('[App] Final payload totalTokens:', payload.totalTokens);
+                console.log('[App] Final payload cost:', payload.cost);
                 const stats = {
                     model: payload.model || 'unknown',
                     inputTokens: payload.inputTokens || 0,
                     outputTokens: payload.outputTokens || 0,
                     totalTokens: payload.totalTokens || 0,
                     cost: payload.cost || 0,
-                    latencyMs: 0,
+                    latencyMs: payload.latencyMs || 0,
                     cacheHit: false,
                 };
+                console.log('[App] Stats to update:', JSON.stringify(stats));
                 UI.updateDebugPanel(stats);
 
                 // 保存到历史记录

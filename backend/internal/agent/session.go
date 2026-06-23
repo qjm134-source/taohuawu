@@ -23,7 +23,7 @@ type Session struct {
 
 // Message 消息
 type Message struct {
-	Role      string  // user | assistant | system
+	Role      string // user | assistant | system
 	Content   string
 	Timestamp time.Time
 	Emotion   string
