@@ -780,3 +780,38 @@ html, body {
         display: none;
     }
 }
+
+/* ---------- Tip Messages ---------- */
+.tip-message {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%) translateY(-100px);
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-family: var(--font-body);
+    color: white;
+    background: var(--ink-medium);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 9999;
+    opacity: 0;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+.tip-message.tip-visible {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+}
+
+.tip-message.tip-info {
+    background: var(--ink-medium);
+}
+
+.tip-message.tip-warning {
+    background: #e6a23c;
+}
+
+.tip-message.tip-error {
+    background: #f56c6c;
+}

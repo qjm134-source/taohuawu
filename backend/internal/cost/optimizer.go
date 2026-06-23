@@ -81,18 +81,12 @@ func SetSummarizer(s Summarizer) {
 	summarizer = s
 }
 
-// EmbeddingAPI Embedding API 接口
-type EmbeddingAPI interface {
-	GetEmbedding(ctx context.Context, text string) ([]float32, error)
-	Similarity(a, b []float32) float64
-}
-
 // NewOptimizer 创建优化器
 func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embeddingAPI EmbeddingAPI) *Optimizer {
 	cacheConfig := CacheConfig{
 		Enabled:             true,
-		TTL:                cacheTTL,
-		MaxEntries:         1000,
+		TTL:                 cacheTTL,
+		MaxEntries:          1000,
 		SimilarityThreshold: 0.85,
 	}
 

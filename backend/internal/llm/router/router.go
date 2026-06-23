@@ -179,7 +179,7 @@ func (r *Router) RouteRequest(ctx context.Context, req *model.ChatRequest) (*mod
 	// 如果响应中的模型名称为空，使用 provider 的名称作为模型名称
 	if resp.Model == "" {
 		resp.Model = provider.Name()
-		r.logger.Info("[Router] Model name was empty, set to", "model", resp.Model)
+		r.logger.Debug("[Router] Model name was empty, set to", "model", resp.Model)
 	}
 
 	// 检查响应是否为空内容，如果是空的并且有降级链，则尝试降级
@@ -250,6 +250,112 @@ func (r *Router) RouteRequestStream(ctx context.Context, req *model.ChatRequest)
 		if !firstChunkTime.IsZero() {
 			latency := firstChunkTime.Sub(startTime)
 			r.recordStats(provider.Name(), latency, hasError)
+		}
+	}()
+
+	return out, nil
+}
+
+// SelectModel 根据当前策略选择模型，但不执行请求。
+// 返回选中的模型名称，用于后续的模式判断。
+func (r *Router) SelectModel(req *model.ChatRequest) (string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	provider, err := r.selectProvider(req)
+	if err != nil {
+		return "", err
+	}
+
+	return provider.Name(), nil
+}
+
+// RouteRequestWithModel 使用指定的模型执行非流式请求。
+func (r *Router) RouteRequestWithModel(ctx context.Context, req *model.ChatRequest, modelName string) (*model.ChatResponse, error) {
+	r.mu.RLock()
+	provider, err := r.getProvider(modelName)
+	r.mu.RUnlock()
+	if err != nil {
+		r.logger.Error("[Router] Failed to get provider", "model", modelName, "error", err)
+		return nil, err
+	}
+
+	r.logger.Info("[Router] Executing chat with specified model", "model", modelName)
+
+	startTime := nowTime()
+	resp, err := provider.Chat(ctx, req)
+	latency := nowTime().Sub(startTime)
+
+	r.recordStats(modelName, latency, err != nil)
+
+	if err != nil {
+		r.logger.Error("[Router] Chat failed", "model", modelName, "error", err)
+		return nil, err
+	}
+
+	r.logger.Info("[Router] Chat succeeded", "model", modelName, "latency", latency)
+
+	// 如果响应中的模型名称为空，使用 provider 的名称作为模型名称
+	if resp.Model == "" {
+		resp.Model = modelName
+	}
+
+	return resp, nil
+}
+
+// RouteRequestStreamWithModel 使用指定的模型执行流式请求。
+func (r *Router) RouteRequestStreamWithModel(ctx context.Context, req *model.ChatRequest, modelName string) (<-chan model.StreamChunk, error) {
+	r.mu.RLock()
+	provider, err := r.getProvider(modelName)
+	r.mu.RUnlock()
+	if err != nil {
+		r.logger.Error("[Router] Failed to get provider for stream", "model", modelName, "error", err)
+		return nil, err
+	}
+
+	r.logger.Info("[Router] Starting stream chat with specified model", "model", modelName)
+
+	startTime := nowTime()
+	stream, err := provider.StreamChat(ctx, req)
+
+	if err != nil {
+		r.logger.Error("[Router] Stream chat failed", "model", modelName, "error", err)
+		r.recordStats(modelName, 0, true)
+		return nil, err
+	}
+
+	// 使用 tee 模式复制 stream：一个用于统计，一个用于返回
+	out := make(chan model.StreamChunk, 100)
+	go func() {
+		defer close(out)
+		var firstChunkTime time.Time
+		var hasError bool
+		chunkCount := 0
+
+		for chunk := range stream {
+			chunkCount++
+			r.logger.Info("[Router] Stream chunk received", "model", modelName, "count", chunkCount, "content_len", len(chunk.Content))
+
+			// 记录统计信息
+			if !chunk.Done && !hasError {
+				if chunk.Index == 0 {
+					firstChunkTime = nowTime()
+				}
+				if chunk.Err != nil {
+					hasError = true
+				}
+			}
+
+			// 发送到输出 channel
+			out <- chunk
+		}
+
+		r.logger.Info("[Router] Stream completed", "model", modelName, "total_chunks", chunkCount, "has_error", hasError)
+
+		// 记录统计信息
+		if !firstChunkTime.IsZero() {
+			latency := firstChunkTime.Sub(startTime)
+			r.recordStats(modelName, latency, hasError)
 		}
 	}()
 
@@ -411,13 +517,13 @@ func (r *Router) tryFallback(ctx context.Context, req *model.ChatRequest, skipPr
 		if provider, err := r.getProvider(name); err == nil {
 			r.logger.Info("[Router] Trying fallback provider", "name", name)
 			startTime := nowTime()
-			
+
 			// 为每个降级 provider 创建独立的带超时 context
 			// 剥离上游 deadline，避免主 provider 超时导致降级请求也立即失败
 			fallbackCtx, cancel := context.WithTimeout(withoutCancel(ctx), r.timeout)
 			resp, err := provider.Chat(fallbackCtx, req)
 			cancel()
-			
+
 			latency := nowTime().Sub(startTime)
 			r.recordStats(name, latency, err != nil)
 			if err == nil {
@@ -441,7 +547,7 @@ func (r *Router) tryFallbackStream(ctx context.Context, req *model.ChatRequest, 
 		}
 		if provider, err := r.getProvider(name); err == nil {
 			startTime := nowTime()
-			
+
 			// 为每个降级 provider 创建独立的带超时 context
 			fallbackCtx, cancel := context.WithTimeout(withoutCancel(ctx), r.timeout)
 			stream, err := provider.StreamChat(fallbackCtx, req)

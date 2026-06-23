@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/watertown/guide/internal/agent/tools"
+	"github.com/watertown/guide/internal/config"
 	"github.com/watertown/guide/internal/cost"
 	"github.com/watertown/guide/internal/emotion"
 	"github.com/watertown/guide/internal/llm"
@@ -46,10 +47,11 @@ type Runtime struct {
 
 // Config Agent 配置
 type Config struct {
-	MaxRetries  int
-	Timeout     time.Duration
-	LLMTimeout  time.Duration
-	ToolTimeout time.Duration
+	MaxRetries       int
+	Timeout          time.Duration
+	LLMTimeout       time.Duration
+	ToolTimeout      time.Duration
+	FallbackResponse config.FallbackResponse
 }
 
 // NewRuntime 创建运行时
@@ -164,6 +166,16 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 
 	if err != nil {
 		r.logger.Error("[HandleWelcome] All LLM failed", "error", err)
+
+		// 检查是否启用兜底响应
+		if r.config.FallbackResponse.Enabled && r.config.FallbackResponse.WelcomeMessage != "" {
+			r.logger.Info("[HandleWelcome] Using fallback response", "message", r.config.FallbackResponse.WelcomeMessage)
+			reply := r.config.FallbackResponse.WelcomeMessage
+			session.AddMessage("assistant", reply, "neutral", nil)
+			r.optimizer.SetCache(cacheKey, reply)
+			return reply, nil
+		}
+
 		return "", fmt.Errorf("failed to get response: %w", err)
 	}
 
@@ -195,7 +207,15 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	// 检查缓存（使用 session ID 隔离，确保每个会话有独立缓存）
 	cacheKey := session.ID + "_" + message
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
-		r.logger.Info("[HandleChat] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		r.logger.Info("[HandleChat] Exact cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		session.AddMessage("assistant", cached, emotionStr, nil)
+		stats.CacheHit = true
+		return cached, emotionStr, stats, nil
+	}
+
+	// 检查语义缓存（相似问题匹配）
+	if cached, hit := r.optimizer.CheckSimilarity(ctx, message, 0.85); hit {
+		r.logger.Info("[HandleChat] Semantic cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		session.AddMessage("assistant", cached, emotionStr, nil)
 		stats.CacheHit = true
 		return cached, emotionStr, stats, nil
@@ -384,8 +404,8 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
 	}
 
-	// 创建输出 channels
-	contentChan := make(chan string)
+	// 创建输出 channels（使用缓冲 channel 避免阻塞）
+	contentChan := make(chan string, 100)
 	statsChan := make(chan *LLMStats, 1)
 
 	go func() {

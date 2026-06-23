@@ -20,7 +20,7 @@ func (t *GetPlayerInfoTool) Description() string {
 }
 
 func (t *GetPlayerInfoTool) Timeout() time.Duration {
-	return 5 * time.Second
+	return 15 * time.Second // 增加超时时间
 }
 
 func (t *GetPlayerInfoTool) ParametersSchema() map[string]interface{} {
@@ -65,7 +65,7 @@ func (t *GetGameGuideTool) Description() string {
 }
 
 func (t *GetGameGuideTool) Timeout() time.Duration {
-	return 5 * time.Second
+	return 15 * time.Second // 增加超时时间
 }
 
 func (t *GetGameGuideTool) ParametersSchema() map[string]interface{} {
@@ -105,7 +105,7 @@ func (t *GetQuestInfoTool) Description() string {
 }
 
 func (t *GetQuestInfoTool) Timeout() time.Duration {
-	return 5 * time.Second
+	return 15 * time.Second // 增加超时时间
 }
 
 func (t *GetQuestInfoTool) ParametersSchema() map[string]interface{} {
@@ -144,7 +144,7 @@ func (t *GetScenarioInfoTool) Description() string {
 }
 
 func (t *GetScenarioInfoTool) Timeout() time.Duration {
-	return 5 * time.Second
+	return 15 * time.Second // 增加超时时间
 }
 
 func (t *GetScenarioInfoTool) ParametersSchema() map[string]interface{} {

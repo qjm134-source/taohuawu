@@ -22,13 +22,14 @@ websocket:
 llm:
   # 模型配置列表，按优先级排序
   models:
-    - name: mimo-v2.5-pro
+    - name: mimo-v2.5
       type: claude  # 显式指定使用 Anthropic SDK，URL 路径中的 /anthropic 表示兼容 Anthropic Messages API
       base_url: https://token-plan-cn.xiaomimimo.com/anthropic
       api_key: ${MIMO_API_KEY}
       enabled: true
       max_tokens: 300
       temperature: 0.7
+      mode: auto  # stream/chat/auto，auto 会自动检测并记忆成功的模式
 
     - name: qwen3.5-27b
       base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -36,12 +37,16 @@ llm:
       enabled: true
       max_tokens: 500
       temperature: 0.7
+      mode: auto  # stream/chat/auto，auto 会自动检测并记忆成功的模式
 
-  timeout: 30s
-  max_retries: 2
+  timeout: 60s           # 增加超时时间到 60 秒
+  max_retries: 3         # 增加重试次数到 3 次
   retry_delay: 2s
-  auto_switch: true  # 是否自动切换到下一个模型
-  strategy: capability  # 路由策略: fixed/cost/latency/capability/fallback/weighted
+  auto_switch: true      # 是否自动切换到下一个模型
+  strategy: capability   # 路由策略: fixed/cost/latency/capability/fallback/weighted
+  fallback_response:     # 当所有模型都失败时的兜底响应
+    enabled: true
+    welcome_message: "欢迎来到桃花坞！我是你的向导小桃。有什么我可以帮助你的吗？"
 
 circuit:
   max_failures: 5
@@ -53,10 +58,17 @@ cost:
   max_history_messages: 10
   max_history_tokens: 4096
   summary_threshold: 20
-  similarity_threshold: 0.95
+  similarity_threshold: 0.85
   cache_ttl: 3600s
   summary_model: ""            # LLM 摘要使用的模型，留空则使用第一个启用的模型
   summary_timeout: 30s         # 摘要请求超时时间
+  # Embedding API 配置（用于语义缓存）
+  embedding:
+    enabled: true
+    type: remote                # remote 使用远程 API（推荐）
+    api_key: ${BAILIAN_API_KEY}  # 或直接填写 API Key
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1           # remote API 地址
+    model: text-embedding-v1
 
 knowledge:
   path: data/knowledge

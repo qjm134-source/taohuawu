@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const weatherAPITimeout = 5 * time.Second
+const weatherAPITimeout = 15 * time.Second // 增加到 15 秒，适应网络波动
 
 // defaultCity 当玩家未指定城市或询问水乡/当地天气时，默认查询杭州。
 const defaultCity = "杭州"

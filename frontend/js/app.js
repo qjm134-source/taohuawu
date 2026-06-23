@@ -19,6 +19,16 @@
         }
     );
 
+    // ========== 消息超时配置 ==========
+    const MESSAGE_TIMEOUT = {
+        enabled: true,
+        duration: 60000,  // 60秒超时
+        warningTime: 30000,  // 30秒开始显示警告
+    };
+
+    let messageTimeoutTimer = null;
+    let messageWarningTimer = null;
+
     // ========== 初始化 UI ==========
     UI.init();
 
@@ -27,6 +37,51 @@
     // 流式响应缓存
     let streamingReply = '';
     let streamingStats = null;
+    let isWaitingForReply = false;
+
+    /**
+     * 启动消息超时计时器
+     */
+    function startMessageTimeout() {
+        if (!MESSAGE_TIMEOUT.enabled) return;
+
+        clearMessageTimeout();
+
+        isWaitingForReply = true;
+        console.log('[App] Message timeout started:', MESSAGE_TIMEOUT.duration + 'ms');
+
+        // 警告计时器
+        messageWarningTimer = setTimeout(() => {
+            console.log('[App] Message timeout warning: still waiting for response...');
+            UI.showTip('NPC 正在思考中，请稍候...', 'warning');
+        }, MESSAGE_TIMEOUT.warningTime);
+
+        // 超时计时器
+        messageTimeoutTimer = setTimeout(() => {
+            console.log('[App] Message timeout: no response received');
+            isWaitingForReply = false;
+            UI.showTip('抱歉，NPC 响应超时，请稍后再试', 'error');
+
+            // 重置流式响应缓存
+            streamingReply = '';
+            streamingStats = null;
+        }, MESSAGE_TIMEOUT.duration);
+    }
+
+    /**
+     * 清除消息超时计时器
+     */
+    function clearMessageTimeout() {
+        if (messageWarningTimer) {
+            clearTimeout(messageWarningTimer);
+            messageWarningTimer = null;
+        }
+        if (messageTimeoutTimer) {
+            clearTimeout(messageTimeoutTimer);
+            messageTimeoutTimer = null;
+        }
+        isWaitingForReply = false;
+    }
 
     /**
      * 处理服务器消息
@@ -120,6 +175,9 @@
 
             console.log('[App] NPC reply:', reply);
 
+            // 清除超时计时器
+            clearMessageTimeout();
+
             // 更新气泡显示回复
             UI.updateBubble(reply);
 
@@ -149,6 +207,9 @@
 
             // 更新气泡显示当前累积的回复
             UI.updateBubble(streamingReply);
+
+            // 如果收到任何回复，清除超时计时器
+            clearMessageTimeout();
 
             // 如果是最后一个片段
             if (isFinal) {
@@ -240,13 +301,20 @@
     function resetStreamingCache() {
         streamingReply = '';
         streamingStats = null;
+        clearMessageTimeout();
     }
 
-    // 发送消息时重置流式缓存
     const originalSendChatMessage = WSClient.sendChatMessage.bind(WSClient);
     WSClient.sendChatMessage = function(text) {
         resetStreamingCache();
-        return originalSendChatMessage(text);
+        const result = originalSendChatMessage(text);
+        
+        // 发送成功后启动超时计时器
+        if (result !== false) {
+            startMessageTimeout();
+        }
+        
+        return result;
     };
 
     /**

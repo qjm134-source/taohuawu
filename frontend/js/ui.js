@@ -320,6 +320,36 @@ const UI = (() => {
         }
     }
 
+    /**
+     * 显示提示信息
+     * @param {string} message - 提示内容
+     * @param {'info'|'warning'|'error'} type - 提示类型
+     */
+    function showTip(message, type = 'info') {
+        // 创建提示元素
+        var tip = document.createElement('div');
+        tip.className = 'tip-message tip-' + type;
+        tip.textContent = message;
+        
+        // 添加到页面
+        document.body.appendChild(tip);
+        
+        // 触发动画
+        setTimeout(function() {
+            tip.classList.add('tip-visible');
+        }, 10);
+        
+        // 自动移除
+        setTimeout(function() {
+            tip.classList.remove('tip-visible');
+            setTimeout(function() {
+                if (tip.parentNode) {
+                    tip.parentNode.removeChild(tip);
+                }
+            }, 300);
+        }, type === 'error' ? 5000 : 3000);
+    }
+
     // 公共 API
     return {
         init,
@@ -336,5 +366,6 @@ const UI = (() => {
         autoResizeInput,
         updateDebugPanel,
         toggleDebugPanel,
+        showTip,
     };
 })();

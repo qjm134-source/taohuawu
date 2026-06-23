@@ -17,14 +17,42 @@ import (
 // RouterAdapter 是 llm.Adapter 接口的实现，内部使用 Router 进行模型路由。
 // 它提供了从旧的单一适配器模式到新的多模型路由模式的平滑迁移。
 type RouterAdapter struct {
-	router *router.Router
+	router       *router.Router
+	modelConfigs []config.ModelConfig // 模型配置列表，用于获取 mode 设置
+	modeRegistry *ModelModeRegistry   // 模型模式注册表
+	logger       logging.Logger
 }
 
 // NewRouterAdapter 创建一个新的路由适配器。
-func NewRouterAdapter(r *router.Router) *RouterAdapter {
+func NewRouterAdapter(r *router.Router, modelConfigs []config.ModelConfig, logger logging.Logger) *RouterAdapter {
 	return &RouterAdapter{
-		router: r,
+		router:       r,
+		modelConfigs: modelConfigs,
+		modeRegistry: GetModeRegistry(),
+		logger:       logger,
 	}
+}
+
+// getModelMode 获取指定模型的工作模式
+func (a *RouterAdapter) getModelMode(modelName string) ModelMode {
+	// 查找模型的配置
+	for _, cfg := range a.modelConfigs {
+		if cfg.Name == modelName {
+			return a.modeRegistry.GetModelMode(modelName, cfg.Mode)
+		}
+	}
+	// 默认使用 auto 模式
+	return a.modeRegistry.GetModelMode(modelName, "auto")
+}
+
+// getModelConfigMode 获取模型配置中的 mode 设置
+func (a *RouterAdapter) getModelConfigMode(modelName string) string {
+	for _, cfg := range a.modelConfigs {
+		if cfg.Name == modelName {
+			return cfg.Mode
+		}
+	}
+	return "auto"
 }
 
 // Chat 发起一次聊天请求，通过 Router 选择合适的 provider。
@@ -38,6 +66,13 @@ func (a *RouterAdapter) Chat(ctx context.Context, req *LLMRequest) (*LLMResponse
 		return nil, err
 	}
 
+	// 记录成功（非流式模式）
+	modelName := modelResp.Model
+	if modelName != "" {
+		a.modeRegistry.RecordSuccess(modelName, ModeChat)
+		a.logger.Info("[RouterAdapter] Recorded chat success", "model", modelName, "mode", "chat")
+	}
+
 	// 转换响应格式
 	return a.convertResponse(modelResp), nil
 }
@@ -47,19 +82,56 @@ func (a *RouterAdapter) StreamChat(ctx context.Context, req *LLMRequest) (<-chan
 	// 转换请求格式
 	modelReq := a.convertRequest(req)
 
-	// 通过路由选择 provider 并执行流式请求
-	modelStream, err := a.router.RouteRequestStream(ctx, modelReq)
+	// 先获取要使用的模型名称（不执行请求）
+	selectedModel, err := a.router.SelectModel(modelReq)
 	if err != nil {
+		a.logger.Error("[RouterAdapter] Failed to select model", "error", err)
 		return nil, err
 	}
 
+	// 获取模型的工作模式
+	mode := a.getModelMode(selectedModel)
+	configMode := a.getModelConfigMode(selectedModel)
+
+	a.logger.Info("[RouterAdapter] Selected model", "model", selectedModel, "mode", mode, "configMode", configMode)
+
+	// 如果配置明确指定了 chat 模式，直接使用非流式
+	if configMode == "chat" {
+		a.logger.Info("[RouterAdapter] Using chat mode (config specified)")
+		return a.streamFromChat(ctx, modelReq, selectedModel)
+	}
+
+	// 如果记忆的模式是 chat，直接使用非流式
+	if mode == ModeChat {
+		a.logger.Info("[RouterAdapter] Using chat mode (remembered)")
+		return a.streamFromChat(ctx, modelReq, selectedModel)
+	}
+
+	// 尝试流式调用
+	modelStream, err := a.router.RouteRequestStreamWithModel(ctx, modelReq, selectedModel)
+	if err != nil {
+		a.logger.Error("[RouterAdapter] Stream failed, falling back to chat", "model", selectedModel, "error", err)
+		// 记录流式失败
+		a.modeRegistry.RecordFailure(selectedModel, ModeStream)
+		// 降级到非流式
+		return a.streamFromChat(ctx, modelReq, selectedModel)
+	}
+
 	// 创建输出 channel
-	out := make(chan StreamChunk)
+	out := make(chan StreamChunk, 100)
 
 	go func() {
 		defer close(out)
 
+		chunkCount := 0
+		hasContent := false
+
 		for chunk := range modelStream {
+			chunkCount++
+			if chunk.Content != "" {
+				hasContent = true
+			}
+
 			streamChunk := StreamChunk{
 				Content:      chunk.Content,
 				FinishReason: chunk.FinishReason,
@@ -68,8 +140,70 @@ func (a *RouterAdapter) StreamChat(ctx context.Context, req *LLMRequest) (<-chan
 			out <- streamChunk
 
 			if chunk.Done || chunk.FinishReason != "" {
-				return
+				break
 			}
+		}
+
+		// 记录结果
+		if hasContent {
+			a.modeRegistry.RecordSuccess(selectedModel, ModeStream)
+			a.logger.Info("[RouterAdapter] Stream success", "model", selectedModel, "chunks", chunkCount)
+		} else {
+			a.logger.Warn("[RouterAdapter] Stream returned empty, will fallback to chat next time", "model", selectedModel)
+			// 空响应不记录失败，但下次会尝试 chat
+		}
+	}()
+
+	return out, nil
+}
+
+// streamFromChat 使用非流式调用，然后模拟流式输出
+func (a *RouterAdapter) streamFromChat(ctx context.Context, modelReq *model.ChatRequest, modelName string) (<-chan StreamChunk, error) {
+	// 执行非流式请求
+	modelResp, err := a.router.RouteRequestWithModel(ctx, modelReq, modelName)
+	if err != nil {
+		return nil, err
+	}
+
+	// 记录成功（非流式模式）
+	a.modeRegistry.RecordSuccess(modelName, ModeChat)
+	a.logger.Info("[RouterAdapter] Chat success (fallback)", "model", modelName, "mode", "chat")
+
+	// 创建输出 channel
+	out := make(chan StreamChunk, 100)
+
+	go func() {
+		defer close(out)
+
+		// 获取回复内容
+		content := ""
+		if len(modelResp.Choices) > 0 {
+			content = modelResp.Choices[0].Message.Content
+		}
+
+		// 模拟流式输出：逐字符发送
+		if content != "" {
+			for i, char := range content {
+				out <- StreamChunk{
+					Content: string(char),
+					Model:   modelResp.Model,
+				}
+				// 添加小延迟，模拟真实流式效果
+				if i < len(content)-1 {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+		}
+
+		// 发送结束标记
+		out <- StreamChunk{
+			FinishReason: "stop",
+			Model:        modelResp.Model,
+			Usage: StreamUsage{
+				PromptTokens:     modelResp.Usage.PromptTokens,
+				CompletionTokens: modelResp.Usage.CompletionTokens,
+				TotalTokens:      modelResp.Usage.TotalTokens,
+			},
 		}
 	}()
 
@@ -201,10 +335,10 @@ type MultiModelRouter struct {
 }
 
 // NewMultiModelRouter 创建并配置一个多模型路由器。
-func NewMultiModelRouter(logger logging.Logger, timeout time.Duration) *MultiModelRouter {
+func NewMultiModelRouter(logger logging.Logger, timeout time.Duration, modelConfigs []config.ModelConfig) *MultiModelRouter {
 	r := router.NewRouter(logger, timeout)
 	return &MultiModelRouter{
-		adapter: NewRouterAdapter(r),
+		adapter: NewRouterAdapter(r, modelConfigs, logger),
 		router:  r,
 	}
 }
@@ -382,7 +516,7 @@ func NewRouterFromConfig(cfg config.LLMConfig, logger logging.Logger) Adapter {
 		r.SetFallbackChain(fallbackChain)
 	}
 
-	return NewRouterAdapter(r)
+	return NewRouterAdapter(r, cfg.Models, logger)
 }
 
 // parseStrategy 解析策略配置字符串。

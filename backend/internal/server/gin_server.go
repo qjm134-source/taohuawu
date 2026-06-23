@@ -283,11 +283,34 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 	}
 
 	// 创建成本优化器
+	var embeddingAPI cost.EmbeddingAPI
+	if s.config.Cost.Embedding.Enabled {
+		if s.config.Cost.Embedding.Type == "local" {
+			// 本地模式：无需 API Key，使用本地模型
+			embeddingAPI = cost.NewLocalEmbeddingClient(s.config.Cost.Embedding.Model)
+			s.logger.Info("Local Embedding enabled", "model", s.config.Cost.Embedding.Model)
+		} else {
+			// 远程模式：需要 API Key
+			if s.config.Cost.Embedding.APIKey != "" {
+				embeddingAPI = cost.NewOpenAIEmbeddingClient(
+					s.config.Cost.Embedding.APIKey,
+					s.config.Cost.Embedding.BaseURL,
+					s.config.Cost.Embedding.Model,
+				)
+				s.logger.Info("Remote Embedding enabled", "model", s.config.Cost.Embedding.Model)
+			} else {
+				s.logger.Warn("Embedding API key not set, semantic caching will be unavailable")
+			}
+		}
+	} else {
+		s.logger.Info("Embedding disabled")
+	}
+
 	optimizer := cost.NewOptimizer(
 		s.config.Cost.CacheTTL.Duration,
 		s.config.Cost.MaxHistoryMessages,
 		s.config.Cost.MaxHistoryTokens,
-		nil, // TODO: Implement embedding API
+		embeddingAPI,
 	)
 
 	// 初始化 LLM 摘要器
@@ -324,10 +347,11 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 		optimizer,
 		emotionDetector,
 		agent.Config{
-			MaxRetries:  s.config.LLM.MaxRetries,
-			Timeout:     s.config.Server.ReadTimeout.Duration, // 使用服务器读取超时作为总超时
-			LLMTimeout:  s.config.LLM.Timeout.Duration,        // 使用配置文件中的 LLM 超时
-			ToolTimeout: s.config.LLM.Timeout.Duration,
+			MaxRetries:       s.config.LLM.MaxRetries,
+			Timeout:          s.config.Server.ReadTimeout.Duration, // 使用服务器读取超时作为总超时
+			LLMTimeout:       s.config.LLM.Timeout.Duration,        // 使用配置文件中的 LLM 超时
+			ToolTimeout:      s.config.LLM.Timeout.Duration,
+			FallbackResponse: s.config.LLM.FallbackResponse,
 		},
 		s.logger,
 	)

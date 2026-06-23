@@ -6,17 +6,17 @@ import (
 
 // LLMRequest LLM 请求
 type LLMRequest struct {
-	Messages    []Message  `json:"messages"`
-	Model       string     `json:"model"`
-	Temperature float64    `json:"temperature"`
-	MaxTokens   int        `json:"max_tokens"`
-	Tools       []LLMTool  `json:"tools,omitempty"` // 可选的工具列表，支持 Function Calling
+	Messages    []Message `json:"messages"`
+	Model       string    `json:"model"`
+	Temperature float64   `json:"temperature"`
+	MaxTokens   int       `json:"max_tokens"`
+	Tools       []LLMTool `json:"tools,omitempty"` // 可选的工具列表，支持 Function Calling
 }
 
 // LLMTool 工具定义，用于 LLM 的 function calling。
 type LLMTool struct {
-	Type     string           `json:"type"`
-	Function LLMFunctionDef    `json:"function"`
+	Type     string         `json:"type"`
+	Function LLMFunctionDef `json:"function"`
 }
 
 // LLMFunctionDef 工具的函数定义。
@@ -29,8 +29,8 @@ type LLMFunctionDef struct {
 // LLMResponse LLM 响应
 type LLMResponse struct {
 	Choices []struct {
-		Message      Message      `json:"message"`
-		FinishReason string       `json:"finish_reason"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -73,20 +73,23 @@ func (r *LLMResponse) GetToolCalls() []ToolCall {
 type Message struct {
 	Role       string     `json:"role"` // system, user, assistant
 	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`  // assistant 消息中的工具调用请求
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant 消息中的工具调用请求
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool 角色消息对应调用的 ID
 }
 
 // StreamChunk 流式响应片段
+// StreamUsage 流式响应的 token 使用信息
+type StreamUsage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
 type StreamChunk struct {
 	Content      string
 	FinishReason string
 	Model        string
-	Usage        struct {
-		PromptTokens     int
-		CompletionTokens int
-		TotalTokens      int
-	}
+	Usage        StreamUsage
 }
 
 // Adapter LLM 适配器接口

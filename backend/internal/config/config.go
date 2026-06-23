@@ -55,15 +55,22 @@ type ModelConfig struct {
 	Enabled     bool    `yaml:"enabled"`
 	MaxTokens   int     `yaml:"max_tokens"`
 	Temperature float64 `yaml:"temperature"`
+	Mode        string  `yaml:"mode"` // 工作模式: "stream" / "chat" / "auto"，auto 会自动检测并记忆成功的模式
 }
 
 type LLMConfig struct {
-	Models     []ModelConfig `yaml:"models"`
-	Timeout    timeDuration  `yaml:"timeout"`
-	MaxRetries int           `yaml:"max_retries"`
-	RetryDelay timeDuration  `yaml:"retry_delay"`
-	AutoSwitch bool          `yaml:"auto_switch"`
-	Strategy   string        `yaml:"strategy"` // 路由策略: fixed/cost/latency/capability/fallback/weighted
+	Models           []ModelConfig    `yaml:"models"`
+	Timeout          timeDuration     `yaml:"timeout"`
+	MaxRetries       int              `yaml:"max_retries"`
+	RetryDelay       timeDuration     `yaml:"retry_delay"`
+	AutoSwitch       bool             `yaml:"auto_switch"`
+	Strategy         string           `yaml:"strategy"` // 路由策略: fixed/cost/latency/capability/fallback/weighted
+	FallbackResponse FallbackResponse `yaml:"fallback_response"`
+}
+
+type FallbackResponse struct {
+	Enabled        bool   `yaml:"enabled"`
+	WelcomeMessage string `yaml:"welcome_message"`
 }
 
 type CircuitConfig struct {
@@ -74,13 +81,22 @@ type CircuitConfig struct {
 }
 
 type CostConfig struct {
-	MaxHistoryMessages  int          `yaml:"max_history_messages"`
-	MaxHistoryTokens    int          `yaml:"max_history_tokens"`
-	SummaryThreshold    int          `yaml:"summary_threshold"`
-	SimilarityThreshold float64      `yaml:"similarity_threshold"`
-	CacheTTL            timeDuration `yaml:"cache_ttl"`
-	SummaryModel        string       `yaml:"summary_model"`    // 指定用于摘要的模型，留空则使用第一个启用的模型
-	SummaryTimeout      timeDuration `yaml:"summary_timeout"`  // 摘要请求超时时间
+	MaxHistoryMessages  int             `yaml:"max_history_messages"`
+	MaxHistoryTokens    int             `yaml:"max_history_tokens"`
+	SummaryThreshold    int             `yaml:"summary_threshold"`
+	SimilarityThreshold float64         `yaml:"similarity_threshold"`
+	CacheTTL            timeDuration    `yaml:"cache_ttl"`
+	SummaryModel        string          `yaml:"summary_model"`   // 指定用于摘要的模型，留空则使用第一个启用的模型
+	SummaryTimeout      timeDuration    `yaml:"summary_timeout"` // 摘要请求超时时间
+	Embedding           EmbeddingConfig `yaml:"embedding"`       // Embedding API 配置
+}
+
+type EmbeddingConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Type    string `yaml:"type"` // local 或 remote
+	APIKey  string `yaml:"api_key"`
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
 }
 
 type KnowledgeConfig struct {
