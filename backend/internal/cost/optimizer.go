@@ -2,7 +2,6 @@ package cost
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -45,23 +44,10 @@ func CalculateCost(model string, inputTokens, outputTokens int) float64 {
 
 // Optimizer 成本优化器
 type Optimizer struct {
-	cache        *Cache
+	cache        *LayeredCache
 	summary      *Summary
 	embeddingAPI EmbeddingAPI
 	mu           sync.RWMutex
-}
-
-// CacheEntry 缓存条目
-type CacheEntry struct {
-	Question  string
-	Answer    string
-	CreatedAt time.Time
-}
-
-// Cache 缓存
-type Cache struct {
-	entries map[string]*CacheEntry // key: question hash
-	mu      sync.RWMutex
 }
 
 // Summary 摘要
@@ -103,21 +89,38 @@ type EmbeddingAPI interface {
 
 // NewOptimizer 创建优化器
 func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embeddingAPI EmbeddingAPI) *Optimizer {
+	cacheConfig := CacheConfig{
+		Enabled:             true,
+		TTL:                cacheTTL,
+		MaxEntries:         1000,
+		SimilarityThreshold: 0.85,
+	}
+
 	return &Optimizer{
-		cache:        NewCache(cacheTTL),
+		cache:        NewLayeredCache(cacheConfig, embeddingAPI),
 		summary:      NewSummary(maxMessages, tokenLimit),
 		embeddingAPI: embeddingAPI,
 	}
 }
 
-// GetCache 获取缓存
+// GetCache 获取缓存（精确匹配）
 func (o *Optimizer) GetCache(question string) (string, bool) {
-	return o.cache.Get(question)
+	return o.cache.Get(context.Background(), question, "")
+}
+
+// GetCacheWithModel 获取指定模型的缓存
+func (o *Optimizer) GetCacheWithModel(question string, model string) (string, bool) {
+	return o.cache.Get(context.Background(), question, model)
 }
 
 // SetCache 设置缓存
 func (o *Optimizer) SetCache(question, answer string) {
-	o.cache.Set(question, answer)
+	o.cache.Set(context.Background(), question, answer, "", 0)
+}
+
+// SetCacheWithModel 设置指定模型的缓存
+func (o *Optimizer) SetCacheWithModel(question, answer, model string, tokensSaved int) {
+	o.cache.Set(context.Background(), question, answer, model, tokensSaved)
 }
 
 // AddHistory 添加历史消息
@@ -130,99 +133,9 @@ func (o *Optimizer) GetHistory() []Message {
 	return o.summary.Get()
 }
 
-// CheckSimilarity 检查相似度
+// CheckSimilarity 检查相似度（语义缓存）
 func (o *Optimizer) CheckSimilarity(ctx context.Context, question string, threshold float64) (string, bool) {
-	if o.embeddingAPI == nil {
-		return "", false
-	}
-
-	embedding, err := o.embeddingAPI.GetEmbedding(ctx, question)
-	if err != nil {
-		return "", false
-	}
-
-	return o.cache.FindSimilar(embedding, threshold)
-}
-
-// NewCache 创建缓存
-func NewCache(ttl time.Duration) *Cache {
-	c := &Cache{
-		entries: make(map[string]*CacheEntry),
-	}
-
-	// 启动清理协程
-	go c.cleanup(ttl)
-
-	return c
-}
-
-// Get 获取缓存
-func (c *Cache) Get(question string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	key := hash(question)
-	entry, ok := c.entries[key]
-	if !ok {
-		return "", false
-	}
-
-	return entry.Answer, true
-}
-
-// Set 设置缓存
-func (c *Cache) Set(question, answer string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	key := hash(question)
-	c.entries[key] = &CacheEntry{
-		Question:  question,
-		Answer:    answer,
-		CreatedAt: time.Now(),
-	}
-}
-
-// FindSimilar 查找相似问题
-func (c *Cache) FindSimilar(embedding []float32, threshold float64) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	for _, entry := range c.entries {
-		entryEmbedding, err := embeddingAPI.GetEmbedding(context.Background(), entry.Question)
-		if err != nil {
-			continue
-		}
-
-		sim := embeddingAPI.Similarity(embedding, entryEmbedding)
-		if sim > threshold {
-			return entry.Answer, true
-		}
-	}
-
-	return "", false
-}
-
-// cleanup 清理过期缓存
-func (c *Cache) cleanup(ttl time.Duration) {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		c.mu.Lock()
-		now := time.Now()
-		for key, entry := range c.entries {
-			if now.Sub(entry.CreatedAt) > ttl {
-				delete(c.entries, key)
-			}
-		}
-		c.mu.Unlock()
-	}
-}
-
-// hash 简单哈希
-func hash(s string) string {
-	return fmt.Sprintf("%x", len(s))
+	return o.cache.GetSimilar(ctx, question, threshold)
 }
 
 // NewSummary 创建摘要
