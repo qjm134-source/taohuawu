@@ -13,6 +13,10 @@ import (
 	"github.com/watertown/guide/pkg/logging"
 )
 
+// withoutCancel 返回不携带 deadline/cancel 的 ctx（保留 values）。
+// Go 1.21+ 内置了 context.WithoutCancel，这里直接使用它。
+var withoutCancel = context.WithoutCancel
+
 // Strategy 定义路由策略类型。
 type Strategy string
 
@@ -47,6 +51,9 @@ type Router struct {
 	// capabilityMap 是能力映射，指定哪些模型适合什么任务。
 	capabilityMap map[model.TaskType][]string
 
+	// timeout 是每个 provider 请求的超时时间
+	timeout time.Duration
+
 	// logger 用于记录日志
 	logger logging.Logger
 }
@@ -59,13 +66,14 @@ type providerWrapper struct {
 }
 
 // NewRouter 创建一个新的路由器。
-func NewRouter(logger logging.Logger) *Router {
+func NewRouter(logger logging.Logger, timeout time.Duration) *Router {
 	return &Router{
 		providers:     make(map[string]*providerWrapper),
 		strategy:      StrategyFallback, // 默认使用降级策略
 		weights:       make(map[string]float64),
 		fallbackChain: make([]string, 0),
 		capabilityMap: make(map[model.TaskType][]string),
+		timeout:       timeout,
 		logger:        logger,
 	}
 }
@@ -176,7 +184,10 @@ func (r *Router) RouteRequest(ctx context.Context, req *model.ChatRequest) (*mod
 
 	// 检查响应是否为空内容，如果是空的并且有降级链，则尝试降级
 	if isEmptyResponse(resp) && r.hasFallback() {
-		r.logger.Warn("[Router] Provider returned empty response, trying fallback", "provider", provider.Name())
+		r.logger.Warn("[Router] Provider returned empty response, trying fallback",
+			"provider", provider.Name(),
+			"choices", len(resp.Choices),
+			"model", resp.Model)
 		return r.tryFallback(ctx, req, provider.Name())
 	}
 
@@ -389,6 +400,8 @@ func (r *Router) selectFallback() (model.Provider, error) {
 }
 
 // tryFallback 尝试使用降级链中的下一个 provider，跳过已失败的 skipProvider。
+// 每个降级 provider 使用独立的 context（剥离上游 deadline），
+// 避免主 provider 耗时过长导致降级 provider 没有足够时间。
 func (r *Router) tryFallback(ctx context.Context, req *model.ChatRequest, skipProvider string) (*model.ChatResponse, error) {
 	// 降级链容忍更高错误率，确保可用性优先于成本
 	for _, name := range r.fallbackChain {
@@ -398,7 +411,13 @@ func (r *Router) tryFallback(ctx context.Context, req *model.ChatRequest, skipPr
 		if provider, err := r.getProvider(name); err == nil {
 			r.logger.Info("[Router] Trying fallback provider", "name", name)
 			startTime := nowTime()
-			resp, err := provider.Chat(ctx, req)
+			
+			// 为每个降级 provider 创建独立的带超时 context
+			// 剥离上游 deadline，避免主 provider 超时导致降级请求也立即失败
+			fallbackCtx, cancel := context.WithTimeout(withoutCancel(ctx), r.timeout)
+			resp, err := provider.Chat(fallbackCtx, req)
+			cancel()
+			
 			latency := nowTime().Sub(startTime)
 			r.recordStats(name, latency, err != nil)
 			if err == nil {
@@ -413,6 +432,8 @@ func (r *Router) tryFallback(ctx context.Context, req *model.ChatRequest, skipPr
 }
 
 // tryFallbackStream 尝试使用降级链中的下一个 provider 进行流式请求，跳过已失败的 skipProvider。
+// 每个降级 provider 使用独立的 context（剥离上游 deadline），
+// 避免主 provider 耗时过长导致降级 provider 没有足够时间。
 func (r *Router) tryFallbackStream(ctx context.Context, req *model.ChatRequest, skipProvider string) (<-chan model.StreamChunk, error) {
 	for _, name := range r.fallbackChain {
 		if name == skipProvider {
@@ -420,16 +441,21 @@ func (r *Router) tryFallbackStream(ctx context.Context, req *model.ChatRequest, 
 		}
 		if provider, err := r.getProvider(name); err == nil {
 			startTime := nowTime()
-			stream, err := provider.StreamChat(ctx, req)
+			
+			// 为每个降级 provider 创建独立的带超时 context
+			fallbackCtx, cancel := context.WithTimeout(withoutCancel(ctx), r.timeout)
+			stream, err := provider.StreamChat(fallbackCtx, req)
 			if err == nil {
 				// 启动 goroutine 记录统计信息（简化版）
 				go func() {
 					<-stream
+					cancel()
 					latency := nowTime().Sub(startTime)
 					r.recordStats(name, latency, false)
 				}()
 				return stream, nil
 			}
+			cancel()
 		}
 	}
 	return nil, fmt.Errorf("all providers in fallback chain failed")
@@ -492,7 +518,7 @@ func (r *Router) messagesToString(msgs []model.Message) string {
 	return sb.String()
 }
 
-// isEmptyResponse 检查响应是否为空内容。
+// isEmptyResponse 检查响应是否为空内容（有 tool_calls 不算空）。
 func isEmptyResponse(resp *model.ChatResponse) bool {
 	if resp == nil {
 		return true
@@ -501,7 +527,7 @@ func isEmptyResponse(resp *model.ChatResponse) bool {
 		return true
 	}
 	for _, choice := range resp.Choices {
-		if choice.Message.Content != "" {
+		if choice.Message.Content != "" || len(choice.Message.ToolCalls) > 0 {
 			return false
 		}
 	}

@@ -55,13 +55,10 @@ func (h *WebSocketHandler) Handle(c *gin.Context) {
 		return
 	}
 
-	// 创建客户端
+	// 创建客户端（暂不注册，等收到 CONNECTION 消息后再注册以完成去重）
 	client := websocket.NewClient(conn, "", "", nil)
 
-	// 注册客户端到 Hub
-	h.hub.Register <- client
-
-	// 启动读写泵
+	// 先启动读写泵
 	go client.WritePump()
 	go client.ReadPump(h.hub, h.handleMessage)
 }
@@ -110,6 +107,15 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 	client.TenantID = msg.TenantID
 	client.PlayerID = payload.PlayerID
 
+	// PlayerID 设置完成后注册到 Hub（Hub 会去重同一 player 的旧连接）
+	h.hub.Register <- client
+
+	// 检查客户端是否仍然有效（可能被 Hub 关闭）
+	if !h.isClientValid(client) {
+		h.logger.Warn("Client was closed by Hub during registration", "playerId", payload.PlayerID)
+		return
+	}
+
 	// 查找或创建玩家
 	player, err := h.playerRepo.GetByDeviceID(payload.DeviceID, msg.TenantID)
 	if err != nil {
@@ -133,6 +139,12 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 		h.logger.Info("Player found", "playerId", player.ID, "nickname", player.Nickname)
 		// 更新最后访问时间
 		_ = h.playerRepo.UpdateLastVisit(player.ID)
+	}
+
+	// 再次检查客户端是否仍然有效
+	if !h.isClientValid(client) {
+		h.logger.Warn("Client was closed during player lookup", "playerId", payload.PlayerID)
+		return
 	}
 
 	// 获取会话
@@ -391,4 +403,9 @@ func (h *WebSocketHandler) handlePing(client *websocket.Client, msg *websocket.M
 		},
 	)
 	_ = client.SendMessage(pongMsg)
+}
+
+// isClientValid 检查客户端是否仍然有效（channel 未关闭）
+func (h *WebSocketHandler) isClientValid(client *websocket.Client) bool {
+	return client.IsValid()
 }

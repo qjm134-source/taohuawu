@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/watertown/guide/internal/agent/tools"
@@ -37,6 +38,10 @@ type Runtime struct {
 	emotionDetector emotion.Detector
 	config          Config
 	logger          logging.Logger
+
+	// inflightWelcome 防止同一个 player 并发触发 HandleWelcome，
+	// value 是 chan struct{}，第一个请求 close channel，后续请求等待。
+	inflightWelcome sync.Map // playerID → chan struct{}
 }
 
 // Config Agent 配置
@@ -70,6 +75,7 @@ func NewRuntime(
 }
 
 // HandleWelcome 处理欢迎
+// 同一 player 的并发请求会被合并：只有第一个真正调用 LLM，其余等待并共享缓存结果。
 func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, error) {
 	// 总超时
 	ctx, cancel := utils.WithTimeoutFrom(ctx, r.config.Timeout)
@@ -77,12 +83,46 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 
 	r.logger.Info("[HandleWelcome] Starting", "playerId", session.PlayerID)
 
+	cacheKey := "welcome_" + session.PlayerID
+
 	// 检查缓存
-	if cached, hit := r.optimizer.GetCache("welcome_" + session.PlayerID); hit {
+	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
 		r.logger.Info("[HandleWelcome] Cache hit", "playerId", session.PlayerID)
 		return cached, nil
 	}
 
+	// 并发防护：同一 player 只允许一个 HandleWelcome 在飞
+	notifyChan := make(chan struct{})
+	if actual, loaded := r.inflightWelcome.LoadOrStore(session.PlayerID, notifyChan); loaded {
+		// 已有正在进行的请求，等待它完成
+		r.logger.Info("[HandleWelcome] Waiting for inflight request", "playerId", session.PlayerID)
+		select {
+		case <-actual.(chan struct{}):
+			// 上一个请求完成，从缓存读取
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		// 再次检查缓存
+		if cached, hit := r.optimizer.GetCache(cacheKey); hit {
+			return cached, nil
+		}
+		// 如果缓存仍然为空（上一个请求失败了），自己重试
+		// 清除旧的 inflight 标记，重新进入
+		r.inflightWelcome.Delete(session.PlayerID)
+		// 递归重试一次（带 guard 防止无限递归）
+		return r.handleWelcomeInternal(ctx, session, cacheKey)
+	}
+	// 确保完成后通知等待者
+	defer func() {
+		r.inflightWelcome.Delete(session.PlayerID)
+		close(notifyChan)
+	}()
+
+	return r.handleWelcomeInternal(ctx, session, cacheKey)
+}
+
+// handleWelcomeInternal 实际的欢迎消息生成逻辑（不含 inflight guard）。
+func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, cacheKey string) (string, error) {
 	// 构建消息
 	prompt := BuildWelcomePrompt(session.Nickname)
 
@@ -95,7 +135,7 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 		Messages:    messages,
 		Model:       "", // 留空，让路由根据策略自动选择模型
 		Temperature: 0.7,
-		MaxTokens:   200,
+		MaxTokens:   500,
 	}
 
 	r.logger.Info("[HandleWelcome] LLM health check", "healthy", r.llmAdapter.IsHealthy())
@@ -132,7 +172,7 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 	session.AddMessage("assistant", reply, "neutral", nil)
 
 	// 缓存回复
-	r.optimizer.SetCache("welcome_"+session.PlayerID, reply)
+	r.optimizer.SetCache(cacheKey, reply)
 
 	return reply, nil
 }
@@ -165,8 +205,11 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	history := session.GetMessages(10)
 	messages := []llm.Message{{Role: "system", Content: SystemPrompt}}
 
-	// 添加历史
+	// 添加历史（跳过空内容消息，避免被 LLM API 拒绝）
 	for _, msg := range history {
+		if msg.Content == "" {
+			continue
+		}
 		messages = append(messages, llm.Message{
 			Role:    msg.Role,
 			Content: msg.Content,
@@ -245,9 +288,11 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	stats.Cost = cost.CalculateCost(response.Model, response.Usage.PromptTokens, response.Usage.CompletionTokens)
 	stats.CacheHit = false
 
-	// 添加到会话历史
+	// 添加到会话历史（仅当回复非空时才添加 assistant 消息，避免后续请求携带空内容导致 API 校验失败）
 	session.AddMessage("user", message, emotionStr, nil)
-	session.AddMessage("assistant", reply, emotionStr, nil)
+	if reply != "" {
+		session.AddMessage("assistant", reply, emotionStr, nil)
+	}
 
 	// 缓存回复（使用 session ID 隔离）
 	r.optimizer.SetCache(cacheKey, reply)
@@ -282,8 +327,11 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	history := session.GetMessages(10)
 	messages := []llm.Message{{Role: "system", Content: SystemPrompt}}
 
-	// 添加历史
+	// 添加历史（跳过空内容消息，避免被 LLM API 拒绝）
 	for _, msg := range history {
+		if msg.Content == "" {
+			continue
+		}
 		messages = append(messages, llm.Message{
 			Role:    msg.Role,
 			Content: msg.Content,
@@ -391,9 +439,11 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		// 注意：流式响应通常不会返回 token 使用信息，需要单独获取或估算
 		stats.Cost = cost.CalculateCost(stats.Model, stats.InputTokens, stats.OutputTokens)
 
-		// 添加到会话历史
+		// 添加到会话历史（空 assistant 消息不写入，避免后续请求触发 API 校验失败）
 		session.AddMessage("user", message, emotionStr, nil)
-		session.AddMessage("assistant", fullReply.String(), emotionStr, nil)
+		if fullReply.Len() > 0 {
+			session.AddMessage("assistant", fullReply.String(), emotionStr, nil)
+		}
 
 		// 缓存回复（不缓存空内容）
 		if fullReply.Len() > 0 {
@@ -501,6 +551,17 @@ func (r *Runtime) handleNonStreamChat(ctx context.Context, req *llm.LLMRequest, 
 	if err != nil {
 		r.logger.Error("[HandleChatStream] Non-streaming chat failed", "error", err)
 		return
+	}
+
+	// 如果 LLM 返回了工具调用，执行工具并再次请求 LLM 获取最终回复
+	if resp.HasToolCalls() {
+		r.logger.Info("[HandleChatStream] Non-streaming response has tool calls", "count", len(resp.GetToolCalls()))
+		resp2, toolErr := r.handleToolCalls(ctx, resp, req.Messages, req.Tools, stats)
+		if toolErr != nil {
+			r.logger.Error("[HandleChatStream] Tool call handling in non-streaming fallback failed", "error", toolErr)
+			return
+		}
+		resp = resp2
 	}
 
 	// 获取回复内容

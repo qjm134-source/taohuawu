@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -22,6 +23,7 @@ type Provider struct {
 	outputPrice      float64
 	maxContextLength int
 	defaultMaxTokens int64
+	logger           *slog.Logger
 }
 
 // Config 用于配置 Claude Provider。
@@ -62,6 +64,7 @@ func NewProvider(cfg Config) (*Provider, error) {
 		outputPrice:      cfg.OutputPrice,
 		maxContextLength: cfg.MaxContextLength,
 		defaultMaxTokens: cfg.DefaultMaxTokens,
+		logger:           slog.Default().With("provider", "claude", "model", cfg.Model),
 	}, nil
 }
 
@@ -95,9 +98,32 @@ func (p *Provider) Chat(ctx context.Context, req *model.ChatRequest) (*model.Cha
 		return nil, err
 	}
 
+	p.logger.Info("[Claude] Sending chat request",
+		"messages_count", len(params.Messages),
+		"tools_count", len(params.Tools),
+		"has_system", len(params.System) > 0,
+		"max_tokens", params.MaxTokens)
+
 	msg, err := p.client.Messages.New(ctx, *params)
 	if err != nil {
+		p.logger.Error("[Claude] API call failed", "error", err)
 		return nil, fmt.Errorf("claude chat failed: %w", err)
+	}
+
+	p.logger.Info("[Claude] Raw response received",
+		"stop_reason", msg.StopReason,
+		"content_blocks", len(msg.Content),
+		"input_tokens", msg.Usage.InputTokens,
+		"output_tokens", msg.Usage.OutputTokens)
+
+	// 逐块记录 content 类型
+	for i, block := range msg.Content {
+		p.logger.Info("[Claude] Content block",
+			"index", i,
+			"type", block.Type,
+			"text_len", len(block.Text),
+			"tool_use_id", block.ID,
+			"tool_use_name", block.Name)
 	}
 
 	return p.convertResponse(req.Model, msg), nil
@@ -198,7 +224,15 @@ func (p *Provider) convertMessages(msgs []model.Message) ([]anthropic.MessagePar
 		case model.RoleUser:
 			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
 		case model.RoleAssistant:
-			blocks := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(m.Content)}
+			// 跳过既无内容也无工具调用的空 assistant 消息，避免被 API 拒绝。
+			if m.Content == "" && len(m.ToolCalls) == 0 {
+				continue
+			}
+			// 仅当 Content 不为空时才创建文本块，避免空字符串文本块被 API 拒绝。
+			var blocks []anthropic.ContentBlockParamUnion
+			if m.Content != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
+			}
 			for _, tc := range m.ToolCalls {
 				var input any
 				if tc.Function.Arguments != "" {
@@ -289,6 +323,11 @@ func (p *Provider) convertResponse(modelName string, msg *anthropic.Message) *mo
 	choice.FinishReason = string(msg.StopReason)
 	resp.Choices = append(resp.Choices, choice)
 
+	p.logger.Info("[Claude] convertResponse result",
+		"content_len", len(content.Content),
+		"tool_calls_count", len(content.ToolCalls),
+		"finish_reason", choice.FinishReason)
+
 	return resp
 }
 
@@ -303,6 +342,9 @@ func (p *Provider) extractContent(blocks []anthropic.ContentBlockUnion) model.Me
 				sb.WriteString("\n")
 			}
 			sb.WriteString(block.Text)
+		case "thinking":
+			// Claude 的思考块，不包含实际文本内容，跳过
+			continue
 		case "tool_use":
 			if block.ID == "" {
 				continue

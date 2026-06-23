@@ -102,9 +102,22 @@ const WSClient = (() => {
      * 连接 WebSocket
      */
     function connect() {
-        if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-            return;
+        // 防止重复连接：OPEN/CONNECTING/CLOSING 都不允许新建
+        if (socket) {
+            var state = socket.readyState;
+            if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) {
+                return;
+            }
+            // CLOSING 状态：先强制断开旧 socket，防止其 onclose 触发额外重连
+            if (state === WebSocket.CLOSING) {
+                socket.onclose = null; // 移除旧回调，防止重复 scheduleReconnect
+                try { socket.close(); } catch(e) { /* ignore */ }
+                socket = null;
+            }
         }
+
+        // 清理可能残留的重连定时器
+        stopReconnect();
 
         try {
             socket = new WebSocket(CONFIG.url);

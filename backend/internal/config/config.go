@@ -49,6 +49,7 @@ type WebSocketConfig struct {
 // ModelConfig 单个模型配置
 type ModelConfig struct {
 	Name        string  `yaml:"name"`
+	Type        string  `yaml:"type"` // provider 类型: "claude" / "openai"，留空则自动推断
 	BaseURL     string  `yaml:"base_url"`
 	APIKey      string  `yaml:"api_key"`
 	Enabled     bool    `yaml:"enabled"`
@@ -74,9 +75,12 @@ type CircuitConfig struct {
 
 type CostConfig struct {
 	MaxHistoryMessages  int          `yaml:"max_history_messages"`
+	MaxHistoryTokens    int          `yaml:"max_history_tokens"`
 	SummaryThreshold    int          `yaml:"summary_threshold"`
 	SimilarityThreshold float64      `yaml:"similarity_threshold"`
 	CacheTTL            timeDuration `yaml:"cache_ttl"`
+	SummaryModel        string       `yaml:"summary_model"`    // 指定用于摘要的模型，留空则使用第一个启用的模型
+	SummaryTimeout      timeDuration `yaml:"summary_timeout"`  // 摘要请求超时时间
 }
 
 type KnowledgeConfig struct {
@@ -167,8 +171,6 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{}
-
-
 
 	// 从 YAML 文件加载基础配置
 	configFile := os.Getenv("CONFIG_FILE")

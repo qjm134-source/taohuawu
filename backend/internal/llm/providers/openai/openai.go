@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ type Provider struct {
 	outputPrice      float64
 	maxContextLength int
 	defaultMaxTokens int
+	logger           *slog.Logger
 }
 
 // Config 用于配置 OpenAI Provider。
@@ -68,6 +70,7 @@ func NewProvider(cfg Config) (*Provider, error) {
 		outputPrice:      cfg.OutputPrice,
 		maxContextLength: cfg.MaxContextLength,
 		defaultMaxTokens: cfg.DefaultMaxTokens,
+		logger:           slog.Default().With("provider", "openai", "model", cfg.Model),
 	}, nil
 }
 
@@ -98,9 +101,30 @@ func (p *Provider) MaxContextLength() int { return p.maxContextLength }
 func (p *Provider) Chat(ctx context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
 	openaiReq := p.convertRequest(req, false)
 
+	p.logger.Info("[OpenAI] Sending chat request",
+		"messages_count", len(openaiReq.Messages),
+		"tools_count", len(openaiReq.Tools),
+		"model", openaiReq.Model,
+		"max_tokens", openaiReq.MaxTokens)
+
 	resp, err := p.client.CreateChatCompletion(ctx, openaiReq)
 	if err != nil {
+		p.logger.Error("[OpenAI] API call failed", "error", err)
 		return nil, fmt.Errorf("openai chat failed: %w", err)
+	}
+
+	p.logger.Info("[OpenAI] Raw response received",
+		"choices_count", len(resp.Choices),
+		"model", resp.Model,
+		"prompt_tokens", resp.Usage.PromptTokens,
+		"completion_tokens", resp.Usage.CompletionTokens)
+
+	for i, c := range resp.Choices {
+		p.logger.Info("[OpenAI] Choice detail",
+			"index", i,
+			"finish_reason", c.FinishReason,
+			"content_len", len(c.Message.Content),
+			"tool_calls_count", len(c.Message.ToolCalls))
 	}
 
 	return p.convertResponse(resp), nil

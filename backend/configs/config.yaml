@@ -23,6 +23,7 @@ llm:
   # 模型配置列表，按优先级排序
   models:
     - name: mimo-v2.5-pro
+      type: claude  # 显式指定使用 Anthropic SDK，URL 路径中的 /anthropic 表示兼容 Anthropic Messages API
       base_url: https://token-plan-cn.xiaomimimo.com/anthropic
       api_key: ${MIMO_API_KEY}
       enabled: true
@@ -36,7 +37,7 @@ llm:
       max_tokens: 500
       temperature: 0.7
 
-  timeout: 10s
+  timeout: 30s
   max_retries: 2
   retry_delay: 2s
   auto_switch: true  # 是否自动切换到下一个模型
@@ -50,9 +51,12 @@ circuit:
 
 cost:
   max_history_messages: 10
-  summary_threshold: 10
+  max_history_tokens: 4096
+  summary_threshold: 20
   similarity_threshold: 0.95
   cache_ttl: 3600s
+  summary_model: ""            # LLM 摘要使用的模型，留空则使用第一个启用的模型
+  summary_timeout: 30s         # 摘要请求超时时间
 
 knowledge:
   path: data/knowledge

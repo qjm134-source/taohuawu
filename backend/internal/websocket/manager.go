@@ -39,24 +39,27 @@ type Client struct {
 	Send       chan []byte
 	Pool       *WorkerPool
 	mu         sync.Mutex
+	closed     bool // 标记连接是否已关闭
 }
 
 // Hub 连接中心
 type Hub struct {
-	clients    map[string]*Client
-	broadcast  chan []byte
-	Register   chan *Client
-	Unregister chan *Client
-	mu         sync.RWMutex
+	clients       map[string]*Client
+	playerClients map[string]string // playerID → clientID，用于去重
+	broadcast     chan []byte
+	Register      chan *Client
+	Unregister    chan *Client
+	mu            sync.RWMutex
 }
 
 // NewHub 创建 Hub
 func NewHub() *Hub {
 	return &Hub{
-		clients:    make(map[string]*Client),
-		broadcast:  make(chan []byte),
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
+		clients:       make(map[string]*Client),
+		playerClients: make(map[string]string),
+		broadcast:     make(chan []byte),
+		Register:      make(chan *Client),
+		Unregister:    make(chan *Client),
 	}
 }
 
@@ -66,15 +69,22 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.Register:
 			h.mu.Lock()
+			// 同一 player 去重：如果有旧连接，关闭旧连接
+			if client.PlayerID != "" {
+				if oldClientID, exists := h.playerClients[client.PlayerID]; exists {
+					if oldClient, ok := h.clients[oldClientID]; ok {
+						// 直接关闭旧连接，不通过 channel 避免死锁
+						h.removeClientLocked(oldClient)
+					}
+				}
+				h.playerClients[client.PlayerID] = client.ID
+			}
 			h.clients[client.ID] = client
 			h.mu.Unlock()
 
 		case client := <-h.Unregister:
 			h.mu.Lock()
-			if _, ok := h.clients[client.ID]; ok {
-				delete(h.clients, client.ID)
-				close(client.Send)
-			}
+			h.removeClientLocked(client)
 			h.mu.Unlock()
 
 		case message := <-h.broadcast:
@@ -84,11 +94,31 @@ func (h *Hub) Run() {
 				case client.Send <- message:
 				default:
 					// 客户端缓冲区满，断开连接
-					h.Unregister <- client
+					go h.UnregisterClient(client)
 				}
 			}
 			h.mu.RUnlock()
 		}
+	}
+}
+
+// removeClientLocked 在持有锁的情况下移除客户端（内部方法）
+func (h *Hub) removeClientLocked(client *Client) {
+	if _, ok := h.clients[client.ID]; ok {
+		delete(h.clients, client.ID)
+		if client.PlayerID != "" {
+			// 只有当前映射指向这个 client 时才删除
+			if h.playerClients[client.PlayerID] == client.ID {
+				delete(h.playerClients, client.PlayerID)
+			}
+		}
+		// 安全关闭 Send channel
+		client.mu.Lock()
+		if !client.closed {
+			client.closed = true
+			close(client.Send)
+		}
+		client.mu.Unlock()
 	}
 }
 
@@ -205,6 +235,10 @@ func (c *Client) SendMessage(msg *Message) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.closed {
+		return errors.New("client is closed")
+	}
+
 	select {
 	case c.Send <- data:
 		return nil
@@ -218,6 +252,22 @@ func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.closed {
+		return // 避免重复关闭
+	}
+	c.closed = true
 	close(c.Send)
 	_ = c.Connection.Close()
+}
+
+// IsClosed 检查连接是否已关闭
+func (c *Client) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// IsValid 检查客户端是否仍然有效（channel 未关闭）
+func (c *Client) IsValid() bool {
+	return !c.IsClosed()
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/watertown/guide/internal/config"
 	"github.com/watertown/guide/internal/llm/model"
@@ -200,8 +201,8 @@ type MultiModelRouter struct {
 }
 
 // NewMultiModelRouter 创建并配置一个多模型路由器。
-func NewMultiModelRouter(logger logging.Logger) *MultiModelRouter {
-	r := router.NewRouter(logger)
+func NewMultiModelRouter(logger logging.Logger, timeout time.Duration) *MultiModelRouter {
+	r := router.NewRouter(logger, timeout)
 	return &MultiModelRouter{
 		adapter: NewRouterAdapter(r),
 		router:  r,
@@ -312,7 +313,7 @@ func initializeOpenAIProvider(cfg ProviderConfig) (model.Provider, error) {
 // 根据模型名称自动推断 provider 类型（claude/openai），并注册到路由器中。
 // 降级链按配置顺序排列，优先使用排在前面的模型。
 func NewRouterFromConfig(cfg config.LLMConfig, logger logging.Logger) Adapter {
-	r := router.NewRouter(logger)
+	r := router.NewRouter(logger, cfg.Timeout.Duration)
 
 	// 设置路由策略
 	strategy := parseStrategy(cfg.Strategy)
@@ -329,7 +330,11 @@ func NewRouterFromConfig(cfg config.LLMConfig, logger logging.Logger) Adapter {
 			continue
 		}
 
-		providerType := inferProviderType(mc.Name, mc.BaseURL)
+		// 优先使用配置中显式指定的 type，留空时自动推断
+		providerType := mc.Type
+		if providerType == "" {
+			providerType = inferProviderType(mc.Name, mc.BaseURL)
+		}
 		providerName := sanitizeProviderName(mc.Name)
 
 		var provider model.Provider

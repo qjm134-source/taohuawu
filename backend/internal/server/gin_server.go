@@ -286,8 +286,31 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 	optimizer := cost.NewOptimizer(
 		s.config.Cost.CacheTTL.Duration,
 		s.config.Cost.MaxHistoryMessages,
+		s.config.Cost.MaxHistoryTokens,
 		nil, // TODO: Implement embedding API
 	)
+
+	// 初始化 LLM 摘要器
+	if s.config.Cost.SummaryTimeout.Duration == 0 {
+		s.config.Cost.SummaryTimeout.Duration = 15 * time.Second
+	}
+	summaryModel := s.config.Cost.SummaryModel
+	if summaryModel == "" {
+		// 使用第一个启用的模型
+		for _, mc := range s.config.LLM.Models {
+			if mc.Enabled {
+				summaryModel = mc.Name
+				break
+			}
+		}
+	}
+	if summaryModel != "" {
+		llmSummarizer := cost.NewLLMSummarizer(llmAdapter, summaryModel, s.config.Cost.SummaryTimeout.Duration, s.logger)
+		cost.SetSummarizer(llmSummarizer)
+		s.logger.Info("LLM Summarizer enabled", "model", summaryModel)
+	} else {
+		s.logger.Warn("No model available for summarizer, LLM summarization disabled")
+	}
 
 	// 创建情绪检测器
 	emotionDetector := emotion.NewRuleBasedDetector()
@@ -302,8 +325,8 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 		emotionDetector,
 		agent.Config{
 			MaxRetries:  s.config.LLM.MaxRetries,
-			Timeout:     30 * time.Second, // 总超时 30 秒
-			LLMTimeout:  15 * time.Second, // primary LLM 调用超时 15 秒，剩余给 fallback
+			Timeout:     s.config.Server.ReadTimeout.Duration, // 使用服务器读取超时作为总超时
+			LLMTimeout:  s.config.LLM.Timeout.Duration,        // 使用配置文件中的 LLM 超时
 			ToolTimeout: s.config.LLM.Timeout.Duration,
 		},
 		s.logger,
