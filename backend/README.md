@@ -43,7 +43,9 @@ backend/
 ├── pkg/                     # 工具包
 ├── examples/                # 使用示例
 ├── docs/                    # 详细文档
-│   └── MULTI_MODEL_ROUTER.md
+│   ├── MULTI_MODEL_ROUTER.md
+│   ├── MEMORY_SYSTEM.md
+│   └── OBSERVABILITY.md
 ├── configs/                 # 配置文件
 ├── MODEL_CONFIG.md          # 多模型配置说明
 └── README.md                # 本文档
@@ -491,10 +493,48 @@ adapter := multiRouter.GetAdapter()
 
 详细示例见 [`examples/multi_model_example.go`](examples/multi_model_example.go)。
 
+## 可观测性
+
+项目提供完整的 **Metrics + Traces + Logs + LLM 专项可观测** 能力：
+
+### 核心功能
+
+| 功能 | 说明 | 配置开关 |
+|------|------|---------|
+| **Prometheus 指标** | HTTP/LLM/WebSocket/缓存指标 | `observability.prometheus` |
+| **OpenTelemetry 追踪** | 分布式链路追踪 | `observability.enabled` |
+| **Langfuse LLM 追踪** | LLM 调用详情（输入/输出/Token/成本） | `observability.langfuse.enabled` |
+| **审计日志** | 操作记录 | 默认启用 |
+
+### 配置示例
+
+```yaml
+observability:
+  enabled: true                   # Tracing 总开关
+  prometheus: true                # Prometheus 指标开关
+  trace_exporter: stdout          # stdout（开发）| otlp（生产）
+  
+  langfuse:
+    enabled: false                # Langfuse LLM 专项追踪
+    host: https://cloud.langfuse.com
+```
+
+### 快速查看
+
+- **指标**：访问 `http://localhost:8080/metrics`
+- **Trace**：配置 `trace_exporter: stdout` 后查看日志
+- **Langfuse**：启用后访问 [cloud.langfuse.com](https://cloud.langfuse.com)
+
+详细说明请查看 [可观测性指南](docs/OBSERVABILITY.md)。
+
+---
+
 ## 详细文档
 
 - [多模型路由系统](docs/MULTI_MODEL_ROUTER.md) — 完整架构说明
 - [多模型配置](MODEL_CONFIG.md) — 配置参数详解
+- [可观测性指南](docs/OBSERVABILITY.md) — Prometheus + OpenTelemetry + Langfuse 使用说明
+- [缓存系统设计](docs/CACHE_SYSTEM.md) — 多层缓存架构（精确匹配 + 语义匹配）
 
 ## API 文档
 

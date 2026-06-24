@@ -8,8 +8,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
 	"github.com/watertown/guide/internal/agent"
 	"github.com/watertown/guide/internal/database"
+	"github.com/watertown/guide/internal/observability"
 	"github.com/watertown/guide/internal/websocket"
 	"github.com/watertown/guide/pkg/logging"
 )
@@ -74,6 +76,9 @@ func (h *WebSocketHandler) handleMessage(client *websocket.Client, message []byt
 		return
 	}
 
+	// 记录接收消息指标
+	observability.WebSocketMessagesTotal.WithLabelValues(string(msg.Type), "in").Inc()
+
 	h.logger.Info("Parsed message", "type", msg.Type, "requestId", msg.RequestID, "tenantId", msg.TenantID)
 
 	switch msg.Type {
@@ -110,9 +115,13 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 	// PlayerID 设置完成后注册到 Hub（Hub 会去重同一 player 的旧连接）
 	h.hub.Register <- client
 
+	// 记录 WebSocket 连接指标
+	observability.WebSocketConnections.WithLabelValues(msg.TenantID).Inc()
+
 	// 检查客户端是否仍然有效（可能被 Hub 关闭）
 	if !h.isClientValid(client) {
 		h.logger.Warn("Client was closed by Hub during registration", "playerId", payload.PlayerID)
+		observability.WebSocketConnections.WithLabelValues(msg.TenantID).Dec()
 		return
 	}
 
@@ -390,6 +399,9 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		},
 	)
 	_ = client.SendMessage(finalMsg)
+
+	// 记录发出的消息指标
+	observability.WebSocketMessagesTotal.WithLabelValues(string(websocket.MessageTypeNPCReplyChunk), "out").Inc()
 }
 
 // handlePing 处理心跳

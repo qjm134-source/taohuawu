@@ -2,7 +2,6 @@ package cost
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -120,15 +119,17 @@ func (c *LayeredCache) buildSemanticIndex(ctx context.Context, question, answer,
 		return
 	}
 
-	embeddingKey := fmt.Sprintf("%x", embedding)
+	// 使用简单的键（可以使用问题本身或哈希）
+	key := hash(question + ":" + model + ":semantic")
 	c.mu.Lock()
-	c.semanticCache[embeddingKey] = &CacheEntry{
+	c.semanticCache[key] = &CacheEntry{
 		Question:    question,
 		Answer:      answer,
 		CreatedAt:   time.Now(),
 		Model:       model,
 		TokensSaved: tokensSaved,
 		Type:        CacheTypeSemantic,
+		Embedding:   embedding, // 存储 embedding
 	}
 	c.mu.Unlock()
 }
@@ -148,12 +149,12 @@ func (c *LayeredCache) GetSimilar(ctx context.Context, question string, threshol
 	defer c.mu.RUnlock()
 
 	for _, entry := range c.semanticCache {
-		entryEmbedding, err := c.embeddingAPI.GetEmbedding(ctx, entry.Question)
-		if err != nil {
+		// 使用缓存的 embedding，避免重复调用 API
+		if entry.Embedding == nil || len(entry.Embedding) == 0 {
 			continue
 		}
 
-		sim := c.embeddingAPI.Similarity(embedding, entryEmbedding)
+		sim := c.embeddingAPI.Similarity(embedding, entry.Embedding)
 		if sim > threshold {
 			return entry.Answer, true
 		}

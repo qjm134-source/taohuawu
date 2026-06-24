@@ -8,11 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/watertown/guide/internal/agent/tools"
 	"github.com/watertown/guide/internal/config"
 	"github.com/watertown/guide/internal/cost"
 	"github.com/watertown/guide/internal/emotion"
 	"github.com/watertown/guide/internal/llm"
+	"github.com/watertown/guide/internal/observability"
 	"github.com/watertown/guide/pkg/logging"
 	"github.com/watertown/guide/pkg/utils"
 )
@@ -83,6 +86,12 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 	ctx, cancel := utils.WithTimeoutFrom(ctx, r.config.Timeout)
 	defer cancel()
 
+	ctx, span := observability.StartSpan(ctx, "Agent.HandleWelcome",
+		attribute.String("player_id", session.PlayerID),
+		attribute.String("tenant_id", session.TenantID),
+	)
+	defer span.End()
+
 	r.logger.Info("[HandleWelcome] Starting", "playerId", session.PlayerID)
 
 	cacheKey := "welcome_" + session.PlayerID
@@ -125,6 +134,11 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 
 // handleWelcomeInternal 实际的欢迎消息生成逻辑（不含 inflight guard）。
 func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, cacheKey string) (string, error) {
+	startTime := time.Now()
+
+	// Langfuse trace
+	langfuseTrace := observability.StartLLMTrace("welcome", session.PlayerID, session.TenantID)
+
 	// 构建消息
 	prompt := BuildWelcomePrompt(session.Nickname)
 
@@ -166,6 +180,9 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 
 	if err != nil {
 		r.logger.Error("[HandleWelcome] All LLM failed", "error", err)
+		observability.AgentRequestsTotal.WithLabelValues("welcome", "error").Inc()
+		langfuseTrace.RecordGeneration("llm-call", "unknown", req.Messages, "", 0, 0, 0, 0, err)
+		langfuseTrace.End()
 
 		// 检查是否启用兜底响应
 		if r.config.FallbackResponse.Enabled && r.config.FallbackResponse.WelcomeMessage != "" {
@@ -173,6 +190,7 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 			reply := r.config.FallbackResponse.WelcomeMessage
 			session.AddMessage("assistant", reply, "neutral", nil)
 			r.optimizer.SetCache(cacheKey, reply)
+			observability.AgentRequestDuration.WithLabelValues("welcome").Observe(time.Since(startTime).Seconds())
 			return reply, nil
 		}
 
@@ -182,6 +200,27 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 	// 提取回复
 	reply := response.Choices[0].Message.Content
 	session.AddMessage("assistant", reply, "neutral", nil)
+
+	// 记录 LLM 指标
+	model := response.Model
+	if model == "" {
+		model = "unknown"
+	}
+	llmCost := cost.CalculateCost(model, response.Usage.PromptTokens, response.Usage.CompletionTokens)
+	latencyMs := time.Since(startTime).Milliseconds()
+
+	observability.LLMRequestsTotal.WithLabelValues(model, "success").Inc()
+	observability.LLMRequestDuration.WithLabelValues(model).Observe(time.Since(startTime).Seconds())
+	observability.LLMRequestTokens.WithLabelValues(model).Add(float64(response.Usage.PromptTokens))
+	observability.LLMCompletionTokens.WithLabelValues(model).Add(float64(response.Usage.CompletionTokens))
+	observability.CostTotal.WithLabelValues(model).Add(llmCost)
+	observability.AgentRequestsTotal.WithLabelValues("welcome", "success").Inc()
+	observability.AgentRequestDuration.WithLabelValues("welcome").Observe(time.Since(startTime).Seconds())
+
+	// 记录 Langfuse generation
+	langfuseTrace.RecordGeneration("llm-call", model, req.Messages, reply,
+		response.Usage.PromptTokens, response.Usage.CompletionTokens, llmCost, latencyMs, nil)
+	langfuseTrace.End()
 
 	// 缓存回复
 	r.optimizer.SetCache(cacheKey, reply)
@@ -196,6 +235,16 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	ctx, cancel := utils.WithTimeoutFrom(ctx, r.config.Timeout)
 	defer cancel()
 
+	ctx, span := observability.StartSpan(ctx, "Agent.HandleChat",
+		attribute.String("session_id", session.ID),
+		attribute.String("player_id", session.PlayerID),
+		attribute.String("tenant_id", session.TenantID),
+	)
+	defer span.End()
+
+	// Langfuse trace
+	langfuseTrace := observability.StartLLMTrace("chat", session.PlayerID, session.TenantID)
+
 	// 初始化统计信息
 	stats := &LLMStats{}
 
@@ -208,16 +257,22 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	cacheKey := session.ID + "_" + message
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
 		r.logger.Info("[HandleChat] Exact cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		span.SetAttributes(attribute.Bool("cache_hit", true))
 		session.AddMessage("assistant", cached, emotionStr, nil)
 		stats.CacheHit = true
+		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+		langfuseTrace.End()
 		return cached, emotionStr, stats, nil
 	}
 
 	// 检查语义缓存（相似问题匹配）
 	if cached, hit := r.optimizer.CheckSimilarity(ctx, message, 0.85); hit {
 		r.logger.Info("[HandleChat] Semantic cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		span.SetAttributes(attribute.Bool("cache_hit", true))
 		session.AddMessage("assistant", cached, emotionStr, nil)
 		stats.CacheHit = true
+		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+		langfuseTrace.End()
 		return cached, emotionStr, stats, nil
 	}
 
@@ -281,6 +336,10 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 
 	if err != nil {
 		r.logger.Error("[HandleChat] All LLM calls failed", "error", err)
+		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
+		observability.RecordError(span, err)
+		langfuseTrace.RecordGeneration("llm-call", "unknown", req.Messages, "", 0, 0, 0, 0, err)
+		langfuseTrace.End()
 		return "", "", nil, fmt.Errorf("failed to get response: %w", err)
 	}
 
@@ -290,6 +349,9 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		response, err = r.handleToolCalls(ctx, response, messages, tools, stats)
 		if err != nil {
 			r.logger.Error("[HandleChat] Tool call handling failed", "error", err)
+			observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
+			langfuseTrace.RecordGeneration("llm-call", "unknown", req.Messages, "", 0, 0, 0, 0, err)
+			langfuseTrace.End()
 			return "", "", nil, fmt.Errorf("failed to handle tool calls: %w", err)
 		}
 	}
@@ -308,6 +370,20 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	stats.Cost = cost.CalculateCost(response.Model, response.Usage.PromptTokens, response.Usage.CompletionTokens)
 	stats.CacheHit = false
 
+	// 记录 LLM 指标
+	r.recordLLMMetrics(response.Model, "success", time.Since(startTime).Seconds(),
+		response.Usage.PromptTokens, response.Usage.CompletionTokens, stats.Cost)
+	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+	observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(startTime).Seconds())
+
+	span.SetAttributes(
+		attribute.String("llm.model", response.Model),
+		attribute.Int("llm.input_tokens", response.Usage.PromptTokens),
+		attribute.Int("llm.output_tokens", response.Usage.CompletionTokens),
+		attribute.Int("llm.total_tokens", response.Usage.TotalTokens),
+		attribute.Float64("llm.cost", stats.Cost),
+	)
+
 	// 添加到会话历史（仅当回复非空时才添加 assistant 消息，避免后续请求携带空内容导致 API 校验失败）
 	session.AddMessage("user", message, emotionStr, nil)
 	if reply != "" {
@@ -319,12 +395,26 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 
 	r.logger.Info("[HandleChat] Complete", "reply_length", len(reply), "model", stats.Model, "tokens", stats.TotalTokens, "cost", stats.Cost)
 
+	// 记录 Langfuse generation
+	langfuseTrace.RecordGeneration("llm-call", stats.Model, req.Messages, reply,
+		stats.InputTokens, stats.OutputTokens, stats.Cost, stats.LatencyMs, nil)
+	langfuseTrace.End()
+
 	return reply, emotionStr, stats, nil
 }
 
 // HandleChatStream 处理聊天（流式）
 func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, message string) (<-chan string, <-chan *LLMStats, error) {
 	r.logger.Info("[HandleChatStream] Start", "sessionId", session.ID, "message", message)
+
+	ctx, span := observability.StartSpan(ctx, "Agent.HandleChatStream",
+		attribute.String("session_id", session.ID),
+		attribute.String("player_id", session.PlayerID),
+		attribute.String("tenant_id", session.TenantID),
+	)
+
+	// Langfuse trace
+	langfuseTrace := observability.StartLLMTrace("chat-stream", session.PlayerID, session.TenantID)
 
 	// 检测情绪
 	em := r.emotionDetector.Detect(message)
@@ -334,6 +424,10 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	cacheKey := session.ID + "_" + message
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit && cached != "" {
 		r.logger.Info("[HandleChatStream] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		span.SetAttributes(attribute.Bool("cache_hit", true))
+		span.End()
+		langfuseTrace.End()
+		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 		contentChan := make(chan string, 1)
 		statsChan := make(chan *LLMStats, 1)
 		contentChan <- cached
@@ -401,6 +495,11 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 	if err != nil {
 		r.logger.Error("[HandleChatStream] All LLM stream calls failed", "error", err)
+		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
+		observability.RecordError(span, err)
+		span.End()
+		langfuseTrace.RecordGeneration("llm-call", "unknown", req.Messages, "", 0, 0, 0, 0, err)
+		langfuseTrace.End()
 		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
 	}
 
@@ -458,6 +557,32 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		stats.LatencyMs = time.Since(startTime).Milliseconds()
 		// 注意：流式响应通常不会返回 token 使用信息，需要单独获取或估算
 		stats.Cost = cost.CalculateCost(stats.Model, stats.InputTokens, stats.OutputTokens)
+
+		// 记录 LLM 指标
+		model := stats.Model
+		if model == "" {
+			model = "unknown"
+		}
+		r.recordLLMMetrics(model, "success", time.Since(startTime).Seconds(),
+			stats.InputTokens, stats.OutputTokens, stats.Cost)
+		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+		observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(startTime).Seconds())
+
+		if model != "unknown" {
+			span.SetAttributes(
+				attribute.String("llm.model", model),
+				attribute.Int("llm.input_tokens", stats.InputTokens),
+				attribute.Int("llm.output_tokens", stats.OutputTokens),
+				attribute.Int("llm.total_tokens", stats.TotalTokens),
+				attribute.Float64("llm.cost", stats.Cost),
+			)
+		}
+		span.End()
+
+		// 记录 Langfuse generation
+		langfuseTrace.RecordGeneration("llm-call", stats.Model, req.Messages, fullReply.String(),
+			stats.InputTokens, stats.OutputTokens, stats.Cost, stats.LatencyMs, nil)
+		langfuseTrace.End()
 
 		// 添加到会话历史（空 assistant 消息不写入，避免后续请求触发 API 校验失败）
 		session.AddMessage("user", message, emotionStr, nil)
@@ -611,6 +736,18 @@ func (r *Runtime) handleNonStreamChat(ctx context.Context, req *llm.LLMRequest, 
 		// 如果内容为空，发送一个空字符通知前端
 		contentChan <- ""
 	}
+}
+
+// recordLLMMetrics 记录 LLM 相关的 Prometheus 指标。
+func (r *Runtime) recordLLMMetrics(model, status string, durationSec float64, inputTokens, outputTokens int, costAmount float64) {
+	if model == "" {
+		model = "unknown"
+	}
+	observability.LLMRequestsTotal.WithLabelValues(model, status).Inc()
+	observability.LLMRequestDuration.WithLabelValues(model).Observe(durationSec)
+	observability.LLMRequestTokens.WithLabelValues(model).Add(float64(inputTokens))
+	observability.LLMCompletionTokens.WithLabelValues(model).Add(float64(outputTokens))
+	observability.CostTotal.WithLabelValues(model).Add(costAmount)
 }
 
 // GetSession 获取会话

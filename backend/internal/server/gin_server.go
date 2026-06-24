@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/watertown/guide/internal/agent"
 	"github.com/watertown/guide/internal/agent/tools"
 	"github.com/watertown/guide/internal/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/watertown/guide/internal/emotion"
 	"github.com/watertown/guide/internal/knowledge"
 	"github.com/watertown/guide/internal/llm"
+	"github.com/watertown/guide/internal/observability"
 	"github.com/watertown/guide/internal/websocket"
 	"github.com/watertown/guide/pkg/logging"
 	"gorm.io/gorm"
@@ -85,14 +87,23 @@ func (s *Server) setupRouter() {
 
 	s.router = gin.New()
 	s.router.Use(gin.Recovery())
+	s.router.Use(observability.TracingMiddleware(s.config.Observability.ServiceName))
+
+	// 根据配置决定是否启用 Prometheus
+	if s.config.Observability.Prometheus {
+		s.router.Use(observability.PrometheusMiddleware())
+	}
+
 	s.router.Use(s.loggingMiddleware())
 	s.router.Use(s.corsMiddleware())
 
 	// 健康检查
 	s.router.GET("/health", s.healthCheck)
 
-	// Prometheus 指标
-	s.router.GET("/metrics", s.getMetrics)
+	// Prometheus 指标（根据配置启用）
+	if s.config.Observability.Prometheus {
+		s.router.GET("/metrics", s.getMetrics)
+	}
 
 	// 审计日志 API
 	api := s.router.Group("/api/v1")
@@ -161,11 +172,9 @@ func (s *Server) healthCheck(c *gin.Context) {
 	})
 }
 
-// getMetrics 获取指标
+// getMetrics 暴露 Prometheus 指标
 func (s *Server) getMetrics(c *gin.Context) {
-	// 简化实现，实际应该返回 Prometheus 指标
-	c.Header("Content-Type", "text/plain")
-	c.String(http.StatusOK, "# Prometheus metrics\n")
+	promhttp.Handler().ServeHTTP(c.Writer, c.Request)
 }
 
 // getAuditLogs 获取审计日志

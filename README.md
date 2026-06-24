@@ -63,7 +63,7 @@
 | **实时工具调用** | 支持 Function Calling，例如询问天气时自动调用 `get_weather` 工具 |
 | **成本优化** | 相似问题缓存、历史消息摘要、Token 估算、成本计算 |
 | **企业级可用性** | 熔断器 + 多模型降级链 + 自动重试 + FallbackAdapter 兜底 |
-| **可观测性** | Prometheus 指标 + OpenTelemetry 分布式追踪 + 审计日志 |
+| **可观测性** | Prometheus 指标 + OpenTelemetry 分布式追踪 + 审计日志 + Langfuse（LLM 专项），详见 [可观测性指南](./backend/docs/OBSERVABILITY.md) |
 | **多租户支持** | 租户隔离、独立资源池、审计日志 |
 
 ---
@@ -278,11 +278,14 @@ taohuawu/
 # 设置 GLM API Key（或其他兼容 OpenAI 格式的 API Key）
 export GLM_API_KEY="your-glm-api-key"
 
-# 启动全部服务（MySQL + 后端 + 前端）
+# 启动全部服务（MySQL + 后端 + 前端 + Prometheus）
 docker-compose up --build
 
 # 访问游戏
 open http://localhost:3000
+
+# Prometheus UI（PromQL 查询指标）
+open http://localhost:9090
 ```
 
 ### 2. 后端单独启动
@@ -450,9 +453,10 @@ npm run dev
    - FallbackAdapter：所有模型失败时返回预设兜底回复。
 
 7. **可观测性**
-   - Prometheus 指标暴露 `/metrics`。
-   - OpenTelemetry 分布式追踪接入。
+   - Prometheus 指标暴露 `/metrics`，已集成到 docker-compose。
+   - OpenTelemetry 分布式追踪，支持 stdout（开发）和 OTLP（生产）。
    - 审计日志支持多租户查询。
+   - 推荐接入 Langfuse 做 LLM 专项可观测（Token、成本、Prompt 管理），详见 [可观测性指南](./backend/docs/OBSERVABILITY.md)。
 
 8. **前端游戏化交互**
    - Phaser 3 2D 场景 + 像素风。
@@ -470,7 +474,9 @@ npm run dev
 | [多模型路由系统](./backend/docs/MULTI_MODEL_ROUTER.md) | 路由层完整架构与设计决策 |
 | [多模型配置说明](./backend/MODEL_CONFIG.md) | 配置参数、环境变量、路由策略 |
 | [Memory 系统设计](./backend/docs/MEMORY_SYSTEM.md) | 记忆管理、摘要方案、成本优化 |
+| [可观测性指南](./backend/docs/OBSERVABILITY.md) | Prometheus 指标、OpenTelemetry 追踪、Langfuse LLM 可观测、生产环境方案选型 |
 | [Render 部署指南](./RENDER_DEPLOY.md) | 云平台部署步骤 |
+
 
 ---
 

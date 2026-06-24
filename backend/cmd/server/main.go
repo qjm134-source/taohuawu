@@ -71,6 +71,7 @@ func main() {
 		ServiceName: cfg.Observability.ServiceName,
 		Endpoint:    cfg.Observability.Endpoint,
 		SampleRate:  cfg.Observability.SampleRate,
+		Exporter:    cfg.Observability.Exporter,
 	})
 	if err != nil {
 		logger.Warn("Failed to initialize tracing", "error", err)
@@ -81,6 +82,15 @@ func main() {
 			_ = tp.Shutdown(ctx)
 		}()
 	}
+
+	// 初始化 Langfuse（LLM 专项可观测，独立于 OTel/Prometheus）
+	langfuseClient := observability.InitLangfuse(observability.LangfuseConfig{
+		Enabled:   cfg.Observability.Langfuse.Enabled,
+		Host:      cfg.Observability.Langfuse.Host,
+		PublicKey: cfg.Observability.Langfuse.PublicKey,
+		SecretKey: cfg.Observability.Langfuse.SecretKey,
+	})
+	defer langfuseClient.Shutdown()
 
 	// 初始化服务器
 	srv, err := server.New(cfg, db, kb, logger)

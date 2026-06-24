@@ -85,7 +85,14 @@ logging:
     compress: true
 
 observability:
-  enabled: false
+  enabled: true
   service_name: watertown-guide
-  endpoint: http://localhost:4318
-  sample_rate: 1.0
+  endpoint: http://localhost:4318       # OTLP HTTP 端口（需先启动 Jaeger 或 OTel Collector）
+  sample_rate: 1.0                      # 采样率，1.0=全量
+  trace_exporter: stdout                # otlp：发送到外部 Collector；stdout：开发时打印到控制台
+  prometheus: false                      # 是否启用 Prometheus 指标（/metrics 端点）
+  langfuse:
+    enabled: false                      # 是否启用 Langfuse LLM 专项可观测
+    host: https://cloud.langfuse.com    # Langfuse 地址（自建填 http://localhost:3000）
+    public_key: ${LANGFUSE_PUBLIC_KEY}  # Langfuse Public Key
+    secret_key: ${LANGFUSE_SECRET_KEY}  # Langfuse Secret Key

@@ -119,10 +119,21 @@ type FileLoggerConfig struct {
 }
 
 type ObservabilityConfig struct {
-	Enabled     bool    `yaml:"enabled"`
-	ServiceName string  `yaml:"service_name"`
-	Endpoint    string  `yaml:"endpoint"`
-	SampleRate  float64 `yaml:"sample_rate"`
+	Enabled     bool           `yaml:"enabled"`
+	ServiceName string         `yaml:"service_name"`
+	Endpoint    string         `yaml:"endpoint"`
+	SampleRate  float64        `yaml:"sample_rate"`
+	Exporter    string         `yaml:"trace_exporter"` // "otlp"（默认）或 "stdout"
+	Langfuse    LangfuseConfig `yaml:"langfuse"`
+	Prometheus  bool           `yaml:"prometheus"` // 是否启用 Prometheus 指标
+}
+
+// LangfuseConfig Langfuse LLM 可观测配置
+type LangfuseConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Host      string `yaml:"host"`
+	PublicKey string `yaml:"public_key"`
+	SecretKey string `yaml:"secret_key"`
 }
 
 // timeDuration 包装 time.Duration 以支持 YAML 解析
@@ -216,6 +227,16 @@ func Load() (*Config, error) {
 				fmt.Printf("Warning: environment variable %s is not set for model %s\n", envName, cfg.LLM.Models[i].Name)
 			}
 		}
+	}
+
+	// 处理 Langfuse 配置的环境变量
+	if strings.HasPrefix(cfg.Observability.Langfuse.PublicKey, "${") && strings.HasSuffix(cfg.Observability.Langfuse.PublicKey, "}") {
+		envName := cfg.Observability.Langfuse.PublicKey[2 : len(cfg.Observability.Langfuse.PublicKey)-1]
+		cfg.Observability.Langfuse.PublicKey = os.Getenv(envName)
+	}
+	if strings.HasPrefix(cfg.Observability.Langfuse.SecretKey, "${") && strings.HasSuffix(cfg.Observability.Langfuse.SecretKey, "}") {
+		envName := cfg.Observability.Langfuse.SecretKey[2 : len(cfg.Observability.Langfuse.SecretKey)-1]
+		cfg.Observability.Langfuse.SecretKey = os.Getenv(envName)
 	}
 
 	if dbPass := os.Getenv("DB_PASSWORD"); dbPass != "" {

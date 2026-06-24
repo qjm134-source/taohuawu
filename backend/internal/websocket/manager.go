@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/watertown/guide/internal/observability"
 )
 
 const (
@@ -184,6 +185,9 @@ func (c *Client) WritePump() {
 func (c *Client) ReadPump(hub *Hub, handler MessageHandler) {
 	defer func() {
 		hub.UnregisterClient(c)
+		if c.TenantID != "" {
+			observability.WebSocketConnections.WithLabelValues(c.TenantID).Dec()
+		}
 		_ = c.Connection.Close()
 	}()
 
