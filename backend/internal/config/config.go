@@ -240,17 +240,34 @@ func Load() (*Config, error) {
 		cfg.Observability.Langfuse.SecretKey = os.Getenv(envName)
 	}
 
+	// 数据库配置环境变量覆盖
 	if dbPass := os.Getenv("DB_PASSWORD"); dbPass != "" {
 		cfg.Database.Password = dbPass
 	}
-
 	if dbHost := os.Getenv("DB_HOST"); dbHost != "" {
 		cfg.Database.Host = dbHost
 	}
-
 	if dbPort := os.Getenv("DB_PORT"); dbPort != "" {
 		if port, err := strconv.Atoi(dbPort); err == nil {
 			cfg.Database.Port = port
+		}
+	}
+
+	// 可观测性配置环境变量覆盖
+	if obsEnabled := os.Getenv("OBSERVABILITY_ENABLED"); obsEnabled != "" {
+		if enabled, err := strconv.ParseBool(obsEnabled); err == nil {
+			cfg.Observability.Enabled = enabled
+		}
+	}
+	if obsExporter := os.Getenv("OBSERVABILITY_TRACER_EXPORTER"); obsExporter != "" {
+		cfg.Observability.Exporter = obsExporter
+	}
+	if obsEndpoint := os.Getenv("OBSERVABILITY_ENDPOINT"); obsEndpoint != "" {
+		cfg.Observability.Endpoint = obsEndpoint
+	}
+	if obsPrometheus := os.Getenv("OBSERVABILITY_PROMETHEUS"); obsPrometheus != "" {
+		if enabled, err := strconv.ParseBool(obsPrometheus); err == nil {
+			cfg.Observability.Prometheus = enabled
 		}
 	}
 

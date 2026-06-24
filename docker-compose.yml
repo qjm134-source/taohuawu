@@ -19,6 +19,17 @@ services:
       timeout: 5s
       retries: 5
 
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: watertown-jaeger
+    ports:
+      - "16686:16686"      # Jaeger UI
+      - "4318:4318"        # OTLP HTTP receiver
+      - "4317:4317"        # OTLP gRPC receiver
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
@@ -27,6 +38,7 @@ services:
     ports:
       - "8080:8080"
     environment:
+      CONFIG_FILE: "configs/config-docker.yaml"  # 使用 Docker 专用配置
       DB_HOST: mysql
       DB_PORT: 3306
       DB_NAME: water_town
@@ -39,6 +51,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      jaeger:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]

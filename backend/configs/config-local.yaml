@@ -1,0 +1,95 @@
+server:
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+
+database:
+  host: localhost
+  port: 3306
+  name: water_town
+  user: root
+  password: ${DB_PASSWORD:-password123}
+
+websocket:
+  path: /ws/game
+  ping_interval: 30s
+  pong_wait: 35s
+  write_wait: 10s
+  message_size_limit: 1048576  # 1MB
+
+llm:
+  models:
+    - name: mimo-v2.5
+      type: claude
+      base_url: https://token-plan-cn.xiaomimimo.com/anthropic
+      api_key: ${MIMO_API_KEY}
+      enabled: true
+      max_tokens: 300
+      temperature: 0.7
+      mode: auto
+
+    - name: qwen3.5-27b
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api_key: ${BAILIAN_API_KEY}
+      enabled: true
+      max_tokens: 500
+      temperature: 0.7
+      mode: auto
+
+  timeout: 60s
+  max_retries: 3
+  retry_delay: 2s
+  auto_switch: true
+  strategy: capability
+  fallback_response:
+    enabled: true
+    welcome_message: "欢迎来到桃花坞！我是你的向导小桃。有什么我可以帮助你的吗？"
+
+circuit:
+  max_failures: 5
+  failure_window: 30s
+  recovery_time: 60s
+  half_open_limit: 3
+
+cost:
+  max_history_messages: 10
+  max_history_tokens: 4096
+  summary_threshold: 20
+  similarity_threshold: 0.85
+  cache_ttl: 3600s
+  summary_model: ""
+  summary_timeout: 30s
+  embedding:
+    enabled: true
+    type: remote
+    api_key: ${BAILIAN_API_KEY}
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: text-embedding-v1
+    server_type: ollama
+
+knowledge:
+  path: data/knowledge
+
+logging:
+  level: info
+  format: json
+  file:
+    enabled: true
+    path: logs/app.log
+    max_size: 100
+    max_backups: 3
+    max_age: 28
+    compress: true
+
+observability:
+  enabled: true
+  service_name: watertown-guide
+  endpoint: http://localhost:4318
+  sample_rate: 1.0
+  trace_exporter: stdout                # 开发环境打印到控制台
+  prometheus: false                     # 开发环境关闭 Prometheus
+  langfuse:
+    enabled: false
+    host: https://cloud.langfuse.com
+    public_key: ${LANGFUSE_PUBLIC_KEY}
+    secret_key: ${LANGFUSE_SECRET_KEY}

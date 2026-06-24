@@ -162,7 +162,100 @@ observability:
 | `middleware.go` | `GET /path` / `POST /path` | 每个 HTTP 请求自动创建 Server Span |
 | `runtime.go` | `HandleWelcome` | 欢迎消息处理 |
 | `runtime.go` | `HandleChat` | 普通对话处理 |
-| `runtime.go` | `HandleChatStream` | 流式对话处理 |
+| `runtime.go` | `HandleChatStream` | 流式对话处理（包含 8 个细粒度子 Span） |
+
+### 4.3 细粒度链路追踪（HandleChatStream）
+
+为实现**全链路耗时透明化**，我们为 `HandleChatStream` 添加了 **8 个细粒度子 Span**，可以清晰看到每个步骤的耗时分布，便于定位性能瓶颈：
+
+#### 完整 Span 层级结构
+
+```
+Agent.HandleChatStream (主 Span)
+├── Emotion.Detect        情绪检测
+├── Cache.Check            缓存查询（精确匹配 + 语义匹配）
+├── Context.Build          构建上下文消息（会话历史 + 摘要压缩）
+├── Tools.Register         工具注册
+├── LLM.HealthCheck        LLM 健康检查
+├── LLM.StreamChat         LLM 流式调用（主要耗时来源）
+├── Stream.Process         流式数据接收与处理
+└── Cache.Write           缓存写入
+```
+
+#### 实现代码
+
+```go
+// internal/observability/tracer.go
+// 使用 StartChildSpan + EndChildSpan 自动记录耗时
+
+// 1. 情绪检测
+_, emotionSpan := observability.StartChildSpan(ctx, "Emotion.Detect")
+em := r.emotionDetector.Detect(message)
+observability.EndChildSpan(ctx, emotionSpan)
+
+// 2. 缓存查询
+_, cacheSpan := observability.StartChildSpan(ctx, "Cache.Check")
+cached, hit := r.optimizer.GetCache(cacheKey)
+observability.EndChildSpan(ctx, cacheSpan)
+
+// 3. 构建上下文
+_, contextSpan := observability.StartChildSpan(ctx, "Context.Build")
+messages := r.buildContextMessages(session, message)
+observability.EndChildSpan(ctx, contextSpan)
+
+// 4. LLM 调用
+_, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
+stream, err := r.llmAdapter.StreamChat(ctx, req)
+observability.EndChildSpan(ctx, llmSpan)
+```
+
+#### 输出效果（JSON Trace）
+
+每个 Span 都包含 `duration_ms` 字段，直接显示该步骤的耗时：
+
+```json
+{
+  "Name": "Agent.HandleChatStream",
+  "Attributes": [
+    {"Key": "duration_ms", "Value": {"Type": "INT64", "Value": 10111}},
+    {"Key": "llm.model", "Value": {"Type": "STRING", "Value": "mimo-v2-5"}},
+    {"Key": "llm.input_tokens", "Value": {"Type": "INT64", "Value": 208}},
+    {"Key": "llm.output_tokens", "Value": {"Type": "INT64", "Value": 192}},
+    {"Key": "llm.cost", "Value": {"Type": "FLOAT64", "Value": 0.000392}}
+  ]
+}
+```
+
+#### 典型耗时分布
+
+| Span 名称 | 典型耗时 | 说明 |
+|-----------|----------|------|
+| `LLM.StreamChat` | 几秒 ~ 几十秒 | **主要耗时来源**，受模型响应速度影响 |
+| `Stream.Process` | 几百毫秒 | 处理流式数据 |
+| `Context.Build` | 几毫秒 ~ 几十毫秒 | 构建上下文消息（会话历史越多越慢） |
+| `Cache.Check` | 几毫秒 | 查询缓存（包含精确匹配 + 语义匹配） |
+| `Emotion.Detect` | < 1 毫秒 | 情绪检测（本地计算） |
+| `Tools.Register` | < 1 毫秒 | 工具注册 |
+| `LLM.HealthCheck` | < 1 毫秒 | 健康检查 |
+| `Cache.Write` | < 1 毫秒 | 写入缓存 |
+
+#### 性能分析示例
+
+```
+Agent.HandleChatStream:  10111ms ████████████████████████████████████ 100%
+├── Emotion.Detect:           2ms ▏  0%
+├── Cache.Check:              5ms ▏  0%
+├── Context.Build:           15ms ▏  0%
+├── Tools.Register:           1ms ▏  0%
+├── LLM.HealthCheck:          3ms ▏  0%
+├── LLM.StreamChat:        9850ms ████████████████████████████████████  97%
+├── Stream.Process:        200ms ▏  2%
+└── Cache.Write:             1ms ▏  0%
+```
+
+> **关键洞察**：LLM 调用占总耗时的 **97%+**，是主要性能瓶颈。如果需要优化，应该从模型选择、网络延迟、缓存命中率等方面入手。
+
+### 4.4 链路关联
 
 `TracingMiddleware` 还会从 HTTP 请求头中提取 `traceparent`，并在响应头中注入 `traceparent`，方便前端或网关关联同一 Trace。
 

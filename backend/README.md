@@ -303,33 +303,112 @@ cache:
 - MySQL 8.0+
 - 至少一个 LLM API Key（Claude / OpenAI / 兼容 OpenAI 格式的 API）
 
-### 配置
+### 配置文件
 
-1. 编辑 `configs/config.yaml`：
-   - 配置数据库连接
-   - 配置模型列表
-   - 设置 API Key（推荐环境变量）
+项目提供两份配置文件，分别用于不同环境：
 
-2. 设置环境变量：
+| 文件 | 用途 | Trace 输出 | Prometheus |
+|------|------|-----------|------------|
+| `configs/config-local.yaml` | 本地开发 | stdout（控制台） | 关闭 |
+| `configs/config-docker.yaml` | Docker 部署 | otlp（Jaeger） | 启用 |
+
+### 方式一：本地开发
+
+1. **配置环境变量**：
 ```bash
-# Claude
-export ANTHROPIC_API_KEY="your-anthropic-key"
+# 复制环境变量模板
+cp .env.example .env
 
-# OpenAI
-export OPENAI_API_KEY="your-openai-key"
-
-# 兼容 OpenAI 格式的 API（GLM、通义千问等）
-export COMPAT_API_KEY="your-compat-key"
+# 编辑 .env 文件，填入你的 API Key
 ```
 
-### 运行
-
+2. **启动服务**：
 ```bash
+cd backend
 go mod download
 go run cmd/server/main.go
 ```
 
 服务将在 `http://localhost:8080` 启动。
+
+### 方式二：Docker 一键部署
+
+**推荐用于生产环境或快速体验**，包含完整的监控链路：
+
+1. **设置环境变量**（可选）：
+```bash
+# Linux/Mac
+export GLM_API_KEY="your-glm-api-key"
+
+# Windows PowerShell
+$env:GLM_API_KEY="your-glm-api-key"
+```
+
+2. **一键启动**：
+
+```bash
+# Linux/Mac
+./start.sh
+
+# Windows PowerShell
+.\start.ps1
+
+# 或手动启动
+docker-compose up -d
+```
+
+3. **访问地址**：
+
+| 服务 | 地址 | 说明 |
+|------|------|------|
+| 前端页面 | http://localhost:3000 | 游戏界面 |
+| 后端 API | http://localhost:8080 | REST API |
+| Prometheus | http://localhost:9090 | 指标监控 |
+| Jaeger UI | http://localhost:16686 | 分布式追踪 |
+| MySQL | localhost:3306 | 数据库 |
+
+4. **停止服务**：
+```bash
+docker-compose down
+```
+
+### Docker 环境架构
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     Docker Compose Stack                      │
+├────────────┬────────────┬────────────┬───────────────────────┤
+│   MySQL    │  Jaeger    │ Prometheus │         Nginx         │
+│  (3306)   │  (16686)   │   (9090)   │       (3000)          │
+│           │  (4318)    │            │                       │
+└─────┬─────┴─────┬───────┴─────┬──────┴──────────┬──────────┘
+      │           │             │                 │
+      └───────────┼─────────────┼─────────────────┘
+                  ▼             ▼
+            ┌─────────────────────────────┐
+            │         Backend (8080)      │
+            │  • LLM 多模型路由           │
+            │  • WebSocket 实时通信       │
+            │  • OpenTelemetry 追踪       │
+            │  • Prometheus 指标          │
+            └─────────────────────────────┘
+```
+
+### 环境变量参考
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `CONFIG_FILE` | 配置文件路径 | `configs/config.yaml` |
+| `DB_HOST` | 数据库主机 | `localhost` / `mysql`（Docker） |
+| `DB_PORT` | 数据库端口 | `3306` |
+| `DB_USER` | 数据库用户名 | `root` / `water_town`（Docker） |
+| `DB_PASS` | 数据库密码 | `password123` |
+| `GLM_API_KEY` | GLM API Key | - |
+| `MIMO_API_KEY` | MIMO/Claude API Key | - |
+| `BAILIAN_API_KEY` | 阿里云通义千问 API Key | - |
+| `OBSERVABILITY_ENABLED` | 启用追踪 | `true` |
+| `OBSERVABILITY_TRACER_EXPORTER` | 追踪输出 | `stdout` / `otlp` |
+| `OBSERVABILITY_ENDPOINT` | OTLP 端点 | `http://localhost:4318` / `http://jaeger:4318` |
 
 ## 多模型路由（核心亮点）
 
