@@ -1,7 +1,7 @@
 package logging
 
 import (
-	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -14,7 +14,7 @@ type FileLogger struct {
 	fileHook *lumberjack.Logger
 }
 
-// NewFileLogger 创建支持文件输出的日志器
+// NewFileLogger 创建支持文件输出的日志器（只输出到文件，不输出到控制台）
 func NewFileLogger(cfg Config, fileCfg FileLoggerConfig) (*FileLogger, error) {
 	logger := logrus.New()
 
@@ -53,16 +53,17 @@ func NewFileLogger(cfg Config, fileCfg FileLoggerConfig) (*FileLogger, error) {
 			Compress:   fileCfg.Compress,
 		}
 
-		// 添加文件hook
-		logger.AddHook(&FileHook{
-			fileHook: fileHook,
-		})
+		// 设置输出到文件，禁用控制台输出
+		logger.SetOutput(fileHook)
 
 		return &FileLogger{
 			Logger:   logger,
 			fileHook: fileHook,
 		}, nil
 	}
+
+	// 如果未启用文件日志，输出到空设备（不打印到控制台）
+	logger.SetOutput(io.Discard)
 
 	return &FileLogger{
 		Logger: logger,
@@ -73,37 +74,6 @@ func NewFileLogger(cfg Config, fileCfg FileLoggerConfig) (*FileLogger, error) {
 func (fl *FileLogger) Close() error {
 	if fl.fileHook != nil {
 		return fl.fileHook.Close()
-	}
-	return nil
-}
-
-// FileHook 文件hook
-type FileHook struct {
-	fileHook *lumberjack.Logger
-}
-
-func (h *FileHook) Levels() []logrus.Level {
-	return logrus.AllLevels
-}
-
-func (h *FileHook) Fire(entry *logrus.Entry) error {
-	// 构建消息，包含 Message 和 Data 中的键值对
-	msg := fmt.Sprintf("[%s] [%s] %s",
-		entry.Time.Format("2006-01-02 15:04:05"),
-		entry.Level.String(),
-		entry.Message)
-
-	// 添加键值对
-	if len(entry.Data) > 0 {
-		msg += " | "
-		for key, value := range entry.Data {
-			msg += fmt.Sprintf("%s=%v ", key, value)
-		}
-	}
-	msg += "\n"
-
-	if _, err := h.fileHook.Write([]byte(msg)); err != nil {
-		return err
 	}
 	return nil
 }

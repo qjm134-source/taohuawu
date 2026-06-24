@@ -92,11 +92,12 @@ type CostConfig struct {
 }
 
 type EmbeddingConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Type    string `yaml:"type"` // local 或 remote
-	APIKey  string `yaml:"api_key"`
-	BaseURL string `yaml:"base_url"`
-	Model   string `yaml:"model"`
+	Enabled    bool   `yaml:"enabled"`
+	Type       string `yaml:"type"` // local 或 remote
+	APIKey     string `yaml:"api_key"`
+	BaseURL    string `yaml:"base_url"`
+	Model      string `yaml:"model"`
+	ServerType string `yaml:"server_type"` // local 后端类型: "ollama" / "tei" / "openai-compat"
 }
 
 type KnowledgeConfig struct {

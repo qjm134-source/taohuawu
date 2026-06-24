@@ -650,6 +650,18 @@ var randFloat = func() float64 {
 	return rand.Float64()
 }
 
+// HasEnabledProvider 检查是否有已启用的 provider。
+func (r *Router) HasEnabledProvider() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, wrapper := range r.providers {
+		if wrapper.enabled {
+			return true
+		}
+	}
+	return false
+}
+
 // GetRegisteredProviders 返回所有已注册的 provider 名称。
 func (r *Router) GetRegisteredProviders() []string {
 	r.mu.RLock()

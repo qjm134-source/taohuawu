@@ -81,6 +81,11 @@ func SetSummarizer(s Summarizer) {
 	summarizer = s
 }
 
+// GetSummarizer 获取全局摘要器
+func GetSummarizer() Summarizer {
+	return summarizer
+}
+
 // NewOptimizer 创建优化器
 func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embeddingAPI EmbeddingAPI) *Optimizer {
 	cacheConfig := CacheConfig{

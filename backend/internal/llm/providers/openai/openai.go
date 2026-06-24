@@ -101,7 +101,7 @@ func (p *Provider) MaxContextLength() int { return p.maxContextLength }
 func (p *Provider) Chat(ctx context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
 	openaiReq := p.convertRequest(req, false)
 
-	p.logger.Info("[OpenAI] Sending chat request",
+	p.logger.Debug("[OpenAI] Sending chat request",
 		"messages_count", len(openaiReq.Messages),
 		"tools_count", len(openaiReq.Tools),
 		"model", openaiReq.Model,
@@ -113,14 +113,14 @@ func (p *Provider) Chat(ctx context.Context, req *model.ChatRequest) (*model.Cha
 		return nil, fmt.Errorf("openai chat failed: %w", err)
 	}
 
-	p.logger.Info("[OpenAI] Raw response received",
+	p.logger.Debug("[OpenAI] Raw response received",
 		"choices_count", len(resp.Choices),
 		"model", resp.Model,
 		"prompt_tokens", resp.Usage.PromptTokens,
 		"completion_tokens", resp.Usage.CompletionTokens)
 
 	for i, c := range resp.Choices {
-		p.logger.Info("[OpenAI] Choice detail",
+		p.logger.Debug("[OpenAI] Choice detail",
 			"index", i,
 			"finish_reason", c.FinishReason,
 			"content_len", len(c.Message.Content),

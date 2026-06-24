@@ -27,7 +27,7 @@ func Init(cfg config.DatabaseConfig) (*gorm.DB, error) {
 		// 使用传统配置连接（支持 MySQL）
 		dsn := cfg.GetDSN()
 		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{
-			Logger: logger.Default.LogMode(logger.Info),
+			Logger: logger.Default.LogMode(logger.Error),
 		})
 	}
 
@@ -49,12 +49,12 @@ func connectWithDatabaseURL(databaseURL string) (*gorm.DB, error) {
 	if strings.HasPrefix(databaseURL, "postgres://") || strings.HasPrefix(databaseURL, "postgresql://") {
 		// PostgreSQL 连接
 		return gorm.Open(postgres.Open(databaseURL), &gorm.Config{
-			Logger: logger.Default.LogMode(logger.Info),
+			Logger: logger.Default.LogMode(logger.Error),
 		})
 	} else if strings.Contains(databaseURL, "mysql") {
 		// MySQL 连接
 		return gorm.Open(mysql.Open(databaseURL), &gorm.Config{
-			Logger: logger.Default.LogMode(logger.Info),
+			Logger: logger.Default.LogMode(logger.Error),
 		})
 	}
 

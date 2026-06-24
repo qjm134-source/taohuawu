@@ -96,8 +96,8 @@ func TracingMiddleware(serviceName string) gin.HandlerFunc {
 			trace.WithSpanKind(trace.SpanKindServer),
 		}
 
-		ctx, span := Tracer().Start(ctx, spanName, opts...)
-		defer span.End()
+		ctx, span := StartSpanWithStartTime(ctx, spanName, opts...)
+		defer EndSpanWithDuration(ctx, span)
 
 		// 将 ctx 注入到请求中
 		c.Request = c.Request.WithContext(ctx)

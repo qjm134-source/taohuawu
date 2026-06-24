@@ -210,11 +210,12 @@ func (a *RouterAdapter) streamFromChat(ctx context.Context, modelReq *model.Chat
 	return out, nil
 }
 
-// IsHealthy 检查路由器是否健康（至少有一个 provider 可用）。
+// IsHealthy 检查路由器是否健康（至少有一个已启用的 provider）。
 func (a *RouterAdapter) IsHealthy() bool {
-	// 简化实现：检查默认 provider 是否可用
-	// 实际项目中可以实现更复杂的健康检查
-	return true
+	if a.router == nil {
+		return false
+	}
+	return a.router.HasEnabledProvider()
 }
 
 // convertRequest 将 LLMRequest 转换为 model.ChatRequest。

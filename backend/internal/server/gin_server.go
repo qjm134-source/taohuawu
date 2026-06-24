@@ -295,9 +295,17 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 	var embeddingAPI cost.EmbeddingAPI
 	if s.config.Cost.Embedding.Enabled {
 		if s.config.Cost.Embedding.Type == "local" {
-			// 本地模式：无需 API Key，使用本地模型
-			embeddingAPI = cost.NewLocalEmbeddingClient(s.config.Cost.Embedding.Model)
-			s.logger.Info("Local Embedding enabled", "model", s.config.Cost.Embedding.Model)
+			// 本地模式：支持 Ollama / TEI / OpenAI 兼容的本地 Embedding 服务
+			embeddingAPI = cost.NewLocalEmbeddingClientWithConfig(cost.LocalEmbeddingConfig{
+				ModelName:  s.config.Cost.Embedding.Model,
+				BaseURL:    s.config.Cost.Embedding.BaseURL,
+				ServerType: s.config.Cost.Embedding.ServerType,
+			})
+			s.logger.Info("Local Embedding enabled",
+				"model", s.config.Cost.Embedding.Model,
+				"server_type", s.config.Cost.Embedding.ServerType,
+				"base_url", s.config.Cost.Embedding.BaseURL,
+			)
 		} else {
 			// 远程模式：需要 API Key
 			if s.config.Cost.Embedding.APIKey != "" {

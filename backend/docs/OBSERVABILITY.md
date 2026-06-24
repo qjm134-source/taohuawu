@@ -172,7 +172,11 @@ observability:
 
 ### 5.1 什么是 Langfuse？
 
-Langfuse 是专门为 LLM 应用设计的开源可观测平台，可以记录每次 LLM 调用的完整上下文：
+Langfuse 是专门为 LLM 应用设计的开源可观测平台，可以记录每次 LLM 调用的完整上下文。
+OTel Span记录：
+- 某个请求调用了哪个模型
+- 花了多长时间
+- 请求状态是成功还是失败
 
 ```
 OTel Span（现在）          Langfuse Trace（加上后）
@@ -561,29 +565,7 @@ sum by (cache_type) (rate(cache_hits_total[5m]))
 
 ## 11. 为什么需要 Langfuse？
 
-### 11.1 你当前的 OTel 追踪已经能告诉你...
-
-- 某个请求调用了哪个模型
-- 花了多长时间
-- 请求状态是成功还是失败
-
-### 11.2 但 Langfuse 更进一步...
-
-```
-OTel Span（现在）          Langfuse Trace（加上后）
-─────────────────────     ─────────────────────────────
-model: "claude"            model: "claude"
-duration: 1.2s             duration: 1.2s
-status: "ok"               input_tokens: 2456
-                           output_tokens: 512
-                           cost: $0.032
-                           prompt: "你是一个江南水乡导游..."
-                           response: "您好，欢迎来到周庄！..."
-                           prompt_version: v2.3
-                           user_feedback: 👍
-```
-
-### 11.3 Langfuse 提供的核心能力
+### 11.1 Langfuse 提供的核心能力
 
 | 能力 | 说明 |
 |------|------|
@@ -593,7 +575,7 @@ status: "ok"               input_tokens: 2456
 | **评估** | 自动化评估生成质量 |
 | **数据集** | 导入真实用户对话进行测试 |
 
-### 11.4 快速接入 Langfuse Cloud
+### 11.2 快速接入 Langfuse Cloud
 
 ```bash
 # 1. 注册 https://cloud.langfuse.com

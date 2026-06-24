@@ -98,7 +98,7 @@ func (p *Provider) Chat(ctx context.Context, req *model.ChatRequest) (*model.Cha
 		return nil, err
 	}
 
-	p.logger.Info("[Claude] Sending chat request",
+	p.logger.Debug("[Claude] Sending chat request",
 		"messages_count", len(params.Messages),
 		"tools_count", len(params.Tools),
 		"has_system", len(params.System) > 0,
@@ -110,7 +110,7 @@ func (p *Provider) Chat(ctx context.Context, req *model.ChatRequest) (*model.Cha
 		return nil, fmt.Errorf("claude chat failed: %w", err)
 	}
 
-	p.logger.Info("[Claude] Raw response received",
+	p.logger.Debug("[Claude] Raw response received",
 		"stop_reason", msg.StopReason,
 		"content_blocks", len(msg.Content),
 		"input_tokens", msg.Usage.InputTokens,
@@ -118,7 +118,7 @@ func (p *Provider) Chat(ctx context.Context, req *model.ChatRequest) (*model.Cha
 
 	// 逐块记录 content 类型
 	for i, block := range msg.Content {
-		p.logger.Info("[Claude] Content block",
+		p.logger.Debug("[Claude] Content block",
 			"index", i,
 			"type", block.Type,
 			"text_len", len(block.Text),
@@ -323,7 +323,7 @@ func (p *Provider) convertResponse(modelName string, msg *anthropic.Message) *mo
 	choice.FinishReason = string(msg.StopReason)
 	resp.Choices = append(resp.Choices, choice)
 
-	p.logger.Info("[Claude] convertResponse result",
+	p.logger.Debug("[Claude] convertResponse result",
 		"content_len", len(content.Content),
 		"tool_calls_count", len(content.ToolCalls),
 		"finish_reason", choice.FinishReason)

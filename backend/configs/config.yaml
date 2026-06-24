@@ -9,8 +9,6 @@ database:
   name: water_town
   user: root
   password: ${DB_PASSWORD:-password123}
-  # MySQL doesn't use SSL mode in the same way
-  # ssl_mode: disable
 
 websocket:
   path: /ws/game
@@ -65,10 +63,11 @@ cost:
   # Embedding API 配置（用于语义缓存）
   embedding:
     enabled: true
-    type: remote                # remote 使用远程 API（推荐）
-    api_key: ${BAILIAN_API_KEY}  # 或直接填写 API Key
-    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1           # remote API 地址
+    type: remote                # remote 使用远程 API（推荐）; local 使用本地服务
+    api_key: ${BAILIAN_API_KEY}  # 或直接填写 API Key（remote 模式必需）
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1           # remote API 地址 / local 服务地址
     model: text-embedding-v1
+    server_type: ollama          # local 模式后端类型: ollama / tei / openai-compat
 
 knowledge:
   path: data/knowledge

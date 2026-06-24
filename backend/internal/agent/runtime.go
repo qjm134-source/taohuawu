@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/watertown/guide/internal/agent/tools"
 	"github.com/watertown/guide/internal/config"
@@ -42,6 +43,9 @@ type Runtime struct {
 	emotionDetector emotion.Detector
 	config          Config
 	logger          logging.Logger
+
+	// summaryCache 缓存的对话摘要（增量式更新用）
+	summaryCache string
 
 	// inflightWelcome 防止同一个 player 并发触发 HandleWelcome，
 	// value 是 chan struct{}，第一个请求 close channel，后续请求等待。
@@ -86,11 +90,13 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 	ctx, cancel := utils.WithTimeoutFrom(ctx, r.config.Timeout)
 	defer cancel()
 
-	ctx, span := observability.StartSpan(ctx, "Agent.HandleWelcome",
-		attribute.String("player_id", session.PlayerID),
-		attribute.String("tenant_id", session.TenantID),
+	ctx, span := observability.StartSpanWithStartTime(ctx, "Agent.HandleWelcome",
+		trace.WithAttributes(
+			attribute.String("player_id", session.PlayerID),
+			attribute.String("tenant_id", session.TenantID),
+		),
 	)
-	defer span.End()
+	defer observability.EndSpanWithDuration(ctx, span)
 
 	r.logger.Info("[HandleWelcome] Starting", "playerId", session.PlayerID)
 
@@ -235,12 +241,14 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	ctx, cancel := utils.WithTimeoutFrom(ctx, r.config.Timeout)
 	defer cancel()
 
-	ctx, span := observability.StartSpan(ctx, "Agent.HandleChat",
-		attribute.String("session_id", session.ID),
-		attribute.String("player_id", session.PlayerID),
-		attribute.String("tenant_id", session.TenantID),
+	ctx, span := observability.StartSpanWithStartTime(ctx, "Agent.HandleChat",
+		trace.WithAttributes(
+			attribute.String("session_id", session.ID),
+			attribute.String("player_id", session.PlayerID),
+			attribute.String("tenant_id", session.TenantID),
+		),
 	)
-	defer span.End()
+	defer observability.EndSpanWithDuration(ctx, span)
 
 	// Langfuse trace
 	langfuseTrace := observability.StartLLMTrace("chat", session.PlayerID, session.TenantID)
@@ -276,26 +284,8 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		return cached, emotionStr, stats, nil
 	}
 
-	// 获取历史消息
-	history := session.GetMessages(10)
-	messages := []llm.Message{{Role: "system", Content: SystemPrompt}}
-
-	// 添加历史（跳过空内容消息，避免被 LLM API 拒绝）
-	for _, msg := range history {
-		if msg.Content == "" {
-			continue
-		}
-		messages = append(messages, llm.Message{
-			Role:    msg.Role,
-			Content: msg.Content,
-		})
-	}
-
-	// 添加当前消息
-	messages = append(messages, llm.Message{
-		Role:    "user",
-		Content: message,
-	})
+	// 构建上下文消息（含摘要压缩）
+	messages := r.buildContextMessages(session, message)
 
 	// 把工具注册表中的工具注册给 LLM
 	tools := tools.ConvertAllTools(r.toolRegistry)
@@ -407,25 +397,33 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, message string) (<-chan string, <-chan *LLMStats, error) {
 	r.logger.Info("[HandleChatStream] Start", "sessionId", session.ID, "message", message)
 
-	ctx, span := observability.StartSpan(ctx, "Agent.HandleChatStream",
-		attribute.String("session_id", session.ID),
-		attribute.String("player_id", session.PlayerID),
-		attribute.String("tenant_id", session.TenantID),
+	ctx, span := observability.StartSpanWithStartTime(ctx, "Agent.HandleChatStream",
+		trace.WithAttributes(
+			attribute.String("session_id", session.ID),
+			attribute.String("player_id", session.PlayerID),
+			attribute.String("tenant_id", session.TenantID),
+		),
 	)
 
 	// Langfuse trace
 	langfuseTrace := observability.StartLLMTrace("chat-stream", session.PlayerID, session.TenantID)
 
-	// 检测情绪
+	// 1. 情绪检测子Span
+	_, emotionSpan := observability.StartChildSpan(ctx, "Emotion.Detect")
 	em := r.emotionDetector.Detect(message)
 	emotionStr := string(em)
+	observability.EndChildSpan(ctx, emotionSpan)
 
-	// 检查缓存（使用 session ID 隔离）
+	// 2. 缓存查询子Span
 	cacheKey := session.ID + "_" + message
-	if cached, hit := r.optimizer.GetCache(cacheKey); hit && cached != "" {
+	_, cacheSpan := observability.StartChildSpan(ctx, "Cache.Check")
+	cached, hit := r.optimizer.GetCache(cacheKey)
+	observability.EndChildSpan(ctx, cacheSpan)
+
+	if hit && cached != "" {
 		r.logger.Info("[HandleChatStream] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
-		span.End()
+		observability.EndSpanWithDuration(ctx, span)
 		langfuseTrace.End()
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 		contentChan := make(chan string, 1)
@@ -437,29 +435,15 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		return contentChan, statsChan, nil
 	}
 
-	// 获取历史消息
-	history := session.GetMessages(10)
-	messages := []llm.Message{{Role: "system", Content: SystemPrompt}}
+	// 3. 构建上下文消息子Span
+	_, contextSpan := observability.StartChildSpan(ctx, "Context.Build")
+	messages := r.buildContextMessages(session, message)
+	observability.EndChildSpan(ctx, contextSpan)
 
-	// 添加历史（跳过空内容消息，避免被 LLM API 拒绝）
-	for _, msg := range history {
-		if msg.Content == "" {
-			continue
-		}
-		messages = append(messages, llm.Message{
-			Role:    msg.Role,
-			Content: msg.Content,
-		})
-	}
-
-	// 添加当前消息
-	messages = append(messages, llm.Message{
-		Role:    "user",
-		Content: message,
-	})
-
-	// 把工具注册表中的工具注册给 LLM
+	// 4. 工具注册子Span
+	_, toolsSpan := observability.StartChildSpan(ctx, "Tools.Register")
 	tools := tools.ConvertAllTools(r.toolRegistry)
+	observability.EndChildSpan(ctx, toolsSpan)
 
 	r.logger.Info("[HandleChatStream] Building LLM request", "message_count", len(messages))
 
@@ -477,8 +461,16 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	var stream <-chan llm.StreamChunk
 	var err error
 
-	r.logger.Info("[HandleChatStream] Checking LLM health", "healthy", r.llmAdapter.IsHealthy())
-	if r.llmAdapter.IsHealthy() {
+	// 5. LLM健康检查子Span
+	_, healthSpan := observability.StartChildSpan(ctx, "LLM.HealthCheck")
+	isHealthy := r.llmAdapter.IsHealthy()
+	observability.EndChildSpan(ctx, healthSpan)
+
+	r.logger.Info("[HandleChatStream] Checking LLM health", "healthy", isHealthy)
+
+	// 6. LLM调用子Span
+	_, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
+	if isHealthy {
 		r.logger.Info("[HandleChatStream] Calling primary LLM stream")
 		stream, err = r.llmAdapter.StreamChat(ctx, req)
 
@@ -492,12 +484,13 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		r.logger.Warn("[HandleChatStream] Primary LLM unhealthy, using fallback")
 		stream, err = r.fallbackAdapter.StreamChat(ctx, req)
 	}
+	observability.EndChildSpan(ctx, llmSpan)
 
 	if err != nil {
 		r.logger.Error("[HandleChatStream] All LLM stream calls failed", "error", err)
 		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
 		observability.RecordError(span, err)
-		span.End()
+		observability.EndSpanWithDuration(ctx, span)
 		langfuseTrace.RecordGeneration("llm-call", "unknown", req.Messages, "", 0, 0, 0, 0, err)
 		langfuseTrace.End()
 		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
@@ -515,6 +508,8 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			CacheHit: false,
 		}
 
+		// 7. 流式数据处理子Span
+		_, processSpan := observability.StartChildSpan(ctx, "Stream.Process")
 		chunkCount := 0
 		for chunk := range stream {
 			chunkCount++
@@ -542,6 +537,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				break
 			}
 		}
+		observability.EndChildSpan(ctx, processSpan)
 
 		// 如果流式调用返回空数据，降级到非流式调用
 		if fullReply.Len() == 0 {
@@ -577,7 +573,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				attribute.Float64("llm.cost", stats.Cost),
 			)
 		}
-		span.End()
+		observability.EndSpanWithDuration(ctx, span)
 
 		// 记录 Langfuse generation
 		langfuseTrace.RecordGeneration("llm-call", stats.Model, req.Messages, fullReply.String(),
@@ -590,10 +586,12 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			session.AddMessage("assistant", fullReply.String(), emotionStr, nil)
 		}
 
-		// 缓存回复（不缓存空内容）
+		// 8. 缓存写入子Span
+		_, cacheWriteSpan := observability.StartChildSpan(ctx, "Cache.Write")
 		if fullReply.Len() > 0 {
 			r.optimizer.SetCache(cacheKey, fullReply.String())
 		}
+		observability.EndChildSpan(ctx, cacheWriteSpan)
 
 		statsChan <- stats
 		close(statsChan)
@@ -639,9 +637,9 @@ func (r *Runtime) handleToolCalls(
 		stats.ToolsUsed = append(stats.ToolsUsed, tc.Function.Name)
 
 		r.logger.Info("[HandleChat] Executing tool", "name", tc.Function.Name, "args", args)
-		result, err := r.toolRegistry.Execute(ctx, tc.Function.Name, args)
+		result, err := r.executeToolWithRetry(ctx, tc.Function.Name, args)
 		if err != nil {
-			r.logger.Error("[HandleChat] Tool execution failed", "name", tc.Function.Name, "error", err)
+			r.logger.Error("[HandleChat] Tool execution failed after retries", "name", tc.Function.Name, "error", err)
 			result = map[string]interface{}{"error": err.Error()}
 		}
 
@@ -673,6 +671,41 @@ func (r *Runtime) handleToolCalls(
 	}
 
 	return response, nil
+}
+
+// executeToolWithRetry 执行工具调用，支持自动重试。
+func (r *Runtime) executeToolWithRetry(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+	maxRetries := r.config.MaxRetries
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		result, err := r.toolRegistry.Execute(ctx, toolName, args)
+		if err == nil {
+			if attempt > 1 {
+				r.logger.Info("[executeToolWithRetry] Tool succeeded after retry",
+					"name", toolName, "attempt", attempt)
+			}
+			return result, nil
+		}
+
+		lastErr = err
+		r.logger.Warn("[executeToolWithRetry] Tool execution failed, retrying",
+			"name", toolName, "attempt", attempt, "maxRetries", maxRetries, "error", err)
+
+		// 最后一次失败不等待
+		if attempt < maxRetries {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 300 * time.Millisecond):
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("tool %s failed after %d retries: %w", toolName, maxRetries, lastErr)
 }
 
 // handleNonStreamChat 处理非流式调用，并模拟流式响应
@@ -736,6 +769,150 @@ func (r *Runtime) handleNonStreamChat(ctx context.Context, req *llm.LLMRequest, 
 		// 如果内容为空，发送一个空字符通知前端
 		contentChan <- ""
 	}
+}
+
+// buildContextMessages 构建 LLM 请求的消息上下文。
+// 优先使用 LLM 摘要替代硬截断：当历史消息预估 Token 数超过阈值时，
+// 将早期消息压缩为一段摘要文本，保留最近的 N 条原始消息。
+func (r *Runtime) buildContextMessages(session *Session, currentMessage string) []llm.Message {
+	allMessages := session.GetMessages(0) // 获取全部消息
+
+	// 如果没有历史或是欢迎场景，直接构建
+	if len(allMessages) == 0 {
+		return []llm.Message{
+			{Role: "system", Content: SystemPrompt},
+			{Role: "user", Content: currentMessage},
+		}
+	}
+
+	// 获取摘要器
+	summarizer := cost.GetSummarizer()
+
+	// 预估所有历史消息 + 当前消息的 Token 总数
+	totalTokens := 0
+	for _, msg := range allMessages {
+		if summarizer != nil {
+			totalTokens += summarizer.EstimateTokens(msg.Content)
+		} else {
+			// 无摘要器时用简单估算：1 中文 ≈ 2 tokens
+			totalTokens += len([]rune(msg.Content)) * 2
+		}
+	}
+	if summarizer != nil {
+		totalTokens += summarizer.EstimateTokens(currentMessage)
+	} else {
+		totalTokens += len([]rune(currentMessage)) * 2
+	}
+
+	const tokenThreshold = 4096
+
+	// 未超过阈值，构建完整消息列表
+	if totalTokens <= tokenThreshold {
+		messages := []llm.Message{{Role: "system", Content: SystemPrompt}}
+		for _, msg := range allMessages {
+			if msg.Content == "" {
+				continue
+			}
+			messages = append(messages, llm.Message{
+				Role:    msg.Role,
+				Content: msg.Content,
+			})
+		}
+		messages = append(messages, llm.Message{
+			Role:    "user",
+			Content: currentMessage,
+		})
+		return messages
+	}
+
+	// 超过阈值，尝试使用 LLM 摘要压缩
+	keepRecent := 6 // 保留最近 6 条消息作为原始上下文
+	if len(allMessages) <= keepRecent {
+		keepRecent = len(allMessages) / 2
+		if keepRecent < 2 {
+			keepRecent = 2
+		}
+	}
+
+	recentMessages := allMessages[len(allMessages)-keepRecent:]
+	oldMessages := allMessages[:len(allMessages)-keepRecent]
+
+	messages := []llm.Message{{Role: "system", Content: SystemPrompt}}
+
+	// 尝试获取已有摘要并增量更新
+	if summarizer != nil && len(oldMessages) > 0 {
+		oldText := messagesToText(oldMessages)
+		existingSummary := r.summaryCache
+		var newSummary string
+		var err error
+
+		if existingSummary != "" {
+			newSummary, err = summarizer.IncrementalSummarize(context.Background(), existingSummary, oldText)
+		} else {
+			newSummary, err = summarizer.Summarize(context.Background(), oldText)
+		}
+
+		if err == nil && newSummary != "" {
+			r.summaryCache = newSummary
+			messages = append(messages, llm.Message{
+				Role:    "system",
+				Content: "[对话历史摘要] " + newSummary,
+			})
+			r.logger.Info("[buildContextMessages] Context compressed",
+				"old_count", len(oldMessages),
+				"summary_len", len(newSummary),
+				"recent_count", len(recentMessages))
+		} else {
+			r.logger.Warn("[buildContextMessages] Summarization failed, falling back to truncation", "error", err)
+			// 降级：使用简单的截断提示
+			messages = append(messages, llm.Message{
+				Role:    "system",
+				Content: fmt.Sprintf("[之前有%d条对话，以下是最近的对话内容]", len(oldMessages)),
+			})
+		}
+	} else if len(oldMessages) > 0 {
+		// 无摘要器，使用简单截断提示
+		messages = append(messages, llm.Message{
+			Role:    "system",
+			Content: fmt.Sprintf("[之前有%d条对话，以下是最近的对话内容]", len(oldMessages)),
+		})
+	}
+
+	// 添加最近的原始消息
+	for _, msg := range recentMessages {
+		if msg.Content == "" {
+			continue
+		}
+		messages = append(messages, llm.Message{
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+	}
+
+	// 添加当前消息
+	messages = append(messages, llm.Message{
+		Role:    "user",
+		Content: currentMessage,
+	})
+
+	return messages
+}
+
+// messagesToText 将 Session 消息列表转换为纯文本。
+func messagesToText(msgs []Message) string {
+	var sb strings.Builder
+	for _, msg := range msgs {
+		prefix := "[用户] "
+		if msg.Role == "assistant" {
+			prefix = "[助手] "
+		} else if msg.Role == "system" {
+			prefix = "[系统] "
+		}
+		sb.WriteString(prefix)
+		sb.WriteString(msg.Content)
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 // recordLLMMetrics 记录 LLM 相关的 Prometheus 指标。
