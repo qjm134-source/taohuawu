@@ -97,25 +97,12 @@ func EndSpanWithDuration(ctx context.Context, span trace.Span) {
 //	_, childSpan := observability.StartChildSpan(ctx, "Cache.Check")
 //	defer observability.EndChildSpan(ctx, childSpan)
 func StartChildSpan(ctx context.Context, name string) (context.Context, trace.Span) {
-	startTime := time.Now()
-	ctx = context.WithValue(ctx, spanStartTimeKey{}, startTime)
 	return Tracer().Start(ctx, name)
 }
 
-// EndChildSpan 结束子 Span 并记录耗时（毫秒）。
-// 需要配合 StartChildSpan 使用。
 func EndChildSpan(ctx context.Context, span trace.Span) {
 	if span == nil {
 		return
 	}
-
-	// 从 context 中获取开始时间并计算耗时
-	if startTime, ok := ctx.Value(spanStartTimeKey{}).(time.Time); ok {
-		durationMs := time.Since(startTime).Milliseconds()
-		span.SetAttributes(
-			attribute.Int64("duration_ms", durationMs),
-		)
-	}
-
 	span.End()
 }

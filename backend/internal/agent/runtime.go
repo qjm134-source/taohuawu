@@ -469,7 +469,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	r.logger.Info("[HandleChatStream] Checking LLM health", "healthy", isHealthy)
 
 	// 6. LLM调用子Span（包含完整的请求发送和数据接收）
-	_, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
+	llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
 	if isHealthy {
 		r.logger.Info("[HandleChatStream] Calling primary LLM stream")
 		stream, err = r.llmAdapter.StreamChat(ctx, req)
@@ -483,10 +483,9 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		r.logger.Warn("[HandleChatStream] Primary LLM unhealthy, using fallback")
 		stream, err = r.fallbackAdapter.StreamChat(ctx, req)
 	}
-	// 注意：这里不结束 llmSpan，让它一直覆盖到流式数据处理完成
 
 	if err != nil {
-		observability.EndChildSpan(ctx, llmSpan)
+		observability.EndChildSpan(llmCtx, llmSpan)
 		r.logger.Error("[HandleChatStream] All LLM stream calls failed", "error", err)
 		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
 		observability.RecordError(span, err)
@@ -508,7 +507,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		}
 
 		// 7. 流式数据接收子Span（在 LLM.StreamChat 内部）
-		_, receiveSpan := observability.StartChildSpan(ctx, "LLM.StreamReceive")
+		_, receiveSpan := observability.StartChildSpan(llmCtx, "LLM.StreamReceive")
 		chunkCount := 0
 		for chunk := range stream {
 			chunkCount++
@@ -534,9 +533,9 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				break
 			}
 		}
-		observability.EndChildSpan(ctx, receiveSpan)
+		observability.EndChildSpan(llmCtx, receiveSpan)
 		// 结束 LLM.StreamChat Span（包含请求发送和数据接收）
-		observability.EndChildSpan(ctx, llmSpan)
+		observability.EndChildSpan(llmCtx, llmSpan)
 
 		if fullReply.Len() == 0 {
 			r.logger.Warn("[HandleChatStream] Stream returned empty data, falling back to non-streaming")
