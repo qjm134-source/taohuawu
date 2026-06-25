@@ -244,6 +244,9 @@ func Load() (*Config, error) {
 	if dbPass := os.Getenv("DB_PASSWORD"); dbPass != "" {
 		cfg.Database.Password = dbPass
 	}
+	if dbUser := os.Getenv("DB_USER"); dbUser != "" {
+		cfg.Database.User = dbUser
+	}
 	if dbHost := os.Getenv("DB_HOST"); dbHost != "" {
 		cfg.Database.Host = dbHost
 	}
@@ -251,6 +254,9 @@ func Load() (*Config, error) {
 		if port, err := strconv.Atoi(dbPort); err == nil {
 			cfg.Database.Port = port
 		}
+	}
+	if dbName := os.Getenv("DB_NAME"); dbName != "" {
+		cfg.Database.Name = dbName
 	}
 
 	// 可观测性配置环境变量覆盖

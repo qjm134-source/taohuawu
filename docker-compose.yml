@@ -2,16 +2,16 @@ version: '3.8'
 
 services:
   mysql:
-    image: mysql:8.0
+    image: mysql:8.0.36
     container_name: watertown-mysql
     environment:
+      MYSQL_ROOT_PASSWORD: root123
       MYSQL_DATABASE: water_town
       MYSQL_USER: water_town
       MYSQL_PASSWORD: password123
     ports:
       - "3306:3306"
     volumes:
-      - mysql_data:/var/lib/mysql/data
       - ./backend/data/migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
@@ -37,14 +37,14 @@ services:
     container_name: watertown-backend
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
-      CONFIG_FILE: "configs/config-docker.yaml"  # 使用 Docker 专用配置
+      CONFIG_FILE: "configs/config-docker.yaml"
       DB_HOST: mysql
-      DB_PORT: 3306
-      DB_NAME: water_town
+      DB_PORT: "3306"
       DB_USER: water_town
-      DB_PASS: password123
-      GLM_API_KEY: ${GLM_API_KEY:-}
+      DB_PASSWORD: password123
     volumes:
       - ./backend/data:/app/data
       - ./backend/configs:/app/configs
@@ -56,9 +56,9 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   frontend:
     image: nginx:alpine
@@ -82,10 +82,10 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=15d'
     restart: unless-stopped
 
 volumes:
-  mysql_data:
   prometheus_data:

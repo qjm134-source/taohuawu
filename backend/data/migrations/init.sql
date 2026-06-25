@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS players (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_players_tenant ON players(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_players_device ON players(device_id);
+CREATE INDEX idx_players_tenant ON players(tenant_id);
+CREATE INDEX idx_players_device ON players(device_id);
 
 -- 对话记录表
 CREATE TABLE IF NOT EXISTS conversations (
@@ -34,10 +34,10 @@ CREATE TABLE IF NOT EXISTS conversations (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_conversations_player ON conversations(player_id);
-CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id);
-CREATE INDEX IF NOT EXISTS idx_conversations_tenant ON conversations(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations(created_at);
+CREATE INDEX idx_conversations_player ON conversations(player_id);
+CREATE INDEX idx_conversations_session ON conversations(session_id);
+CREATE INDEX idx_conversations_tenant ON conversations(tenant_id);
+CREATE INDEX idx_conversations_created ON conversations(created_at);
 
 -- 审计日志表
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -53,9 +53,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_logs(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);
-CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+CREATE INDEX idx_audit_tenant ON audit_logs(tenant_id);
+CREATE INDEX idx_audit_action ON audit_logs(action);
+CREATE INDEX idx_audit_created ON audit_logs(created_at);
 
 -- 插入测试数据（可选）
 -- INSERT INTO players (id, tenant_id, nickname, device_id, total_dialogues)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -59,9 +60,13 @@ func InitTracing(cfg ObservabilityConfig) (*sdktrace.TracerProvider, error) {
 		fmt.Fprintln(os.Stderr, "[OTel] Using stdout exporter — traces will be printed to console/logs")
 
 	default: // "otlp" 或空
+		endpoint := cfg.Endpoint
+		endpoint = strings.TrimPrefix(endpoint, "http://")
+		endpoint = strings.TrimPrefix(endpoint, "https://")
+
 		client := otlptracehttp.NewClient(
 			otlptracehttp.WithInsecure(),
-			otlptracehttp.WithEndpoint(cfg.Endpoint),
+			otlptracehttp.WithEndpoint(endpoint),
 		)
 		exporter, err = otlptrace.New(ctx, client)
 		if err != nil {

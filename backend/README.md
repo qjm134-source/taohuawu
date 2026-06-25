@@ -1,6 +1,6 @@
 # 江南水乡智能导游系统 - 后端
 
-基于 Go + Gin + WebSocket + LLM 的智能导游后端服务，支持**多模型路由**、**策略化调度**和**企业级容错**。
+基于 Go + Gin + WebSocket + LLM 的智能导游后端服务，支持**多模型路由**、**策略化调度**和**容错**。
 
 ## 技术栈
 
@@ -338,10 +338,19 @@ go run cmd/server/main.go
 1. **设置环境变量**（可选）：
 ```bash
 # Linux/Mac
-export GLM_API_KEY="your-glm-api-key"
+export CLAUDE_API_KEY="your-claude-api-key"
 
 # Windows PowerShell
-$env:GLM_API_KEY="your-glm-api-key"
+$env:CLAUDE_API_KEY="your-claude-api-key"
+```
+注意：使用新的模型，需要在 `configs/config-docker.yaml` 中添加对应的模型配置，并移除不需要的模型配置。
+
+```yaml
+# configs/config-docker.yaml
+models:
+  - name: "claude-3.5"
+    api_key: ${CLAUDE_API_KEY}
+    base_url: "https://www.anthropic.com/claude-code"
 ```
 
 2. **一键启动**：

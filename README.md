@@ -275,8 +275,8 @@ taohuawu/
 ### 1. 本地 Docker 启动（推荐）
 
 ```bash
-# 设置 GLM API Key（或其他兼容 OpenAI 格式的 API Key）
-export GLM_API_KEY="your-glm-api-key"
+# 设置 CLAUDE_API_KEY（或其他模型的 API Key，同时在 `configs/config-docker.yaml` 中添加对应的模型配置）
+export CLAUDE_API_KEY="your-claude-api-key"
 
 # 启动全部服务（MySQL + 后端 + 前端 + Prometheus）
 docker-compose up --build
@@ -286,6 +286,9 @@ open http://localhost:3000
 
 # Prometheus UI（PromQL 查询指标）
 open http://localhost:9090
+
+# jaeger-ui 访问地址
+open http://localhost:16686
 ```
 
 ### 2. 后端单独启动
