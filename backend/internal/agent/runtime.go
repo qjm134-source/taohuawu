@@ -468,7 +468,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 	r.logger.Info("[HandleChatStream] Checking LLM health", "healthy", isHealthy)
 
-	// 6. LLM调用子Span
+	// 6. LLM调用子Span（包含完整的请求发送和数据接收）
 	_, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
 	if isHealthy {
 		r.logger.Info("[HandleChatStream] Calling primary LLM stream")
@@ -476,7 +476,6 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 		if err != nil {
 			r.logger.Error("[HandleChatStream] Primary LLM stream failed", "error", err)
-			// 降级到备用适配器
 			r.logger.Info("[HandleChatStream] Trying fallback adapter stream")
 			stream, err = r.fallbackAdapter.StreamChat(ctx, req)
 		}
@@ -484,9 +483,10 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		r.logger.Warn("[HandleChatStream] Primary LLM unhealthy, using fallback")
 		stream, err = r.fallbackAdapter.StreamChat(ctx, req)
 	}
-	observability.EndChildSpan(ctx, llmSpan)
+	// 注意：这里不结束 llmSpan，让它一直覆盖到流式数据处理完成
 
 	if err != nil {
+		observability.EndChildSpan(ctx, llmSpan)
 		r.logger.Error("[HandleChatStream] All LLM stream calls failed", "error", err)
 		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
 		observability.RecordError(span, err)
@@ -496,7 +496,6 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
 	}
 
-	// 创建输出 channels（使用缓冲 channel 避免阻塞）
 	contentChan := make(chan string, 100)
 	statsChan := make(chan *LLMStats, 1)
 
@@ -508,8 +507,8 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			CacheHit: false,
 		}
 
-		// 7. 流式数据处理子Span
-		_, processSpan := observability.StartChildSpan(ctx, "Stream.Process")
+		// 7. 流式数据接收子Span（在 LLM.StreamChat 内部）
+		_, receiveSpan := observability.StartChildSpan(ctx, "LLM.StreamReceive")
 		chunkCount := 0
 		for chunk := range stream {
 			chunkCount++
@@ -520,13 +519,11 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				fullReply.WriteString(chunk.Content)
 			}
 
-			// 提取模型信息（可能在第一个 chunk 中）
 			if chunk.Model != "" && stats.Model == "" {
 				stats.Model = chunk.Model
 				r.logger.Info("[HandleChatStream] Model detected", "model", stats.Model)
 			}
 
-			// 提取 token 使用信息
 			if chunk.Usage.TotalTokens > 0 {
 				stats.InputTokens = chunk.Usage.PromptTokens
 				stats.OutputTokens = chunk.Usage.CompletionTokens
@@ -537,9 +534,10 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				break
 			}
 		}
-		observability.EndChildSpan(ctx, processSpan)
+		observability.EndChildSpan(ctx, receiveSpan)
+		// 结束 LLM.StreamChat Span（包含请求发送和数据接收）
+		observability.EndChildSpan(ctx, llmSpan)
 
-		// 如果流式调用返回空数据，降级到非流式调用
 		if fullReply.Len() == 0 {
 			r.logger.Warn("[HandleChatStream] Stream returned empty data, falling back to non-streaming")
 			r.handleNonStreamChat(ctx, req, contentChan, &fullReply, stats)
@@ -549,16 +547,14 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			r.logger.Warn("[HandleChatStream] No model detected in stream")
 		}
 
-		// 填充统计信息
 		stats.LatencyMs = time.Since(startTime).Milliseconds()
-		// 注意：流式响应通常不会返回 token 使用信息，需要单独获取或估算
 		stats.Cost = cost.CalculateCost(stats.Model, stats.InputTokens, stats.OutputTokens)
 
-		// 记录 LLM 指标
 		model := stats.Model
 		if model == "" {
 			model = "unknown"
 		}
+
 		r.recordLLMMetrics(model, "success", time.Since(startTime).Seconds(),
 			stats.InputTokens, stats.OutputTokens, stats.Cost)
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
@@ -573,25 +569,27 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				attribute.Float64("llm.cost", stats.Cost),
 			)
 		}
-		observability.EndSpanWithDuration(ctx, span)
 
-		// 记录 Langfuse generation
-		langfuseTrace.RecordGeneration("llm-call", stats.Model, req.Messages, fullReply.String(),
-			stats.InputTokens, stats.OutputTokens, stats.Cost, stats.LatencyMs, nil)
-		langfuseTrace.End()
-
-		// 添加到会话历史（空 assistant 消息不写入，避免后续请求触发 API 校验失败）
+		// 8. 会话更新子Span
+		_, sessionSpan := observability.StartChildSpan(ctx, "Session.Update")
 		session.AddMessage("user", message, emotionStr, nil)
 		if fullReply.Len() > 0 {
 			session.AddMessage("assistant", fullReply.String(), emotionStr, nil)
 		}
+		observability.EndChildSpan(ctx, sessionSpan)
 
-		// 8. 缓存写入子Span
+		// 9. 缓存写入子Span
 		_, cacheWriteSpan := observability.StartChildSpan(ctx, "Cache.Write")
 		if fullReply.Len() > 0 {
 			r.optimizer.SetCache(cacheKey, fullReply.String())
 		}
 		observability.EndChildSpan(ctx, cacheWriteSpan)
+
+		observability.EndSpanWithDuration(ctx, span)
+
+		langfuseTrace.RecordGeneration("llm-call", stats.Model, req.Messages, fullReply.String(),
+			stats.InputTokens, stats.OutputTokens, stats.Cost, stats.LatencyMs, nil)
+		langfuseTrace.End()
 
 		statsChan <- stats
 		close(statsChan)
