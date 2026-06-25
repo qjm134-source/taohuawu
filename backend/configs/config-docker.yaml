@@ -25,7 +25,7 @@ llm:
       api_key: ${MIMO_API_KEY}
       enabled: true
       max_tokens: 300
-      temperature: 0.7
+      temperature: 0.5
       mode: auto
 
   timeout: 60s
@@ -52,7 +52,7 @@ cost:
   summary_model: ""
   summary_timeout: 30s
   embedding:
-    enabled: false
+    enabled: true
     type: remote
     api_key: ${BAILIAN_API_KEY}
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1

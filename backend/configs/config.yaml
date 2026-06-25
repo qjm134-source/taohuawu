@@ -26,7 +26,7 @@ llm:
       api_key: ${MIMO_API_KEY}
       enabled: true
       max_tokens: 300
-      temperature: 0.7
+      temperature: 0.5
       mode: auto  # stream/chat/auto，auto 会自动检测并记忆成功的模式
 
     - name: qwen3.5-27b
@@ -84,7 +84,7 @@ logging:
     compress: true
 
 observability:
-  enabled: true
+  enabled: false
   service_name: watertown-guide
   endpoint: http://localhost:4318       # OTLP HTTP 端口（需先启动 Jaeger 或 OTel Collector）
   sample_rate: 1.0                      # 采样率，1.0=全量
