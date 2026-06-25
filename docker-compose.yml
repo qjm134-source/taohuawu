@@ -13,6 +13,7 @@ services:
       - "3306:3306"
     volumes:
       - ./backend/data/migrations:/docker-entrypoint-initdb.d
+      - /etc/localtime:/etc/localtime:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
@@ -48,6 +49,7 @@ services:
     volumes:
       - ./backend/data:/app/data
       - ./backend/configs:/app/configs
+      - /etc/localtime:/etc/localtime:ro
     depends_on:
       mysql:
         condition: service_healthy
@@ -81,6 +83,7 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
+      - /etc/localtime:/etc/localtime:ro
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'

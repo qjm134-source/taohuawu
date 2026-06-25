@@ -468,7 +468,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 	r.logger.Info("[HandleChatStream] Checking LLM health", "healthy", isHealthy)
 
-	// 6. LLM调用子Span（包含完整的请求发送和数据接收）
+	// 6. LLM调用子Span（覆盖完整的流式调用生命周期）
 	llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
 	if isHealthy {
 		r.logger.Info("[HandleChatStream] Calling primary LLM stream")
@@ -483,6 +483,9 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		r.logger.Warn("[HandleChatStream] Primary LLM unhealthy, using fallback")
 		stream, err = r.fallbackAdapter.StreamChat(ctx, req)
 	}
+
+	// 记录 StreamChat 返回的时间点
+	streamReadyTime := time.Now()
 
 	if err != nil {
 		observability.EndChildSpan(llmCtx, llmSpan)
@@ -506,10 +509,16 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			CacheHit: false,
 		}
 
-		// 7. 流式数据接收子Span（在 LLM.StreamChat 内部）
-		_, receiveSpan := observability.StartChildSpan(llmCtx, "LLM.StreamReceive")
+		// 7a. 等待首Token子Span：覆盖从 StreamChat 返回到收到第一个 chunk 之间的时间（TTFT）
+		// 使用 streamReadyTime 作为开始时间，确保 span 从 StreamChat 返回时就开始计时
+		_, ttftSpan := observability.StartChildSpanAt(llmCtx, "LLM.WaitForFirstToken", streamReadyTime)
+
 		chunkCount := 0
 		for chunk := range stream {
+			// 收到第一个 chunk 时结束 TTFT span
+			if chunkCount == 0 {
+				observability.EndChildSpan(llmCtx, ttftSpan)
+			}
 			chunkCount++
 			r.logger.Info("[HandleChatStream] Received chunk", "index", chunkCount, "content_len", len(chunk.Content), "model", chunk.Model, "finish_reason", chunk.FinishReason)
 
@@ -533,8 +542,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				break
 			}
 		}
-		observability.EndChildSpan(llmCtx, receiveSpan)
-		// 结束 LLM.StreamChat Span（包含请求发送和数据接收）
+		// 结束 LLM.StreamChat Span（包含请求发送、等待首token、接收数据）
 		observability.EndChildSpan(llmCtx, llmSpan)
 
 		if fullReply.Len() == 0 {

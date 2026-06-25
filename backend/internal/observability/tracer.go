@@ -100,6 +100,12 @@ func StartChildSpan(ctx context.Context, name string) (context.Context, trace.Sp
 	return Tracer().Start(ctx, name)
 }
 
+// StartChildSpanAt 创建一个子 Span 并使用指定的开始时间。
+// 用于记录跨 goroutine 的延迟操作（如等待首 token）。
+func StartChildSpanAt(ctx context.Context, name string, startTime time.Time) (context.Context, trace.Span) {
+	return Tracer().Start(ctx, name, trace.WithTimestamp(startTime))
+}
+
 func EndChildSpan(ctx context.Context, span trace.Span) {
 	if span == nil {
 		return
