@@ -247,7 +247,6 @@ taohuawu/
 │   │   └── config/                   # 配置管理
 │   ├── pkg/                          # 工具包
 │   ├── docs/                         # 后端文档
-│   ├── examples/                     # 使用示例
 │   ├── configs/                      # 配置文件
 │   └── README.md
 ├── frontend/                         # 前端游戏
@@ -278,7 +277,7 @@ taohuawu/
 # 设置 CLAUDE_API_KEY（或其他模型的 API Key，同时在 `configs/config-docker.yaml` 中添加对应的模型配置）
 export CLAUDE_API_KEY="your-claude-api-key"
 
-# 启动全部服务（MySQL + 后端 + 前端 + Prometheus）
+# 启动全部服务（MySQL + 后端 + 前端 + Prometheus + Jaeger）
 docker-compose up --build
 
 # 访问游戏
