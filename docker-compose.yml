@@ -29,6 +29,10 @@ services:
       - "4317:4317"        # OTLP gRPC receiver
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
+      TZ: Asia/Shanghai
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /usr/share/zoneinfo/Asia/Shanghai:/usr/share/zoneinfo/Asia/Shanghai:ro
     restart: unless-stopped
 
   backend:
@@ -67,9 +71,12 @@ services:
     container_name: watertown-frontend
     ports:
       - "3000:80"
+    environment:
+      TZ: Asia/Shanghai
     volumes:
       - ./frontend:/usr/share/nginx/html
       - ./frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/localtime:/etc/localtime:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -80,10 +87,13 @@ services:
     container_name: watertown-prometheus
     ports:
       - "9090:9090"
+    environment:
+      TZ: Asia/Shanghai
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
       - /etc/localtime:/etc/localtime:ro
+      - /usr/share/zoneinfo/Asia/Shanghai:/usr/share/zoneinfo/Asia/Shanghai:ro
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'

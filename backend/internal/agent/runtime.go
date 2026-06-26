@@ -468,8 +468,9 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 	r.logger.Info("[HandleChatStream] Checking LLM health", "healthy", isHealthy)
 
-	// 6. LLM调用子Span（覆盖完整的流式调用生命周期）
-	llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
+	// 记录 LLM 请求开始时间
+	llmStartTime := time.Now()
+
 	if isHealthy {
 		r.logger.Info("[HandleChatStream] Calling primary LLM stream")
 		stream, err = r.llmAdapter.StreamChat(ctx, req)
@@ -484,11 +485,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		stream, err = r.fallbackAdapter.StreamChat(ctx, req)
 	}
 
-	// 记录 StreamChat 返回的时间点
-	streamReadyTime := time.Now()
-
 	if err != nil {
-		observability.EndChildSpan(llmCtx, llmSpan)
 		r.logger.Error("[HandleChatStream] All LLM stream calls failed", "error", err)
 		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
 		observability.RecordError(span, err)
@@ -497,6 +494,9 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		langfuseTrace.End()
 		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
 	}
+
+	// 记录 StreamChat 返回的时间点（用于 TTFT 计算）
+	streamReadyTime := time.Now()
 
 	contentChan := make(chan string, 100)
 	statsChan := make(chan *LLMStats, 1)
@@ -509,15 +509,25 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			CacheHit: false,
 		}
 
-		// 7a. 等待首Token子Span：覆盖从 StreamChat 返回到收到第一个 chunk 之间的时间（TTFT）
-		// 使用 streamReadyTime 作为开始时间，确保 span 从 StreamChat 返回时就开始计时
+		// 6. LLM调用子Span（覆盖从请求开始到所有数据处理完成的完整生命周期）
+		llmCtx, llmSpan := observability.StartChildSpanAt(ctx, "LLM.StreamChat", llmStartTime)
+
+		// 7a. 连接建立子Span：覆盖从发起请求到 StreamChat 返回的时间（HTTP连接建立、TLS握手等）
+		_, requestSpan := observability.StartChildSpanAt(llmCtx, "LLM.EstablishConnection", llmStartTime)
+		observability.EndChildSpan(llmCtx, requestSpan)
+
+		// 7b. 等待首Token子Span：覆盖从 StreamChat 返回到收到第一个 chunk 之间的时间（TTFT）
 		_, ttftSpan := observability.StartChildSpanAt(llmCtx, "LLM.WaitForFirstToken", streamReadyTime)
+
+		// 7c. 数据接收子Span：覆盖从第一个 chunk 到最后一个 chunk 的接收时间
+		var receiveSpan trace.Span
 
 		chunkCount := 0
 		for chunk := range stream {
-			// 收到第一个 chunk 时结束 TTFT span
 			if chunkCount == 0 {
 				observability.EndChildSpan(llmCtx, ttftSpan)
+				// 开始追踪数据接收时间
+				_, receiveSpan = observability.StartChildSpan(llmCtx, "LLM.ReceiveChunks")
 			}
 			chunkCount++
 			r.logger.Info("[HandleChatStream] Received chunk", "index", chunkCount, "content_len", len(chunk.Content), "model", chunk.Model, "finish_reason", chunk.FinishReason)
@@ -542,8 +552,14 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				break
 			}
 		}
-		// 结束 LLM.StreamChat Span（包含请求发送、等待首token、接收数据）
-		observability.EndChildSpan(llmCtx, llmSpan)
+
+		// 结束数据接收 span
+		if receiveSpan != nil {
+			observability.EndChildSpan(llmCtx, receiveSpan)
+		}
+
+		// 7d. 统计与指标子Span：覆盖空响应处理、统计计算、Prometheus指标记录等
+		_, statsSpan := observability.StartChildSpan(llmCtx, "LLM.StatsAndMetrics")
 
 		if fullReply.Len() == 0 {
 			r.logger.Warn("[HandleChatStream] Stream returned empty data, falling back to non-streaming")
@@ -577,20 +593,25 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			)
 		}
 
-		// 8. 会话更新子Span
-		_, sessionSpan := observability.StartChildSpan(ctx, "Session.Update")
+		observability.EndChildSpan(llmCtx, statsSpan)
+
+		// 8. 会话更新子Span（作为 LLM.StreamChat 的子 span）
+		_, sessionSpan := observability.StartChildSpan(llmCtx, "Session.Update")
 		session.AddMessage("user", message, emotionStr, nil)
 		if fullReply.Len() > 0 {
 			session.AddMessage("assistant", fullReply.String(), emotionStr, nil)
 		}
-		observability.EndChildSpan(ctx, sessionSpan)
+		observability.EndChildSpan(llmCtx, sessionSpan)
 
-		// 9. 缓存写入子Span
-		_, cacheWriteSpan := observability.StartChildSpan(ctx, "Cache.Write")
+		// 9. 缓存写入子Span（作为 LLM.StreamChat 的子 span）
+		_, cacheWriteSpan := observability.StartChildSpan(llmCtx, "Cache.Write")
 		if fullReply.Len() > 0 {
 			r.optimizer.SetCache(cacheKey, fullReply.String())
 		}
-		observability.EndChildSpan(ctx, cacheWriteSpan)
+		observability.EndChildSpan(llmCtx, cacheWriteSpan)
+
+		// 结束 LLM.StreamChat（在所有 LLM 相关处理完成后）
+		observability.EndChildSpan(llmCtx, llmSpan)
 
 		observability.EndSpanWithDuration(ctx, span)
 

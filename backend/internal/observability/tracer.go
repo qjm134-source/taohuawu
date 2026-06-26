@@ -29,19 +29,15 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 	return Tracer().Start(ctx, name, trace.WithAttributes(attrs...))
 }
 
-// StartSpanWithStartTime 创建一个新的 Span 并记录开始时间，用于后续计算耗时。
-// 返回一个包含开始时间的 context，配合 EndSpanWithDuration 使用。
+// StartSpanWithStartTime 创建一个新的 Span。
+// 使用 OpenTelemetry SDK 自动记录开始时间，确保时间一致性。
 // 使用方式：
 //
 //	ctx, span := observability.StartSpanWithStartTime(ctx, "HandleChat")
 //	defer observability.EndSpanWithDuration(ctx, span)
 func StartSpanWithStartTime(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
-	ctx = context.WithValue(ctx, spanStartTimeKey{}, time.Now())
 	return Tracer().Start(ctx, name, opts...)
 }
-
-// spanStartTimeKey 用于在 context 中存储 Span 开始时间
-type spanStartTimeKey struct{}
 
 // RecordError 在 Span 上记录错误并设置状态。
 func RecordError(span trace.Span, err error) {
@@ -72,21 +68,12 @@ func SetAttributes(ctx context.Context, attrs ...attribute.KeyValue) {
 	}
 }
 
-// EndSpanWithDuration 结束 Span 并记录耗时（毫秒）。
-// 需要配合 StartSpanWithStartTime 使用。
+// EndSpanWithDuration 结束 Span。
+// SDK 自动计算并记录耗时，确保与 UI 显示一致。
 func EndSpanWithDuration(ctx context.Context, span trace.Span) {
 	if span == nil {
 		return
 	}
-
-	// 从 context 中获取开始时间并计算耗时
-	if startTime, ok := ctx.Value(spanStartTimeKey{}).(time.Time); ok {
-		durationMs := time.Since(startTime).Milliseconds()
-		span.SetAttributes(
-			attribute.Int64("duration_ms", durationMs),
-		)
-	}
-
 	span.End()
 }
 

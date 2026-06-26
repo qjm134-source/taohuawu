@@ -211,13 +211,10 @@ observability.EndChildSpan(ctx, llmSpan)
 
 #### 输出效果（JSON Trace）
 
-每个 Span 都包含 `duration_ms` 字段，直接显示该步骤的耗时：
-
 ```json
 {
   "Name": "Agent.HandleChatStream",
   "Attributes": [
-    {"Key": "duration_ms", "Value": {"Type": "INT64", "Value": 10111}},
     {"Key": "llm.model", "Value": {"Type": "STRING", "Value": "mimo-v2-5"}},
     {"Key": "llm.input_tokens", "Value": {"Type": "INT64", "Value": 208}},
     {"Key": "llm.output_tokens", "Value": {"Type": "INT64", "Value": 192}},
