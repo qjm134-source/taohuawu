@@ -57,12 +57,13 @@
 
 | 亮点 | 说明 |
 |------|------|
-| **多模型智能路由** | 6 种路由策略（Fixed / Cost / Latency / Capability / Fallback / Weighted），支持自动降级 |
+| **多模型智能路由** | 基于 Eino 框架，统一 OpenAI 兼容接口，支持 6 种路由策略和自动降级 |
+| **Eino ModelFailover** | 内置故障转移和重试机制，简化配置，提高可靠性 |
 | **EMA 运行时统计** | 指数移动平均跟踪模型延迟与错误率，动态优化路由决策 |
 | **任务分类器** | 根据消息内容自动识别 Code / Reasoning / Chinese / LongText / General 任务类型 |
 | **实时工具调用** | 支持 Function Calling，例如询问天气时自动调用 `get_weather` 工具 |
 | **成本优化** | 相似问题缓存、历史消息摘要、Token 估算、成本计算 |
-| **企业级可用性** | 熔断器 + 多模型降级链 + 自动重试 + FallbackAdapter 兜底 |
+| **企业级可用性** | Eino ModelFailover + 流式降级 + FallbackAdapter 兜底 |
 | **可观测性** | Prometheus 指标 + OpenTelemetry 分布式追踪 + 审计日志 + Langfuse（LLM 专项），详见 [可观测性指南](./backend/docs/OBSERVABILITY.md) |
 | **多租户支持** | 租户隔离、独立资源池、审计日志 |
 
@@ -83,19 +84,19 @@ graph TB
     subgraph Backend["后端服务 Go + Gin"]
         D[WebSocket Handler]
         E[Agent Runtime]
-        F[多模型 LLM 路由层]
+        F[EinoAdapter 路由层]
         G[成本优化器]
         H[情绪检测器]
         I[知识库 / 工具注册表]
-        J[熔断器 / 重试 / 兜底]
+        J[Eino ModelFailover / 流式降级]
         K[(MySQL 数据库)]
         L[Prometheus / OpenTelemetry]
     end
 
     subgraph LLM["大模型服务层"]
-        M[Claude]
-        N[OpenAI GPT]
-        O[GLM / Qwen / DeepSeek]
+        M[小米模型]
+        N[阿里通义千问]
+        O[智谱GLM / DeepSeek / OpenAI]
     end
 
     A --> B
@@ -169,42 +170,33 @@ sequenceDiagram
     Frontend->>Player: 打字机效果展示
 ```
 
-### 2. 多模型路由决策流程
+### 2. 多模型路由决策流程（基于 Eino）
 
 ```mermaid
 flowchart TD
-    A[收到 LLM 请求] --> B{任务类型分类}
-    B -->|Code| C[匹配代码能力模型]
-    B -->|Reasoning| D[匹配推理能力模型]
-    B -->|Chinese| E[匹配中文对话模型]
-    B -->|LongText| F[匹配长上下文模型]
-    B -->|General| G[通用模型]
-    C --> H[Router 选择模型]
-    D --> H
-    E --> H
-    F --> H
-    G --> H
-    H --> I{当前策略}
-    I -->|Fallback| J[按降级链选择]
-    I -->|Cost| K[选择成本最低]
-    I -->|Latency| L[选择 EMA 延迟最低]
-    I -->|Capability| M[按能力映射选择]
-    I -->|Weighted| N[按权重随机]
-    I -->|Fixed| O[固定模型]
-    J --> P{模型可用?}
-    K --> P
-    L --> P
-    M --> P
-    N --> P
-    O --> P
-    P -->|是| Q[发送请求]
-    P -->|否| R[熔断/降级下一个]
-    R --> P
-    Q --> S{请求成功?}
-    S -->|是| T[更新 EMA 延迟]
-    S -->|否| U[记录错误 + 重试]
-    U --> P
-    T --> V[返回响应]
+    A[收到 LLM 请求] --> B[EinoAdapter处理]
+    B --> C[Eino ChatModelAgent]
+    C --> D{路由策略选择主模型}
+    D -->|Fixed| E[固定模型]
+    D -->|Cost| F[成本最低模型]
+    D -->|Latency| G[EMA延迟最低]
+    D -->|Capability| H[任务分类匹配]
+    D -->|Fallback| I[配置顺序首个]
+    D -->|Weighted| J[权重随机]
+    E --> K[Eino OpenAI ChatModel调用]
+    F --> K
+    G --> K
+    H --> K
+    I --> K
+    J --> K
+    K --> L{调用成功?}
+    L -->|是| M[更新EMA统计]
+    L -->|否| N[ModelFailover判断]
+    N --> O{需要降级?}
+    O -->|是| P[选择下一个模型]
+    O -->|否| Q[返回错误]
+    P --> K
+    M --> R[返回ChatResponse]
 ```
 
 ### 3. 服务启动流程
@@ -235,10 +227,12 @@ taohuawu/
 │   ├── internal/
 │   │   ├── server/                   # Gin HTTP + WebSocket 服务
 │   │   ├── agent/                    # Agent 运行时、会话、工具、Prompt
-│   │   ├── llm/                      # 多模型路由层
+│   │   ├── llm/                      # 多模型路由层（基于 Eino）
 │   │   │   ├── model/                # 统一数据模型
 │   │   │   ├── router/               # 路由策略引擎
-│   │   │   └── providers/            # Provider 实现
+│   │   │   ├── multi_model_adapter.go  # EinoAdapter 实现
+│   │   │   ├── adapter.go            # Adapter 接口定义
+│   │   │   └── fallback_adapter.go   # FallbackAdapter 兜底实现
 │   │   ├── cost/                     # 成本优化
 │   │   ├── emotion/                  # 情绪检测
 │   │   ├── database/                 # 数据库层
@@ -329,10 +323,11 @@ npm run dev
 
 ## 技术亮点
 
-1. **多模型路由架构**
-   - 为什么要做路由层？解耦应用层和具体模型。
-   - 6 种策略分别解决了什么问题？成本、延迟、可用性、A/B 测试。
-   - 降级链设计：可用性优先于成本，主模型 → 备选 → 低成本兜底。
+1. **多模型路由架构（基于 Eino）**
+   - 基于 Eino 框架，所有模型统一通过 OpenAI 兼容接口接入。
+   - 6 种策略（Fixed / Cost / Latency / Capability / Fallback / Weighted）动态选择最优模型。
+   - Eino `ModelFailoverConfig` 提供内置故障转移和重试机制。
+   - 简化配置：不再需要区分 Provider 类型（`type` 字段已删除）。
 
 2. **EMA 动态统计**
    - 公式：`newEMA = 0.3 × currentSample + 0.7 × previousEMA`
@@ -374,7 +369,8 @@ npm run dev
 4. **Function Calling 工具调用 + Agent 设计模式**
    - 以天气查询为例，演示 LLM 如何自动决策并调用外部 API。
    - 工具注册表（Registry）集中管理工具，策略模式（Strategy）让不同工具实现统一接口。
-   - 适配器模式（Adapter）通过 `llm.Adapter` 统一接入 Claude / OpenAI / Fallback。
+   - 适配器模式（Adapter）通过 `llm.Adapter` 统一接入所有模型。
+   - Eino `BindTools` 方法统一处理工具绑定。
    - 依赖注入（DI）让 `Runtime` 依赖通过构造函数传入，便于测试和替换。
    - ReAct 循环：LLM 决策 → 工具执行 → 结果回传 → 生成最终回复。
 

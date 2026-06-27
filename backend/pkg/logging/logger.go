@@ -57,16 +57,9 @@ func New(cfg Config) Logger {
 	log.SetLevel(level)
 
 	// 设置输出格式
-	if cfg.Format == "json" {
-		log.SetFormatter(&logrus.JSONFormatter{
-			TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
-		})
-	} else {
-		log.SetFormatter(&logrus.TextFormatter{
-			FullTimestamp:   true,
-			TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
-		})
-	}
+	log.SetFormatter(&CustomFormatter{
+		TimestampFormat: "2006-01-02 15:04:05",
+	})
 
 	// 设置输出
 	log.SetOutput(io.MultiWriter(os.Stdout))

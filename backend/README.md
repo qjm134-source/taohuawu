@@ -8,7 +8,10 @@
 - **Gin** — HTTP 框架
 - **Gorilla WebSocket** — WebSocket 支持
 - **MySQL 8.0** — 数据库
-- **Claude (anthropic-sdk-go)** / **OpenAI (go-openai)** — 原生 SDK 对接
+- **Eino (CloudWeGo)** — LLM 框架，统一模型调用
+- **Eino ReAct Agent** — 内置 ReAct 推理循环，自动工具调用
+- **Eino OpenAI ChatModel** — 通过 OpenAI 兼容接口接入所有模型
+- **Eino Callbacks** — 可观测性回调机制（trace/audit/logs）
 - **Prometheus** — 指标监控
 - **OpenTelemetry** — 分布式追踪
 
@@ -22,19 +25,10 @@ backend/
 │   ├── server/              # HTTP 服务器
 │   ├── websocket/           # WebSocket 处理
 │   ├── agent/               # Agent 运行时
-│   ├── llm/                 # ★ 多模型路由系统
-│   │   ├── adapter.go          # Adapter 接口（兼容层）
-│   │   ├── multi_model_adapter.go  # 桥接新系统到旧接口
-│   │   ├── model/              # ★ 统一数据层
-│   │   │   ├── provider.go       # Provider 接口定义
-│   │   │   ├── request.go        # ChatRequest / Tool / ToolCall
-│   │   │   ├── response.go       # ChatResponse / StreamChunk
-│   │   │   ├── stats.go          # ModelStats（EMA 延迟/错误率）
-│   │   │   └── classify.go       # 任务分类器
-│   │   ├── providers/          # ★ Provider 实现层
-│   │   │   ├── claude/claude.go  # Claude (anthropic-sdk-go)
-│   │   │   └── openai/openai.go  # OpenAI (go-openai)
-│   │   └── router/router.go    # ★ 路由器（6 种策略）
+│   ├── llm/                 # ★ 多模型路由系统（基于 Eino）
+│   │   ├── adapter.go          # Adapter 接口定义
+│   │   ├── eino_agent_adapter.go  # ★ EinoAgentAdapter 实现
+│   │   └── fallback_adapter.go     # 兜底适配器
 │   ├── cost/                # 成本优化
 │   ├── emotion/             # 情绪检测
 │   ├── database/            # 数据库层
@@ -45,45 +39,44 @@ backend/
 ├── docs/                    # 详细文档
 │   ├── MULTI_MODEL_ROUTER.md
 │   ├── MEMORY_SYSTEM.md
-│   └── OBSERVABILITY.md
+│   └ OBSERVABILITY.md
 ├── configs/                 # 配置文件
 ├── MODEL_CONFIG.md          # 多模型配置说明
 └── README.md                # 本文档
 ```
 
-## 核心架构
+## 核心架构（基于 Eino ReAct Agent）
 
 ```
 ┌──────────────────────────────────────────────────┐
 │         Application (agent.Runtime)               │
 └────────────────────────┬─────────────────────────┘
-                         │ llm.Adapter 接口（兼容）
+                         │ llm.Adapter 接口
                          ▼
               ┌──────────────────────┐
-              │   RouterAdapter      │ ← 桥接层
+              │  EinoAgentAdapter     │ ← Eino Agent 适配层
+              │  (工具调用循环处理)   │
               └──────────┬───────────┘
-                         │ model.ChatRequest
+                         │ eino_schema.Message
                          ▼
               ┌──────────────────────┐
-              │      Router          │ ← 策略引擎
+              │  Eino ReAct Agent    │ ← ★ 真正的 ReAct 推理 Agent
               │ ┌──────────────────┐ │
-              │ │ Fixed / Cost /   │ │
-              │ │ Latency /        │ │
-              │ │ Capability /     │ │
-              │ │ Fallback /       │ │
-              │ │ Weighted         │ │
+              │ │ 工具自动调用循环   │ │ ← Agent 内部自动完成
+              │ │ Reason → Act     │ │   思考 → 行动 → 观察 → 响应
+              │ │ → Observe →      │ │
+              │ │   Respond        │ │
               │ └──────────────────┘ │
               │ ┌──────────────────┐ │
-              │ │ ModelStats (EMA) │ │
+              │ │ ModelFailover    │ │ ← 故障转移
+              │ │ ModelRetry       │ │ ← 重试机制
               │ └──────────────────┘ │
               └──────────┬───────────┘
                          │
-              ┌──────────┴──────────┐
-              ▼                     ▼
-   ┌─────────────────┐  ┌─────────────────┐
-   │ Claude Provider  │  │ OpenAI Provider  │
-   │ (anthropic-sdk)  │  │  (go-openai)     │
-   └─────────────────┘  └─────────────────┘
+              ┌──────────▼──────────┐
+              │   Eino ChatModel    │ ← OpenAI 兼容接口
+              │ (Claude/GPT/GLM/...) │
+              └─────────────────────┘
 ```
 
 ## 后端请求处理流程
@@ -140,40 +133,60 @@ type Tool interface {
 
 `Runtime` 的所有依赖（LLM 适配器、工具注册表、会话管理器、成本优化器、情绪检测器）都通过 `NewRuntime` 构造函数注入，方便单元测试、Mock 和替换实现。
 
-### 5. ReAct / 工具调用循环（Agent Loop）
+### 5. ReAct / 工具调用循环（Eino 内置）
 
-`HandleChat` 实现了典型的 ReAct 流程：
+系统使用 **Eino ReAct Agent** 实现完整的 ReAct 推理循环，工具调用完全由 Agent 内部自动处理：
 
-1. **Reason**：把工具列表随对话上下文一起发送给 LLM，让模型判断是否需要调用工具
-2. **Act**：LLM 返回 `tool_calls` 时，`Runtime` 从 `ToolRegistry` 查找并执行对应工具
-3. **Observe**：将工具执行结果以 `tool` 角色消息回传给 LLM
-4. **Respond**：LLM 综合工具结果生成最终自然语言回复
+1. **Reason**：Agent 内部调用 ChatModel，判断是否需要调用工具
+2. **Act**：如果检测到 tool_calls，Agent 自动查找并执行注册的工具
+3. **Observe**：工具执行结果自动注入对话上下文
+4. **Respond**：循环直到生成最终自然语言回复
 
 ```mermaid
 sequenceDiagram
     participant RT as Agent Runtime
-    participant LLM as LLM Adapter
-    participant TR as ToolRegistry
+    participant EA as Eino ReAct Agent
+    participant LLM as ChatModel
     participant T as Tool
 
-    RT->>LLM: 发送消息 + 可用工具列表
-    LLM-->>RT: 返回 tool_calls
-    RT->>TR: Execute(name, args)
-    TR->>T: 执行具体工具
-    T-->>TR: 返回结果
-    TR-->>RT: 返回结果
-    RT->>LLM: 再次请求，附带 tool 结果
-    LLM-->>RT: 返回最终回复
+    RT->>EA: 发送消息 + 已注册工具列表
+    EA->>LLM: 第一次推理（判断是否调用工具）
+    LLM-->>EA: 返回 tool_calls
+    EA->>T: 自动执行工具（无需应用层干预）
+    T-->>EA: 返回工具结果
+    EA->>LLM: 第二次推理（综合工具结果）
+    LLM-->>EA: 返回最终回复
+    EA-->>RT: 返回完整响应
 ```
+
+**关键变化**：
+- ✅ **工具自动执行**：ReAct Agent 内部完成工具调用循环，应用层无需手动解析 tool_calls
+- ✅ **统一接口**：`agent.Generate()` / `agent.Stream()` 直接返回最终结果
+- ✅ **回调追踪**：通过 Eino Callbacks 机制实现模型调用和工具调用的 trace 与审计日志
 
 ## 架构设计亮点
 
-### 1. 多模型路由为什么是自研？
+### 1. 为什么迁移到 Eino ReAct Agent？
 
-- **解耦**：应用层通过 `llm.Adapter` 接口调用，不感知具体模型。
-- **灵活**：6 种策略可随时切换，无需改动业务代码。
-- **可观测**：集中收集延迟、错误率、成本等指标。
-- **轻量**：仅依赖 `anthropic-sdk-go` 和 `go-openai` 两个 SDK，避免 LangChain 的过度抽象。
+| 维度 | Eino ReAct Agent | 自研 ReAct（旧方案） |
+|------|-----------------|-------------------|
+| **维护成本** | 框架维护，跟随社区更新 | 自行维护 ReAct 循环逻辑 |
+| **抽象层级** | 统一 `ChatModel` 接口 + `react.Agent` | 自定义 `Provider` + 手动工具调用 |
+| **工具调用** | Agent 内部自动完成 Reason→Act→Observe→Respond | 应用层手动解析 tool_calls、执行工具、注入结果 |
+| **故障转移** | 内置 `ModelFailoverConfig` | 手动实现降级链 |
+| **重试机制** | 内置 `ModelRetryConfig` | 手动实现重试逻辑 |
+| **流式处理** | 自动处理 SSE 流，支持流式 ReAct | 手动解析 SSE 数据 |
+| **Tool Calling** | 统一工具注册，自动匹配执行 | 各 Provider 不同实现 |
+| **可观测性** | 内置 Callbacks 机制，支持 trace/audit | 应用层手动埋点 |
+| **扩展性** | 通过 OpenAI 兼容接口接入任意模型 | 需为每个 Provider 写适配器 |
+
+**迁移收益**：
+- **减少代码量**：移除了大量手动处理工具调用的代码（`runWithToolLoop`、`runStreamWithToolLoop` 等）
+- **工具自动执行**：ReAct Agent 内部自动完成"思考→调用工具→获取结果→继续思考"的完整循环
+- **统一抽象**：所有模型通过同一 OpenAI 兼容接口接入
+- **内置可靠性**：Eino 提供故障转移和重试机制
+- **回调追踪**：通过 `callbacks.Handler` 实现模型调用和工具调用的 trace 与审计日志
+- **简化配置**：不需要区分 Provider 类型（`type` 字段已删除）
 
 ### 2. EMA 算法在路由中的作用
 
@@ -186,15 +199,16 @@ Score  = Latency + ErrorRate × 10000
 - 70% 历史权重保证不会因为一次抖动就改变决策。
 - 错误率放大 10000 倍，确保高错误模型被快速降级。
 
-### 3. 降级链设计如何保证高可用？
+### 3. Eino ModelFailover 如何保证高可用？
 
 ```
-主模型（Claude Sonnet） → 通用备选（OpenAI GPT-4o） → 低成本兜底（Haiku / GPT-4o-mini）
+主模型 → ShouldFailover判断 → GetFailoverModel选择 → 下一个模型 → 最终兜底回复
 ```
 
-- 可用性优先于成本：请求失败比使用更贵的模型更糟糕。
-- 熔断器保护：连续失败达到阈值后快速失败，半开恢复。
-- 兜底回复：所有模型都失败时返回预设回复，避免服务空转。
+- **自动降级**：Eino 检测失败后自动切换到下一个模型
+- **流式降级**：流式失败且无内容时，降级为非流式调用（同模型）
+- **配置简化**：通过 `ModelFailoverConfig.MaxRetries` 控制最大重试次数
+- **兜底回复**：所有模型失败时返回 FallbackAdapter 预设回复
 
 ### 4. 成本控制手段
 
@@ -503,8 +517,9 @@ Code (代码) > Reasoning (推理) > Chinese (中文) > LongText (长文本) > G
 
 ### 4. 高可用
 
-- 熔断器机制
-- 多 Provider 降级链
+- Eino ModelFailover 故障转移机制
+- Eino ModelRetry 重试策略（指数退避 + 抖动）
+- 多模型降级链
 - 自动重试
 - 兜底适配器（FallbackAdapter）
 
@@ -556,27 +571,16 @@ llm:
 ### 高级配置（代码级）
 
 ```go
-multiRouter := llm.NewMultiModelRouter()
+// 从配置创建 EinoAgentAdapter
+adapter := llm.NewRouterFromConfig(cfg.LLM, logger)
 
-// 添加 Providers
-claudeProvider, _ := claude.NewProvider(claude.Config{
-    APIKey:      os.Getenv("ANTHROPIC_API_KEY"),
-    Model:       "claude-sonnet-4-20250514",
-    InputPrice:  0.000003,  // $3 per 1M tokens
-    OutputPrice: 0.000015,
-})
-multiRouter.AddProvider(claudeProvider, true)
+// 设置工具执行器（用于工具调用）
+if agentAdapter, ok := adapter.(*llm.EinoAgentAdapter); ok {
+    agentAdapter.SetToolExecutor(toolRegistry.Execute)
+}
 
 // 设置路由策略
-multiRouter.SetStrategy(router.StrategyFallback)
-multiRouter.SetFallbackChain([]string{"claude", "openai"})
-
-// 能力映射：不同任务用不同模型
-multiRouter.SetCapabilityMap(model.TaskTypeCode, []string{"claude"})
-multiRouter.SetCapabilityMap(model.TaskTypeChinese, []string{"openai"})
-
-// 获取适配器
-adapter := multiRouter.GetAdapter()
+adapter.SetStrategy(llm.StrategyFallback)
 ```
 
 详细示例见 [`examples/multi_model_example.go`](examples/multi_model_example.go)。

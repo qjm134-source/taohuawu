@@ -2,14 +2,16 @@ package llm
 
 import (
 	"context"
+	"io"
+	"strings"
+
+	eino_schema "github.com/cloudwego/eino/schema"
 )
 
-// FallbackAdapter 备用适配器（返回兜底回复）
 type FallbackAdapter struct {
 	responses map[string]string
 }
 
-// NewFallbackAdapter 创建备用适配器
 func NewFallbackAdapter() *FallbackAdapter {
 	return &FallbackAdapter{
 		responses: map[string]string{
@@ -22,50 +24,81 @@ func NewFallbackAdapter() *FallbackAdapter {
 	}
 }
 
-// Chat 发送聊天请求
-func (a *FallbackAdapter) Chat(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
-	// 分析用户意图，返回匹配的兜底回复
+func (a *FallbackAdapter) Chat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (*eino_schema.Message, *ChatUsage, error) {
 	userMessage := ""
-	if len(req.Messages) > 0 {
-		for _, msg := range req.Messages {
-			if msg.Role == "user" {
-				userMessage = msg.Content
-				break
-			}
+	for _, msg := range messages {
+		if msg.Role == eino_schema.User {
+			userMessage = msg.Content
+			break
 		}
 	}
 
 	response := a.matchResponse(userMessage)
 
-	return &LLMResponse{
-		Model: "fallback",
-		Choices: []struct {
-			Message      Message `json:"message"`
-			FinishReason string  `json:"finish_reason"`
-		}{
-			{
-				Message: Message{
-					Role:    "assistant",
-					Content: response,
-				},
-				FinishReason: "stop",
-			},
-		},
-		Usage: struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
-		}{
-			PromptTokens:     0,
-			CompletionTokens: 0,
-			TotalTokens:      0,
-		},
+	return &eino_schema.Message{
+		Role:    eino_schema.Assistant,
+		Content: response,
+	}, &ChatUsage{Model: "fallback"}, nil
+}
+
+func (a *FallbackAdapter) StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (Stream, error) {
+	userMessage := ""
+	for _, msg := range messages {
+		if msg.Role == eino_schema.User {
+			userMessage = msg.Content
+			break
+		}
+	}
+
+	response := a.matchResponse(userMessage)
+
+	return &fallbackStream{
+		response:  response,
+		pos:       0,
+		chunkSize: 10,
 	}, nil
 }
 
-// matchResponse 匹配响应
+type fallbackStream struct {
+	response  string
+	pos       int
+	chunkSize int
+	closed    bool
+}
+
+func (s *fallbackStream) Recv() (*StreamChunk, error) {
+	if s.closed {
+		return nil, io.EOF
+	}
+
+	if s.pos >= len(s.response) {
+		s.closed = true
+		return &StreamChunk{
+			FinishReason: "stop",
+			Model:        "fallback",
+		}, nil
+	}
+
+	end := s.pos + s.chunkSize
+	if end > len(s.response) {
+		end = len(s.response)
+	}
+
+	chunk := &StreamChunk{
+		Content: s.response[s.pos:end],
+		Model:   "fallback",
+	}
+	s.pos = end
+
+	return chunk, nil
+}
+
+func (s *fallbackStream) Close() error {
+	s.closed = true
+	return nil
+}
+
 func (a *FallbackAdapter) matchResponse(message string) string {
-	// 简单关键词匹配
 	keywords := map[string]string{
 		"欢迎":   "welcome",
 		"怎么玩":  "operation",
@@ -77,7 +110,7 @@ func (a *FallbackAdapter) matchResponse(message string) string {
 	}
 
 	for kw, key := range keywords {
-		if contains(message, kw) {
+		if strings.Contains(message, kw) {
 			if resp, ok := a.responses[key]; ok {
 				return resp
 			}
@@ -87,59 +120,6 @@ func (a *FallbackAdapter) matchResponse(message string) string {
 	return a.responses["default"]
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr ||
-		(len(s) > len(substr) && (s[:len(substr)] == substr ||
-			s[len(s)-len(substr):] == substr ||
-			findSubstring(s, substr))))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-// StreamChat 发送流式聊天请求
-func (a *FallbackAdapter) StreamChat(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error) {
-	// 分析用户意图，返回匹配的兜底回复
-	userMessage := ""
-	if len(req.Messages) > 0 {
-		for _, msg := range req.Messages {
-			if msg.Role == "user" {
-				userMessage = msg.Content
-				break
-			}
-		}
-	}
-
-	response := a.matchResponse(userMessage)
-
-	// 创建 channel 并异步发送
-	chunkChan := make(chan StreamChunk, 10)
-	go func() {
-		defer close(chunkChan)
-
-		// 将响应分块发送（模拟流式）
-		chunkSize := 10
-		for i := 0; i < len(response); i += chunkSize {
-			end := i + chunkSize
-			if end > len(response) {
-				end = len(response)
-			}
-			chunkChan <- StreamChunk{
-				Content: response[i:end],
-			}
-		}
-	}()
-
-	return chunkChan, nil
-}
-
-// IsHealthy 总是返回 true
 func (a *FallbackAdapter) IsHealthy() bool {
 	return true
 }

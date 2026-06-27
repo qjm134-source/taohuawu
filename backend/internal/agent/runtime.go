@@ -2,12 +2,14 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
 
+	eino_schema "github.com/cloudwego/eino/schema"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -142,55 +144,42 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, cacheKey string) (string, error) {
 	startTime := time.Now()
 
-	// Langfuse trace
 	langfuseTrace := observability.StartLLMTrace("welcome", session.PlayerID, session.TenantID)
 
-	// 构建消息
 	prompt := BuildWelcomePrompt(session.Nickname)
 
-	messages := []llm.Message{
-		{Role: "system", Content: SystemPrompt},
-		{Role: "user", Content: prompt},
-	}
-
-	req := &llm.LLMRequest{
-		Messages:    messages,
-		Model:       "", // 留空，让路由根据策略自动选择模型
-		Temperature: 0.7,
-		MaxTokens:   500,
+	messages := []*eino_schema.Message{
+		{Role: eino_schema.System, Content: SystemPrompt},
+		{Role: eino_schema.User, Content: prompt},
 	}
 
 	r.logger.Info("[HandleWelcome] LLM health check", "healthy", r.llmAdapter.IsHealthy())
 
-	var response *llm.LLMResponse
+	var msg *eino_schema.Message
+	var usage *llm.ChatUsage
 	var err error
 
-	// 尝试主 LLM（RouterAdapter 内部有降级链，会自动切换失败的 provider）
-	// 使用独立超时，确保给 fallback 留出时间
 	if r.llmAdapter.IsHealthy() {
-		r.logger.Info("[HandleWelcome] Calling primary LLM", "model", req.Model)
+		r.logger.Info("[HandleWelcome] Calling primary LLM")
 		llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
-		response, err = r.llmAdapter.Chat(llmCtx, req)
+		msg, usage, err = r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 		llmCancel()
 
 		if err != nil {
 			r.logger.Error("[HandleWelcome] Primary LLM failed", "error", err)
-			// 降级到兜底适配器，使用原始 ctx（不是已过期的 llmCtx）
 			r.logger.Info("[HandleWelcome] Trying fallback adapter")
-			response, err = r.fallbackAdapter.Chat(ctx, req)
+			msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 		}
 	} else {
 		r.logger.Info("[HandleWelcome] Primary LLM unhealthy, using fallback")
-		response, err = r.fallbackAdapter.Chat(ctx, req)
+		msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 	}
 
 	if err != nil {
 		r.logger.Error("[HandleWelcome] All LLM failed", "error", err)
 		observability.AgentRequestsTotal.WithLabelValues("welcome", "error").Inc()
-		langfuseTrace.RecordGeneration("llm-call", "unknown", req.Messages, "", 0, 0, 0, 0, err)
 		langfuseTrace.End()
 
-		// 检查是否启用兜底响应
 		if r.config.FallbackResponse.Enabled && r.config.FallbackResponse.WelcomeMessage != "" {
 			r.logger.Info("[HandleWelcome] Using fallback response", "message", r.config.FallbackResponse.WelcomeMessage)
 			reply := r.config.FallbackResponse.WelcomeMessage
@@ -203,32 +192,25 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 		return "", fmt.Errorf("failed to get response: %w", err)
 	}
 
-	// 提取回复
-	reply := response.Choices[0].Message.Content
+	reply := msg.Content
 	session.AddMessage("assistant", reply, "neutral", nil)
 
-	// 记录 LLM 指标
-	model := response.Model
+	model := usage.Model
 	if model == "" {
 		model = "unknown"
 	}
-	llmCost := cost.CalculateCost(model, response.Usage.PromptTokens, response.Usage.CompletionTokens)
-	latencyMs := time.Since(startTime).Milliseconds()
+	llmCost := cost.CalculateCost(model, usage.PromptTokens, usage.CompletionTokens)
 
 	observability.LLMRequestsTotal.WithLabelValues(model, "success").Inc()
 	observability.LLMRequestDuration.WithLabelValues(model).Observe(time.Since(startTime).Seconds())
-	observability.LLMRequestTokens.WithLabelValues(model).Add(float64(response.Usage.PromptTokens))
-	observability.LLMCompletionTokens.WithLabelValues(model).Add(float64(response.Usage.CompletionTokens))
+	observability.LLMRequestTokens.WithLabelValues(model).Add(float64(usage.PromptTokens))
+	observability.LLMCompletionTokens.WithLabelValues(model).Add(float64(usage.CompletionTokens))
 	observability.CostTotal.WithLabelValues(model).Add(llmCost)
 	observability.AgentRequestsTotal.WithLabelValues("welcome", "success").Inc()
 	observability.AgentRequestDuration.WithLabelValues("welcome").Observe(time.Since(startTime).Seconds())
 
-	// 记录 Langfuse generation
-	langfuseTrace.RecordGeneration("llm-call", model, req.Messages, reply,
-		response.Usage.PromptTokens, response.Usage.CompletionTokens, llmCost, latencyMs, nil)
 	langfuseTrace.End()
 
-	// 缓存回复
 	r.optimizer.SetCache(cacheKey, reply)
 
 	return reply, nil
@@ -287,107 +269,70 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	// 构建上下文消息（含摘要压缩）
 	messages := r.buildContextMessages(session, message)
 
-	// 把工具注册表中的工具注册给 LLM
-	tools := tools.ConvertAllTools(r.toolRegistry)
+	r.logger.Info("[HandleChat] Building LLM request", "message_count", len(messages))
 
-	r.logger.Info("[HandleChat] Building LLM request", "message_count", len(messages), "tools_count", len(tools))
-
-	req := &llm.LLMRequest{
-		Messages:    messages,
-		Model:       "", // 留空，让路由根据策略自动选择模型
-		Temperature: 0.7,
-		MaxTokens:   300,
-		Tools:       tools,
-	}
-
-	var response *llm.LLMResponse
+	var msg *eino_schema.Message
+	var usage *llm.ChatUsage
 	var err error
 	startTime := time.Now()
 
-	// 尝试主 LLM，使用独立超时确保给 fallback 留出时间
 	r.logger.Info("[HandleChat] Checking LLM health", "healthy", r.llmAdapter.IsHealthy())
 	if r.llmAdapter.IsHealthy() {
 		r.logger.Info("[HandleChat] Calling primary LLM")
 		llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
-		response, err = r.llmAdapter.Chat(llmCtx, req)
+		msg, usage, err = r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		llmCancel()
 
 		if err != nil {
 			r.logger.Error("[HandleChat] Primary LLM failed", "error", err)
-			// 降级到备用适配器，使用原始 ctx（不是已过期的 llmCtx）
 			r.logger.Info("[HandleChat] Trying fallback adapter")
-			response, err = r.fallbackAdapter.Chat(ctx, req)
+			msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		}
 	} else {
-		// 使用兜底回复
 		r.logger.Warn("[HandleChat] Primary LLM unhealthy, using fallback")
-		response, err = r.fallbackAdapter.Chat(ctx, req)
+		msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 	}
 
 	if err != nil {
 		r.logger.Error("[HandleChat] All LLM calls failed", "error", err)
 		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
 		observability.RecordError(span, err)
-		langfuseTrace.RecordGeneration("llm-call", "unknown", req.Messages, "", 0, 0, 0, 0, err)
 		langfuseTrace.End()
 		return "", "", nil, fmt.Errorf("failed to get response: %w", err)
 	}
 
-	// 如果 LLM 要求调用工具，执行工具并再次请求
-	if response.HasToolCalls() {
-		r.logger.Info("[HandleChat] LLM requested tool calls", "count", len(response.GetToolCalls()))
-		response, err = r.handleToolCalls(ctx, response, messages, tools, stats)
-		if err != nil {
-			r.logger.Error("[HandleChat] Tool call handling failed", "error", err)
-			observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
-			langfuseTrace.RecordGeneration("llm-call", "unknown", req.Messages, "", 0, 0, 0, 0, err)
-			langfuseTrace.End()
-			return "", "", nil, fmt.Errorf("failed to handle tool calls: %w", err)
-		}
-	}
+	reply := strings.TrimSpace(msg.Content)
 
-	r.logger.Info("[HandleChat] LLM response received", "choices_count", len(response.Choices))
-
-	// 提取回复
-	reply := strings.TrimSpace(response.Choices[0].Message.Content)
-
-	// 填充统计信息
-	stats.Model = response.Model
+	stats.Model = usage.Model
 	stats.LatencyMs = time.Since(startTime).Milliseconds()
-	stats.InputTokens = response.Usage.PromptTokens
-	stats.OutputTokens = response.Usage.CompletionTokens
-	stats.TotalTokens = response.Usage.TotalTokens
-	stats.Cost = cost.CalculateCost(response.Model, response.Usage.PromptTokens, response.Usage.CompletionTokens)
+	stats.InputTokens = usage.PromptTokens
+	stats.OutputTokens = usage.CompletionTokens
+	stats.TotalTokens = usage.TotalTokens
+	stats.Cost = cost.CalculateCost(usage.Model, usage.PromptTokens, usage.CompletionTokens)
 	stats.CacheHit = false
 
-	// 记录 LLM 指标
-	r.recordLLMMetrics(response.Model, "success", time.Since(startTime).Seconds(),
-		response.Usage.PromptTokens, response.Usage.CompletionTokens, stats.Cost)
+	r.recordLLMMetrics(usage.Model, "success", time.Since(startTime).Seconds(),
+		usage.PromptTokens, usage.CompletionTokens, stats.Cost)
 	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 	observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(startTime).Seconds())
 
 	span.SetAttributes(
-		attribute.String("llm.model", response.Model),
-		attribute.Int("llm.input_tokens", response.Usage.PromptTokens),
-		attribute.Int("llm.output_tokens", response.Usage.CompletionTokens),
-		attribute.Int("llm.total_tokens", response.Usage.TotalTokens),
+		attribute.String("llm.model", usage.Model),
+		attribute.Int("llm.input_tokens", usage.PromptTokens),
+		attribute.Int("llm.output_tokens", usage.CompletionTokens),
+		attribute.Int("llm.total_tokens", usage.TotalTokens),
 		attribute.Float64("llm.cost", stats.Cost),
 	)
 
-	// 添加到会话历史（仅当回复非空时才添加 assistant 消息，避免后续请求携带空内容导致 API 校验失败）
 	session.AddMessage("user", message, emotionStr, nil)
 	if reply != "" {
 		session.AddMessage("assistant", reply, emotionStr, nil)
 	}
 
-	// 缓存回复（使用 session ID 隔离）
 	r.optimizer.SetCache(cacheKey, reply)
 
 	r.logger.Info("[HandleChat] Complete", "reply_length", len(reply), "model", stats.Model, "tokens", stats.TotalTokens, "cost", stats.Cost)
 
-	// 记录 Langfuse generation
-	langfuseTrace.RecordGeneration("llm-call", stats.Model, req.Messages, reply,
-		stats.InputTokens, stats.OutputTokens, stats.Cost, stats.LatencyMs, nil)
 	langfuseTrace.End()
 
 	return reply, emotionStr, stats, nil
@@ -440,49 +385,33 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	messages := r.buildContextMessages(session, message)
 	observability.EndChildSpan(ctx, contextSpan)
 
-	// 4. 工具注册子Span
-	_, toolsSpan := observability.StartChildSpan(ctx, "Tools.Register")
-	tools := tools.ConvertAllTools(r.toolRegistry)
-	observability.EndChildSpan(ctx, toolsSpan)
-
 	r.logger.Info("[HandleChatStream] Building LLM request", "message_count", len(messages))
-
-	req := &llm.LLMRequest{
-		Messages:    messages,
-		Model:       "", // 留空，让路由根据策略自动选择模型
-		Temperature: 0.7,
-		MaxTokens:   300,
-		Tools:       tools,
-	}
 
 	startTime := time.Now()
 
-	// 尝试流式调用主 LLM
-	var stream <-chan llm.StreamChunk
+	var stream llm.Stream
 	var err error
 
-	// 5. LLM健康检查子Span
 	_, healthSpan := observability.StartChildSpan(ctx, "LLM.HealthCheck")
 	isHealthy := r.llmAdapter.IsHealthy()
 	observability.EndChildSpan(ctx, healthSpan)
 
 	r.logger.Info("[HandleChatStream] Checking LLM health", "healthy", isHealthy)
 
-	// 记录 LLM 请求开始时间
 	llmStartTime := time.Now()
 
 	if isHealthy {
 		r.logger.Info("[HandleChatStream] Calling primary LLM stream")
-		stream, err = r.llmAdapter.StreamChat(ctx, req)
+		stream, err = r.llmAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 
 		if err != nil {
 			r.logger.Error("[HandleChatStream] Primary LLM stream failed", "error", err)
 			r.logger.Info("[HandleChatStream] Trying fallback adapter stream")
-			stream, err = r.fallbackAdapter.StreamChat(ctx, req)
+			stream, err = r.fallbackAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		}
 	} else {
 		r.logger.Warn("[HandleChatStream] Primary LLM unhealthy, using fallback")
-		stream, err = r.fallbackAdapter.StreamChat(ctx, req)
+		stream, err = r.fallbackAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 	}
 
 	if err != nil {
@@ -490,12 +419,10 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
 		observability.RecordError(span, err)
 		observability.EndSpanWithDuration(ctx, span)
-		langfuseTrace.RecordGeneration("llm-call", "unknown", req.Messages, "", 0, 0, 0, 0, err)
 		langfuseTrace.End()
 		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
 	}
 
-	// 记录 StreamChat 返回的时间点（用于 TTFT 计算）
 	streamReadyTime := time.Now()
 
 	contentChan := make(chan string, 100)
@@ -503,30 +430,39 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 	go func() {
 		defer close(contentChan)
+		defer stream.Close()
 
 		var fullReply strings.Builder
 		stats := &LLMStats{
 			CacheHit: false,
 		}
 
-		// 6. LLM调用子Span（覆盖从请求开始到所有数据处理完成的完整生命周期）
 		llmCtx, llmSpan := observability.StartChildSpanAt(ctx, "LLM.StreamChat", llmStartTime)
 
-		// 7a. 连接建立子Span：覆盖从发起请求到 StreamChat 返回的时间（HTTP连接建立、TLS握手等）
 		_, requestSpan := observability.StartChildSpanAt(llmCtx, "LLM.EstablishConnection", llmStartTime)
 		observability.EndChildSpan(llmCtx, requestSpan)
 
-		// 7b. 等待首Token子Span：覆盖从 StreamChat 返回到收到第一个 chunk 之间的时间（TTFT）
 		_, ttftSpan := observability.StartChildSpanAt(llmCtx, "LLM.WaitForFirstToken", streamReadyTime)
 
-		// 7c. 数据接收子Span：覆盖从第一个 chunk 到最后一个 chunk 的接收时间
 		var receiveSpan trace.Span
 
 		chunkCount := 0
-		for chunk := range stream {
+		var finishReason string
+		for {
+			chunk, err := stream.Recv()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				r.logger.Error("[HandleChatStream] Stream recv error", "error", err)
+				break
+			}
+			if chunk == nil {
+				continue
+			}
+
 			if chunkCount == 0 {
 				observability.EndChildSpan(llmCtx, ttftSpan)
-				// 开始追踪数据接收时间
 				_, receiveSpan = observability.StartChildSpan(llmCtx, "LLM.ReceiveChunks")
 			}
 			chunkCount++
@@ -549,6 +485,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			}
 
 			if chunk.FinishReason != "" {
+				finishReason = chunk.FinishReason
 				break
 			}
 		}
@@ -558,13 +495,14 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			observability.EndChildSpan(llmCtx, receiveSpan)
 		}
 
-		// 7d. 统计与指标子Span：覆盖空响应处理、统计计算、Prometheus指标记录等
-		_, statsSpan := observability.StartChildSpan(llmCtx, "LLM.StatsAndMetrics")
-
-		if fullReply.Len() == 0 {
+		if fullReply.Len() == 0 && !strings.Contains(finishReason, "tool_calls") {
 			r.logger.Warn("[HandleChatStream] Stream returned empty data, falling back to non-streaming")
-			r.handleNonStreamChat(ctx, req, contentChan, &fullReply, stats)
+			_, fallbackSpan := observability.StartChildSpan(llmCtx, "LLM.FallbackToNonStreaming")
+			r.handleNonStreamChat(ctx, messages, contentChan, &fullReply, stats)
+			observability.EndChildSpan(llmCtx, fallbackSpan)
 		}
+
+		_, statsSpan := observability.StartChildSpan(llmCtx, "LLM.StatsAndMetrics")
 
 		if stats.Model == "" {
 			r.logger.Warn("[HandleChatStream] No model detected in stream")
@@ -595,7 +533,6 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 		observability.EndChildSpan(llmCtx, statsSpan)
 
-		// 8. 会话更新子Span（作为 LLM.StreamChat 的子 span）
 		_, sessionSpan := observability.StartChildSpan(llmCtx, "Session.Update")
 		session.AddMessage("user", message, emotionStr, nil)
 		if fullReply.Len() > 0 {
@@ -603,20 +540,16 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		}
 		observability.EndChildSpan(llmCtx, sessionSpan)
 
-		// 9. 缓存写入子Span（作为 LLM.StreamChat 的子 span）
 		_, cacheWriteSpan := observability.StartChildSpan(llmCtx, "Cache.Write")
 		if fullReply.Len() > 0 {
 			r.optimizer.SetCache(cacheKey, fullReply.String())
 		}
 		observability.EndChildSpan(llmCtx, cacheWriteSpan)
 
-		// 结束 LLM.StreamChat（在所有 LLM 相关处理完成后）
 		observability.EndChildSpan(llmCtx, llmSpan)
 
 		observability.EndSpanWithDuration(ctx, span)
 
-		langfuseTrace.RecordGeneration("llm-call", stats.Model, req.Messages, fullReply.String(),
-			stats.InputTokens, stats.OutputTokens, stats.Cost, stats.LatencyMs, nil)
 		langfuseTrace.End()
 
 		statsChan <- stats
@@ -628,128 +561,23 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	return contentChan, statsChan, nil
 }
 
-// handleToolCalls 执行 LLM 请求的工具调用，并将结果再次提交给 LLM 生成最终回复。
-func (r *Runtime) handleToolCalls(
-	ctx context.Context,
-	firstResponse *llm.LLMResponse,
-	messages []llm.Message,
-	tools []llm.LLMTool,
-	stats *LLMStats,
-) (*llm.LLMResponse, error) {
-	// 把 assistant 的工具调用请求加入对话历史
-	assistantMsg := llm.Message{
-		Role:      "assistant",
-		Content:   firstResponse.Choices[0].Message.Content,
-		ToolCalls: firstResponse.GetToolCalls(),
-	}
-	messages = append(messages, assistantMsg)
-
-	// 执行每个工具调用
-	for _, tc := range firstResponse.GetToolCalls() {
-		if tc.Type != "function" && tc.Type != "" {
-			r.logger.Warn("[HandleChat] Unsupported tool call type", "type", tc.Type)
-			continue
-		}
-
-		var args map[string]interface{}
-		if tc.Function.Arguments != "" {
-			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-				r.logger.Error("[HandleChat] Failed to parse tool arguments", "error", err, "arguments", tc.Function.Arguments)
-				args = map[string]interface{}{}
-			}
-		}
-
-		// 记录本次调用了哪些工具
-		stats.ToolsUsed = append(stats.ToolsUsed, tc.Function.Name)
-
-		r.logger.Info("[HandleChat] Executing tool", "name", tc.Function.Name, "args", args)
-		result, err := r.executeToolWithRetry(ctx, tc.Function.Name, args)
-		if err != nil {
-			r.logger.Error("[HandleChat] Tool execution failed after retries", "name", tc.Function.Name, "error", err)
-			result = map[string]interface{}{"error": err.Error()}
-		}
-
-		resultJSON, _ := json.Marshal(result)
-		messages = append(messages, llm.Message{
-			Role:       "tool",
-			Content:    string(resultJSON),
-			ToolCallID: tc.ID,
-		})
-	}
-
-	// 再次请求 LLM，让模型基于工具结果生成回复
-	req := &llm.LLMRequest{
-		Messages:    messages,
-		Model:       "",
-		Temperature: 0.7,
-		MaxTokens:   300,
-		Tools:       tools,
-	}
-
-	r.logger.Info("[HandleChat] Calling LLM after tool execution")
-	llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
-	defer llmCancel()
-
-	response, err := r.llmAdapter.Chat(llmCtx, req)
-	if err != nil {
-		r.logger.Error("[HandleChat] LLM after tool calls failed", "error", err)
-		return nil, err
-	}
-
-	return response, nil
-}
-
-// executeToolWithRetry 执行工具调用，支持自动重试。
-func (r *Runtime) executeToolWithRetry(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
-	maxRetries := r.config.MaxRetries
-	if maxRetries < 1 {
-		maxRetries = 1
-	}
-
-	var lastErr error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		result, err := r.toolRegistry.Execute(ctx, toolName, args)
-		if err == nil {
-			if attempt > 1 {
-				r.logger.Info("[executeToolWithRetry] Tool succeeded after retry",
-					"name", toolName, "attempt", attempt)
-			}
-			return result, nil
-		}
-
-		lastErr = err
-		r.logger.Warn("[executeToolWithRetry] Tool execution failed, retrying",
-			"name", toolName, "attempt", attempt, "maxRetries", maxRetries, "error", err)
-
-		// 最后一次失败不等待
-		if attempt < maxRetries {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * 300 * time.Millisecond):
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("tool %s failed after %d retries: %w", toolName, maxRetries, lastErr)
-}
-
 // handleNonStreamChat 处理非流式调用，并模拟流式响应
-func (r *Runtime) handleNonStreamChat(ctx context.Context, req *llm.LLMRequest, contentChan chan string, fullReply *strings.Builder, stats *LLMStats) {
-	var resp *llm.LLMResponse
+func (r *Runtime) handleNonStreamChat(ctx context.Context, messages []*eino_schema.Message, contentChan chan string, fullReply *strings.Builder, stats *LLMStats) {
+	var msg *eino_schema.Message
+	var usage *llm.ChatUsage
 	var err error
 
 	if r.llmAdapter.IsHealthy() {
 		r.logger.Info("[HandleChatStream] Calling primary LLM (non-streaming)")
-		resp, err = r.llmAdapter.Chat(ctx, req)
+		msg, usage, err = r.llmAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		if err != nil {
 			r.logger.Error("[HandleChatStream] Primary LLM failed", "error", err)
 			r.logger.Info("[HandleChatStream] Trying fallback adapter (non-streaming)")
-			resp, err = r.fallbackAdapter.Chat(ctx, req)
+			msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		}
 	} else {
 		r.logger.Info("[HandleChatStream] Using fallback adapter (non-streaming)")
-		resp, err = r.fallbackAdapter.Chat(ctx, req)
+		msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 	}
 
 	if err != nil {
@@ -757,42 +585,27 @@ func (r *Runtime) handleNonStreamChat(ctx context.Context, req *llm.LLMRequest, 
 		return
 	}
 
-	// 如果 LLM 返回了工具调用，执行工具并再次请求 LLM 获取最终回复
-	if resp.HasToolCalls() {
-		r.logger.Info("[HandleChatStream] Non-streaming response has tool calls", "count", len(resp.GetToolCalls()))
-		resp2, toolErr := r.handleToolCalls(ctx, resp, req.Messages, req.Tools, stats)
-		if toolErr != nil {
-			r.logger.Error("[HandleChatStream] Tool call handling in non-streaming fallback failed", "error", toolErr)
-			return
-		}
-		resp = resp2
+	if msg == nil {
+		return
 	}
 
-	// 获取回复内容
-	content := ""
-	if len(resp.Choices) > 0 && len(resp.Choices[0].Message.Content) > 0 {
-		content = resp.Choices[0].Message.Content
+	content := msg.Content
+
+	if usage != nil {
+		stats.Model = usage.Model
+		stats.InputTokens = usage.PromptTokens
+		stats.OutputTokens = usage.CompletionTokens
+		stats.TotalTokens = usage.TotalTokens
 	}
 
-	// 始终填充统计信息（即使内容为空）
-	if resp.Model != "" {
-		stats.Model = resp.Model
-	}
-	stats.InputTokens = resp.Usage.PromptTokens
-	stats.OutputTokens = resp.Usage.CompletionTokens
-	stats.TotalTokens = resp.Usage.TotalTokens
+	r.logger.Info("[HandleChatStream] Non-streaming response received", "content_len", len(content), "model", stats.Model, "inputTokens", stats.InputTokens, "outputTokens", stats.OutputTokens)
 
-	r.logger.Info("[HandleChatStream] Non-streaming response received", "content_len", len(content), "model", resp.Model, "inputTokens", resp.Usage.PromptTokens, "outputTokens", resp.Usage.CompletionTokens)
-
-	// 模拟流式响应：逐字符发送
 	if content != "" {
-		// 逐字符发送以模拟流式效果
 		for _, char := range content {
 			contentChan <- string(char)
 			fullReply.WriteRune(char)
 		}
 	} else {
-		// 如果内容为空，发送一个空字符通知前端
 		contentChan <- ""
 	}
 }
@@ -800,27 +613,23 @@ func (r *Runtime) handleNonStreamChat(ctx context.Context, req *llm.LLMRequest, 
 // buildContextMessages 构建 LLM 请求的消息上下文。
 // 优先使用 LLM 摘要替代硬截断：当历史消息预估 Token 数超过阈值时，
 // 将早期消息压缩为一段摘要文本，保留最近的 N 条原始消息。
-func (r *Runtime) buildContextMessages(session *Session, currentMessage string) []llm.Message {
-	allMessages := session.GetMessages(0) // 获取全部消息
+func (r *Runtime) buildContextMessages(session *Session, currentMessage string) []*eino_schema.Message {
+	allMessages := session.GetMessages(0)
 
-	// 如果没有历史或是欢迎场景，直接构建
 	if len(allMessages) == 0 {
-		return []llm.Message{
-			{Role: "system", Content: SystemPrompt},
-			{Role: "user", Content: currentMessage},
+		return []*eino_schema.Message{
+			{Role: eino_schema.System, Content: SystemPrompt},
+			{Role: eino_schema.User, Content: currentMessage},
 		}
 	}
 
-	// 获取摘要器
 	summarizer := cost.GetSummarizer()
 
-	// 预估所有历史消息 + 当前消息的 Token 总数
 	totalTokens := 0
 	for _, msg := range allMessages {
 		if summarizer != nil {
 			totalTokens += summarizer.EstimateTokens(msg.Content)
 		} else {
-			// 无摘要器时用简单估算：1 中文 ≈ 2 tokens
 			totalTokens += len([]rune(msg.Content)) * 2
 		}
 	}
@@ -832,27 +641,29 @@ func (r *Runtime) buildContextMessages(session *Session, currentMessage string) 
 
 	const tokenThreshold = 4096
 
-	// 未超过阈值，构建完整消息列表
 	if totalTokens <= tokenThreshold {
-		messages := []llm.Message{{Role: "system", Content: SystemPrompt}}
+		messages := []*eino_schema.Message{{Role: eino_schema.System, Content: SystemPrompt}}
 		for _, msg := range allMessages {
 			if msg.Content == "" {
 				continue
 			}
-			messages = append(messages, llm.Message{
-				Role:    msg.Role,
+			role := eino_schema.User
+			if msg.Role == "assistant" {
+				role = eino_schema.Assistant
+			}
+			messages = append(messages, &eino_schema.Message{
+				Role:    role,
 				Content: msg.Content,
 			})
 		}
-		messages = append(messages, llm.Message{
-			Role:    "user",
+		messages = append(messages, &eino_schema.Message{
+			Role:    eino_schema.User,
 			Content: currentMessage,
 		})
 		return messages
 	}
 
-	// 超过阈值，尝试使用 LLM 摘要压缩
-	keepRecent := 6 // 保留最近 6 条消息作为原始上下文
+	keepRecent := 6
 	if len(allMessages) <= keepRecent {
 		keepRecent = len(allMessages) / 2
 		if keepRecent < 2 {
@@ -863,9 +674,8 @@ func (r *Runtime) buildContextMessages(session *Session, currentMessage string) 
 	recentMessages := allMessages[len(allMessages)-keepRecent:]
 	oldMessages := allMessages[:len(allMessages)-keepRecent]
 
-	messages := []llm.Message{{Role: "system", Content: SystemPrompt}}
+	messages := []*eino_schema.Message{{Role: eino_schema.System, Content: SystemPrompt}}
 
-	// 尝试获取已有摘要并增量更新
 	if summarizer != nil && len(oldMessages) > 0 {
 		oldText := messagesToText(oldMessages)
 		existingSummary := r.summaryCache
@@ -880,8 +690,8 @@ func (r *Runtime) buildContextMessages(session *Session, currentMessage string) 
 
 		if err == nil && newSummary != "" {
 			r.summaryCache = newSummary
-			messages = append(messages, llm.Message{
-				Role:    "system",
+			messages = append(messages, &eino_schema.Message{
+				Role:    eino_schema.System,
 				Content: "[对话历史摘要] " + newSummary,
 			})
 			r.logger.Info("[buildContextMessages] Context compressed",
@@ -890,34 +700,34 @@ func (r *Runtime) buildContextMessages(session *Session, currentMessage string) 
 				"recent_count", len(recentMessages))
 		} else {
 			r.logger.Warn("[buildContextMessages] Summarization failed, falling back to truncation", "error", err)
-			// 降级：使用简单的截断提示
-			messages = append(messages, llm.Message{
-				Role:    "system",
+			messages = append(messages, &eino_schema.Message{
+				Role:    eino_schema.System,
 				Content: fmt.Sprintf("[之前有%d条对话，以下是最近的对话内容]", len(oldMessages)),
 			})
 		}
 	} else if len(oldMessages) > 0 {
-		// 无摘要器，使用简单截断提示
-		messages = append(messages, llm.Message{
-			Role:    "system",
+		messages = append(messages, &eino_schema.Message{
+			Role:    eino_schema.System,
 			Content: fmt.Sprintf("[之前有%d条对话，以下是最近的对话内容]", len(oldMessages)),
 		})
 	}
 
-	// 添加最近的原始消息
 	for _, msg := range recentMessages {
 		if msg.Content == "" {
 			continue
 		}
-		messages = append(messages, llm.Message{
-			Role:    msg.Role,
+		role := eino_schema.User
+		if msg.Role == "assistant" {
+			role = eino_schema.Assistant
+		}
+		messages = append(messages, &eino_schema.Message{
+			Role:    role,
 			Content: msg.Content,
 		})
 	}
 
-	// 添加当前消息
-	messages = append(messages, llm.Message{
-		Role:    "user",
+	messages = append(messages, &eino_schema.Message{
+		Role:    eino_schema.User,
 		Content: currentMessage,
 	})
 

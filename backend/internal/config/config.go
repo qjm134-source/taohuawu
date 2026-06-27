@@ -49,13 +49,11 @@ type WebSocketConfig struct {
 // ModelConfig 单个模型配置
 type ModelConfig struct {
 	Name        string  `yaml:"name"`
-	Type        string  `yaml:"type"` // provider 类型: "claude" / "openai"，留空则自动推断
 	BaseURL     string  `yaml:"base_url"`
 	APIKey      string  `yaml:"api_key"`
 	Enabled     bool    `yaml:"enabled"`
 	MaxTokens   int     `yaml:"max_tokens"`
 	Temperature float64 `yaml:"temperature"`
-	Mode        string  `yaml:"mode"` // 工作模式: "stream" / "chat" / "auto"，auto 会自动检测并记忆成功的模式
 }
 
 type LLMConfig struct {

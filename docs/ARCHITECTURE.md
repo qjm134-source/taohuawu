@@ -181,28 +181,41 @@ graph LR
     F --> K[LLM Router]
 ```
 
-### 3.3 多模型 LLM 路由
+### 3.3 多模型 LLM 路由（基于 Eino ReAct Agent）
 
 ```mermaid
 graph TB
-    A[ChatRequest] --> B[Router]
-    B --> C{Strategy}
-    C -->|Fixed| D[固定模型]
-    C -->|Cost| E[min cost]
-    C -->|Latency| F[min EMA latency]
-    C -->|Capability| G[任务分类 + 能力映射]
-    C -->|Fallback| H[降级链]
-    C -->|Weighted| I[按权重随机]
-    D --> J[Provider]
-    E --> J
-    F --> J
-    G --> J
-    H --> J
-    I --> J
-    J --> K[Claude]
-    J --> L[OpenAI]
-    J --> M[GLM/Qwen]
+    A[ChatRequest] --> B[EinoAdapter]
+    B --> C[Eino ReAct Agent]
+    C --> D{ModelFailoverConfig}
+    D --> E[ShouldFailover判断]
+    E --> F{需要降级?}
+    F -->|是| G[GetFailoverModel选择]
+    F -->|否| H[返回响应]
+    G --> I{路由策略}
+    I -->|Fixed| J[固定模型]
+    I -->|Cost| K[min cost]
+    I -->|Latency| L[min EMA latency]
+    I -->|Capability| M[任务分类+能力映射]
+    I -->|Fallback| N[降级链下一个]
+    I -->|Weighted| O[按权重随机]
+    J --> P[Eino OpenAI ChatModel]
+    K --> P
+    L --> P
+    M --> P
+    N --> P
+    O --> P
+    P --> Q[OpenAI兼容API]
+    Q --> R[小米/阿里/智谱/OpenAI/Claude]
+    
+    C -.-> S[工具自动调用循环]
+    S --> S1[Reason: 判断是否调用工具]
+    S1 --> S2[Act: 执行工具]
+    S2 --> S3[Observe: 获取结果]
+    S3 --> S4[Respond: 返回最终回复]
 ```
+
+**关键变化**：使用 `eino_react.Agent` 替代原有的 `eino_adk.ChatModelAgent`，工具调用循环由 Agent 内部自动完成，无需应用层干预。
 
 ---
 
@@ -245,32 +258,33 @@ sequenceDiagram
     F->>P: 显示 NPC 回复
 ```
 
-### 4.2 多模型路由选择流程
+### 4.2 多模型路由选择流程（Eino）
 
 ```mermaid
 flowchart TD
-    A[收到 ChatRequest] --> B[任务分类 ClassifyTask]
-    B --> C{策略类型}
-    C -->|Fixed| D[取 fixedModel]
-    C -->|Cost| E[估算 token + 单价<br/>选择成本最低]
-    C -->|Latency| F[读取 EMA 延迟<br/>选择最小]
-    C -->|Capability| G[按 taskType 匹配能力映射]
-    C -->|Fallback| H[遍历降级链]
-    C -->|Weighted| I[按权重随机]
-    D --> J{Provider 可用?}
-    E --> J
-    F --> J
-    G --> J
-    H --> J
-    I --> J
-    J -->|否| K[熔断检查 / 降级]
-    K --> J
-    J -->|是| L[调用 Provider.Chat]
-    L --> M{成功?}
-    M -->|否| N[记录错误 EMA]
-    N --> K
-    M -->|是| O[记录延迟 EMA]
-    O --> P[返回 ChatResponse]
+    A[收到 ChatRequest] --> B[EinoAdapter处理]
+    B --> C[Eino ChatModelAgent]
+    C --> D{路由策略选择主模型}
+    D -->|Fixed| E[固定模型]
+    D -->|Cost| F[成本最低模型]
+    D -->|Latency| G[EMA延迟最低]
+    D -->|Capability| H[任务分类匹配]
+    D -->|Fallback| I[配置顺序首个]
+    D -->|Weighted| J[权重随机]
+    E --> K[Eino OpenAI ChatModel调用]
+    F --> K
+    G --> K
+    H --> K
+    I --> K
+    J --> K
+    K --> L{调用成功?}
+    L -->|是| M[更新EMA统计]
+    L -->|否| N[ModelFailover判断]
+    N --> O{需要降级?}
+    O -->|是| P[选择下一个模型]
+    O -->|否| Q[返回错误]
+    P --> K
+    M --> R[返回ChatResponse]
 ```
 
 ### 4.3 熔断器状态机
@@ -353,14 +367,27 @@ flowchart LR
 | 资源消耗 | 长连接，低 overhead | 高频请求消耗大 |
 | 游戏体验 | 支持 NPC 实时打字机效果 | 体验差 |
 
-### 6.2 为什么自研多模型路由而不是使用 LangChain？
+### 6.2 为什么使用 Eino ReAct Agent 而不是自研路由？
 
-| 维度 | 自研路由 | LangChain |
-|------|----------|-----------|
-| 控制力 | 完全控制策略、降级、统计 | 受框架限制 |
-| 性能 | 无额外抽象层，轻量 | 框架 overhead |
-| 可观测 | 自定义 EMA、指标 | 通用指标 |
-| 学习价值 | 深入理解模型调度 | 框架封装 |
+| 维度 | Eino ReAct Agent | 自研路由（旧方案） |
+|------|-----------------|-------------------|
+| **维护成本** | 框架维护，跟随社区更新 | 自行维护所有 Provider + ReAct 循环 |
+| **抽象层级** | 统一 `ChatModel` 接口 + `react.Agent` | 自定义 `Provider` 接口 + 手动工具调用 |
+| **工具调用** | Agent 内部自动完成 Reason→Act→Observe→Respond | 应用层手动解析 tool_calls、执行工具、注入结果 |
+| **故障转移** | 内置 `ModelFailoverConfig` | 手动实现降级链 |
+| **重试机制** | 内置 `ModelRetryConfig` | 手动实现重试逻辑 |
+| **流式处理** | 自动处理 SSE 流，支持流式 ReAct | 手动解析 SSE 数据 |
+| **Tool Calling** | 统一工具注册，自动匹配执行 | 各 Provider 不同实现 |
+| **可观测性** | 内置 Callbacks 机制，支持 trace/audit | 应用层手动埋点 |
+| **扩展性** | 通过 OpenAI 兼容接口接入任意模型 | 需为每个 Provider 写适配器 |
+
+**迁移收益**：
+- **减少代码量**：移除了大量手动处理工具调用的代码（`runWithToolLoop`、`runStreamWithToolLoop` 等）
+- **工具自动执行**：ReAct Agent 内部自动完成"思考→调用工具→获取结果→继续思考"的完整循环
+- **统一抽象**：所有模型通过同一 OpenAI 兼容接口接入
+- **内置可靠性**：Eino 提供故障转移和重试机制
+- **回调追踪**：通过 `callbacks.Handler` 实现模型调用和工具调用的 trace 与审计日志
+- **简化配置**：不需要区分 Provider 类型（`type` 字段已删除）
 
 ### 6.3 为什么使用 EMA 而不是简单平均？
 
@@ -382,19 +409,22 @@ flowchart LR
 ### Q1：项目最大的技术难点是什么？
 
 **答**：多模型路由与降级机制。难点在于：
-1. 如何抽象统一的 Provider 接口，兼容 Claude、OpenAI 和 OpenAI 兼容格式的 API；
+1. 如何抽象统一的模型接口，兼容不同 API 格式；
 2. 如何动态选择模型并保证可用性；
 3. 如何统计运行时指标并用于路由决策。
 
-我们设计了 `model.Provider` 接口、`Router` 策略引擎、`ModelStats` EMA 统计三层结构，实现了应用层与具体模型的解耦。
+我们通过 **Eino 框架** 解决了这些问题：
+- 统一使用 OpenAI 兼容接口接入所有模型
+- `ModelFailoverConfig` 提供内置故障转移机制
+- 自研 EMA 统计用于路由策略决策
 
 ### Q2：如果某个模型挂了，系统怎么办？
 
 **答**：
-1. 熔断器检测到连续失败，进入 Open 状态，快速失败；
-2. Fallback 策略按降级链尝试下一个模型；
+1. Eino `ModelFailoverConfig` 检测失败，触发降级；
+2. `GetFailoverModel` 根据策略返回下一个模型；
 3. 如果所有模型都失败，FallbackAdapter 返回预设兜底回复；
-4. 同时 EMA 错误率更新，高错误模型被快速降级。
+4. 同时 EMA 错误率更新，高错误模型在 `Latency` 策略下被优先降级。
 
 ### Q3：如何控制 API 成本？
 
@@ -415,8 +445,8 @@ flowchart LR
 ### Q5：项目的可扩展性如何？
 
 **答**：
-- 新增 Provider：实现 `model.Provider` 接口即可；
-- 新增路由策略：在 `router` 中添加策略分支；
+- 新增模型：在配置文件中添加，支持 OpenAI Chat Completions 格式即可；
+- 新增路由策略：在 `multi_model_adapter.go` 中添加策略分支；
 - 新增工具：实现 `agent.Tool` 接口并注册到 `ToolRegistry`；
 - 前端新增场景：新增 Phaser Scene 即可。
 
@@ -431,7 +461,8 @@ flowchart LR
 | WebSocket | Gorilla WebSocket |
 | 数据库 | MySQL 8.0 |
 | ORM | GORM |
-| LLM SDK | anthropic-sdk-go, go-openai |
+| LLM 框架 | Eino (CloudWeGo) |
+| ChatModel | Eino OpenAI ChatModel |
 | 可观测 | Prometheus, OpenTelemetry |
 | 前端引擎 | Phaser 3 |
 | 部署 | Docker, Render |

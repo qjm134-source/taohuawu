@@ -276,12 +276,6 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 	// 创建会话管理器
 	s.sessionManager = agent.NewSessionManager()
 
-	// 创建多模型路由器
-	llmAdapter := llm.NewRouterFromConfig(s.config.LLM, s.logger)
-	s.logger.Info("Multi-model router created", "models", len(s.config.LLM.Models))
-
-	fallbackAdapter := llm.NewFallbackAdapter()
-
 	// 创建工具注册表
 	var toolRegistry *tools.ToolRegistry
 	if knowledgeBase != nil {
@@ -290,6 +284,12 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 		s.logger.Warn("KnowledgeBase is nil, creating empty tool registry")
 		toolRegistry = tools.NewToolRegistry(nil)
 	}
+
+	// 创建 EinoAgentAdapter（多模型路由器）
+	llmAdapter := llm.NewEinoAgentAdapter(s.logger, s.config.LLM, toolRegistry.List())
+	s.logger.Info("EinoAgentAdapter created", "models", len(s.config.LLM.Models))
+
+	fallbackAdapter := llm.NewFallbackAdapter()
 
 	// 创建成本优化器
 	var embeddingAPI cost.EmbeddingAPI

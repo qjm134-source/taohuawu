@@ -585,6 +585,141 @@ sum by (cache_type) (rate(cache_hits_total[5m]))
 | `internal/cost/optimizer.go` | 缓存系统 + 成本优化 |
 | `internal/cost/layered_cache.go` | 多层缓存实现（精确匹配 + 语义匹配） |
 | `internal/cost/embedding.go` | Embedding API 客户端（支持本地和远程） |
+| `internal/llm/eino_handler.go` | Eino Callbacks Handler，实现模型调用和工具调用的 trace/audit 日志 |
+
+---
+
+## 13. Eino Callbacks 回调追踪
+
+系统通过 **Eino Callbacks** 机制实现模型调用和工具调用的全生命周期追踪，无需手动在每个调用点埋点。
+
+### 13.1 回调机制概述
+
+Eino ReAct Agent 在执行过程中会触发以下生命周期事件：
+
+| 事件 | 触发时机 | 用途 |
+|---|---|---|
+| `OnStart` | 每次模型调用或工具调用开始时 | 记录调用开始时间、输入预览 |
+| `OnEnd` | 每次调用成功完成时 | 记录调用耗时、输出预览、Token 消耗 |
+| `OnError` | 调用失败时 | 记录错误信息、失败原因 |
+
+### 13.2 回调处理器实现
+
+回调处理器 `einoAgentHandler` 实现了 `eino_callbacks.Handler` 接口：
+
+```go
+type einoAgentHandler struct {
+    logger *slog.Logger
+}
+
+func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.RunInfo, input eino_callbacks.CallbackInput) context.Context {
+    startTime := time.Now()
+    ctx = context.WithValue(ctx, "startTime", startTime)
+
+    switch info.Component {
+    case eino_components.ComponentOfChatModel:
+        h.logger.Info("[Audit] Model call started",
+            "model_name", info.Name,
+            "input_preview", h.previewInput(input),
+        )
+    case eino_components.ComponentOfTool:
+        h.logger.Info("[Audit] Tool call started",
+            "tool_name", info.Name,
+            "input", h.formatToolInput(input),
+        )
+    }
+    return ctx
+}
+
+func (h *einoAgentHandler) OnEnd(ctx context.Context, info *eino_callbacks.RunInfo, output eino_callbacks.CallbackOutput) {
+    startTime := ctx.Value("startTime").(time.Time)
+    latency := time.Since(startTime).Milliseconds()
+
+    switch info.Component {
+    case eino_components.ComponentOfChatModel:
+        h.logger.Info("[Audit] Model call completed",
+            "model_name", info.Name,
+            "latency_ms", latency,
+            "output_preview", h.previewOutput(output),
+        )
+    case eino_components.ComponentOfTool:
+        h.logger.Info("[Audit] Tool call completed",
+            "tool_name", info.Name,
+            "latency_ms", latency,
+            "output", h.formatToolOutput(output),
+        )
+    }
+}
+```
+
+### 13.3 日志输出格式
+
+**模型调用日志**：
+```
+[Audit] Model call started model_name=mimo-v2-5 input_preview=[{"role":"user","content":"苏州天气怎么样？"}]
+[Audit] Model call completed model_name=mimo-v2-5 latency_ms=1234 output_preview=[{"role":"assistant","content":"..."}]
+```
+
+**工具调用日志**：
+```
+[Audit] Tool call started tool_name=get_weather input={"city":"苏州"}
+[Audit] Tool call completed tool_name=get_weather latency_ms=567 output={"temperature":28,"humidity":70}
+```
+
+**错误日志**：
+```
+[Error] Model call failed model_name=mimo-v2-5 error="connection timeout"
+[Error] Tool call failed tool_name=get_weather error="city not found"
+```
+
+### 13.4 回调配置
+
+在创建 Eino ReAct Agent 时，通过 `WithComposeOptions` 和 `WithCallbacks` 注入回调处理器：
+
+```go
+config := &eino_react.AgentConfig{
+    ToolCallingModel: primaryModel,
+    GraphName:        "WaterTownReActAgent",
+    ComposeOptions: []eino_compose.Option{
+        eino_compose.WithCallbacks(&einoAgentHandler{logger: logger}),
+    },
+}
+agent, err := eino_react.NewAgent(context.Background(), config)
+```
+
+### 13.5 可观测性层次
+
+系统采用**三层可观测性**架构：
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                      应用层（OpenTelemetry）                    │
+│  • HTTP 请求追踪（Middleware）                                 │
+│  • Agent 处理流程追踪（runtime.go）                            │
+│  • 细粒度子 Span（情绪检测、缓存查询、上下文构建等）             │
+└────────────────────────────┬───────────────────────────────────┘
+                             │
+┌────────────────────────────▼───────────────────────────────────┐
+│                      框架层（Eino Callbacks）                   │
+│  • 模型调用追踪（OnStart/OnEnd/OnError）                       │
+│  • 工具调用追踪（OnStart/OnEnd/OnError）                       │
+│  • 自动记录输入/输出预览、耗时、Token 消耗                      │
+└────────────────────────────┬───────────────────────────────────┘
+                             │
+┌────────────────────────────▼───────────────────────────────────┐
+│                      专项层（Langfuse）                         │
+│  • LLM 调用完整上下文记录                                      │
+│  • Token 消耗精确统计                                          │
+│  • 成本估算与分析                                              │
+│  • Prompt 版本管理与评估                                       │
+└────────────────────────────────────────────────────────────────┘
+```
+
+| 层级 | 工具 | 关注点 | 典型问题 |
+|---|---|---|---|
+| 应用层 | OpenTelemetry | HTTP 请求、Agent 流程、细粒度耗时 | "请求卡在哪个环节？" |
+| 框架层 | Eino Callbacks | 模型调用、工具调用、生命周期 | "模型调用是否成功？工具是否被执行？" |
+| 专项层 | Langfuse | LLM 输入/输出、Token、成本 | "哪个 Prompt 成本更低？哪个模型效果好？" |
 
 ---
 

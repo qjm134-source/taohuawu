@@ -2,99 +2,46 @@ package llm
 
 import (
 	"context"
+
+	eino_schema "github.com/cloudwego/eino/schema"
 )
 
-// LLMRequest LLM 请求
-type LLMRequest struct {
-	Messages    []Message `json:"messages"`
-	Model       string    `json:"model"`
-	Temperature float64   `json:"temperature"`
-	MaxTokens   int       `json:"max_tokens"`
-	Tools       []LLMTool `json:"tools,omitempty"` // 可选的工具列表，支持 Function Calling
+type ChatOptions struct {
+	Temperature float32
+	MaxTokens   int
 }
 
-// LLMTool 工具定义，用于 LLM 的 function calling。
-type LLMTool struct {
-	Type     string         `json:"type"`
-	Function LLMFunctionDef `json:"function"`
+type ChatOption func(*ChatOptions)
+
+func WithTemperature(t float32) ChatOption {
+	return func(o *ChatOptions) { o.Temperature = t }
 }
 
-// LLMFunctionDef 工具的函数定义。
-type LLMFunctionDef struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Parameters  map[string]interface{} `json:"parameters"`
+func WithMaxTokens(m int) ChatOption {
+	return func(o *ChatOptions) { o.MaxTokens = m }
 }
 
-// LLMResponse LLM 响应
-type LLMResponse struct {
-	Choices []struct {
-		Message      Message `json:"message"`
-		FinishReason string  `json:"finish_reason"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
-	Model string `json:"model"`
-}
-
-// ToolCall 表示 LLM 返回的一次工具调用请求。
-type ToolCall struct {
-	ID       string           `json:"id"`
-	Type     string           `json:"type"`
-	Function ToolCallFunction `json:"function"`
-}
-
-// ToolCallFunction 描述工具调用的函数名和参数。
-type ToolCallFunction struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
-
-// HasToolCalls 判断 LLM 响应是否要求调用工具。
-func (r *LLMResponse) HasToolCalls() bool {
-	if len(r.Choices) == 0 {
-		return false
-	}
-	return len(r.Choices[0].Message.ToolCalls) > 0
-}
-
-// GetToolCalls 获取 LLM 响应中的工具调用列表。
-func (r *LLMResponse) GetToolCalls() []ToolCall {
-	if !r.HasToolCalls() {
-		return nil
-	}
-	return r.Choices[0].Message.ToolCalls
-}
-
-// Message LLM 消息
-type Message struct {
-	Role       string     `json:"role"` // system, user, assistant
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant 消息中的工具调用请求
-	ToolCallID string     `json:"tool_call_id,omitempty"` // tool 角色消息对应调用的 ID
-}
-
-// StreamChunk 流式响应片段
-// StreamUsage 流式响应的 token 使用信息
-type StreamUsage struct {
+type ChatUsage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	Model            string
 }
 
 type StreamChunk struct {
 	Content      string
 	FinishReason string
 	Model        string
-	Usage        StreamUsage
+	Usage        ChatUsage
 }
 
-// Adapter LLM 适配器接口
+type Stream interface {
+	Recv() (*StreamChunk, error)
+	Close() error
+}
+
 type Adapter interface {
-	Chat(ctx context.Context, req *LLMRequest) (*LLMResponse, error)
-	StreamChat(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error)
+	Chat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (*eino_schema.Message, *ChatUsage, error)
+	StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (Stream, error)
 	IsHealthy() bool
 }

@@ -21,13 +21,11 @@ llm:
   # 模型配置列表，按优先级排序
   models:
     - name: mimo-v2.5
-      type: claude  # 显式指定使用 Anthropic SDK，URL 路径中的 /anthropic 表示兼容 Anthropic Messages API
-      base_url: https://token-plan-cn.xiaomimimo.com/anthropic
+      base_url: https://token-plan-cn.xiaomimimo.com/v1
       api_key: ${MIMO_API_KEY}
       enabled: true
       max_tokens: 300
       temperature: 0.5
-      mode: auto  # stream/chat/auto，auto 会自动检测并记忆成功的模式
 
     - name: qwen3.5-27b
       base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -35,7 +33,6 @@ llm:
       enabled: true
       max_tokens: 500
       temperature: 0.7
-      mode: auto  # stream/chat/auto，auto 会自动检测并记忆成功的模式
 
   timeout: 60s           # 增加超时时间到 60 秒
   max_retries: 3         # 增加重试次数到 3 次
@@ -74,7 +71,7 @@ knowledge:
 
 logging:
   level: info
-  format: json
+  format: text
   file:
     enabled: true
     path: logs/app.log

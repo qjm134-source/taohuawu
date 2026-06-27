@@ -20,13 +20,11 @@ websocket:
 llm:
   models:
     - name: mimo-v2.5
-      type: claude
-      base_url: https://token-plan-cn.xiaomimimo.com/anthropic
+      base_url: https://token-plan-cn.xiaomimimo.com/v1
       api_key: ${MIMO_API_KEY}
       enabled: true
       max_tokens: 300
       temperature: 0.5
-      mode: auto
 
   timeout: 60s
   max_retries: 3
@@ -64,7 +62,7 @@ knowledge:
 
 logging:
   level: info
-  format: json
+  format: text
   file:
     enabled: true
     path: logs/app.log

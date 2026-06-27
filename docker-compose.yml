@@ -53,6 +53,7 @@ services:
     volumes:
       - ./backend/data:/app/data
       - ./backend/configs:/app/configs
+      - ./backend/logs:/app/logs
       - /etc/localtime:/etc/localtime:ro
     depends_on:
       mysql:

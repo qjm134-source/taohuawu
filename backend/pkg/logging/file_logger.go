@@ -14,21 +14,14 @@ type FileLogger struct {
 	fileHook *lumberjack.Logger
 }
 
-// NewFileLogger 创建支持文件输出的日志器（只输出到文件，不输出到控制台）
+// NewFileLogger 创建支持文件输出的日志器（同时输出到文件和控制台）
 func NewFileLogger(cfg Config, fileCfg FileLoggerConfig) (*FileLogger, error) {
 	logger := logrus.New()
 
 	// 设置日志格式
-	if cfg.Format == "json" {
-		logger.SetFormatter(&logrus.JSONFormatter{
-			TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
-		})
-	} else {
-		logger.SetFormatter(&logrus.TextFormatter{
-			FullTimestamp:   true,
-			TimestampFormat: "2006-01-02T15:04:05",
-		})
-	}
+	logger.SetFormatter(&CustomFormatter{
+		TimestampFormat: "2006-01-02 15:04:05",
+	})
 
 	// 设置日志级别
 	level, err := logrus.ParseLevel(cfg.Level)
@@ -53,8 +46,8 @@ func NewFileLogger(cfg Config, fileCfg FileLoggerConfig) (*FileLogger, error) {
 			Compress:   fileCfg.Compress,
 		}
 
-		// 设置输出到文件，禁用控制台输出
-		logger.SetOutput(fileHook)
+		// 同时输出到文件和控制台
+		logger.SetOutput(io.MultiWriter(os.Stdout, fileHook))
 
 		return &FileLogger{
 			Logger:   logger,
@@ -62,8 +55,8 @@ func NewFileLogger(cfg Config, fileCfg FileLoggerConfig) (*FileLogger, error) {
 		}, nil
 	}
 
-	// 如果未启用文件日志，输出到空设备（不打印到控制台）
-	logger.SetOutput(io.Discard)
+	// 如果未启用文件日志，输出到控制台
+	logger.SetOutput(os.Stdout)
 
 	return &FileLogger{
 		Logger: logger,

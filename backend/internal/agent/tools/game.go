@@ -3,170 +3,165 @@ package tools
 import (
 	"context"
 	"fmt"
-	"time"
 
+	eino_tool "github.com/cloudwego/eino/components/tool"
+	eino_tool_utils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/watertown/guide/internal/knowledge"
 )
 
-// GetPlayerInfoTool 获取玩家信息
-type GetPlayerInfoTool struct{}
-
-func (t *GetPlayerInfoTool) Name() string {
-	return "get_player_info"
+type GetPlayerInfoInput struct {
+	PlayerID string `json:"player_id" jsonschema:"required" jsonschema_description:"需要查询的玩家 ID"`
 }
 
-func (t *GetPlayerInfoTool) Description() string {
-	return "获取玩家的基本信息，包括昵称、访问次数等"
+type GetPlayerInfoOutput struct {
+	PlayerID   string `json:"player_id"`
+	Nickname   string `json:"nickname"`
+	Dialogues  int    `json:"dialogues"`
+	FirstVisit string `json:"first_visit"`
 }
 
-func (t *GetPlayerInfoTool) Timeout() time.Duration {
-	return 15 * time.Second // 增加超时时间
-}
-
-func (t *GetPlayerInfoTool) ParametersSchema() map[string]interface{} {
-	return map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"player_id": map[string]interface{}{
-				"type":        "string",
-				"description": "需要查询的玩家 ID",
-			},
+func NewGetPlayerInfoTool() eino_tool.InvokableTool {
+	tool, err := eino_tool_utils.InferTool[GetPlayerInfoInput, GetPlayerInfoOutput](
+		"get_player_info",
+		"获取玩家的基本信息，包括昵称、访问次数等",
+		func(ctx context.Context, input GetPlayerInfoInput) (GetPlayerInfoOutput, error) {
+			if input.PlayerID == "" {
+				return GetPlayerInfoOutput{}, fmt.Errorf("invalid player_id")
+			}
+			return GetPlayerInfoOutput{
+				PlayerID:   input.PlayerID,
+				Nickname:   "玩家",
+				Dialogues:  10,
+				FirstVisit: "2024-01-01",
+			}, nil
 		},
-		"required": []string{"player_id"},
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create get_player_info tool: %v", err))
 	}
+	return tool
 }
 
-func (t *GetPlayerInfoTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
-	playerID, ok := params["player_id"].(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid player_id")
-	}
+type GetGameGuideInput struct{}
 
-	// 这里应该从数据库获取，简化实现返回模拟数据
-	return map[string]interface{}{
-		"player_id":   playerID,
-		"nickname":    "玩家",
-		"dialogues":   10,
-		"first_visit": "2024-01-01",
-	}, nil
+type GetGameGuideOutput struct {
+	Category  string               `json:"category"`
+	Questions []knowledge.Question `json:"questions"`
 }
 
-// GetGameGuideTool 获取游戏指南
-type GetGameGuideTool struct {
+type getGameGuideToolImpl struct {
 	KB *knowledge.KnowledgeBase
 }
 
-func (t *GetGameGuideTool) Name() string {
-	return "get_game_guide"
-}
-
-func (t *GetGameGuideTool) Description() string {
-	return "获取游戏基础指南和操作说明"
-}
-
-func (t *GetGameGuideTool) Timeout() time.Duration {
-	return 15 * time.Second // 增加超时时间
-}
-
-func (t *GetGameGuideTool) ParametersSchema() map[string]interface{} {
-	return map[string]interface{}{
-		"type":       "object",
-		"properties": map[string]interface{}{},
-	}
-}
-
-func (t *GetGameGuideTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
-	// 从知识库返回基础操作信息
+func (t *getGameGuideToolImpl) invoke(ctx context.Context, input GetGameGuideInput) (GetGameGuideOutput, error) {
 	for _, cat := range t.KB.Categories {
 		if cat.Name == "基础操作" {
-			return map[string]interface{}{
-				"category":  cat.Name,
-				"questions": cat.Questions,
+			return GetGameGuideOutput{
+				Category:  cat.Name,
+				Questions: cat.Questions,
 			}, nil
 		}
 	}
-
-	return map[string]interface{}{
-		"message": "游戏正在开发中，更多内容敬请期待！",
+	return GetGameGuideOutput{
+		Category:  "游戏指南",
+		Questions: nil,
 	}, nil
 }
 
-// GetQuestInfoTool 获取任务信息
-type GetQuestInfoTool struct {
+func NewGetGameGuideTool(kb *knowledge.KnowledgeBase) eino_tool.InvokableTool {
+	impl := &getGameGuideToolImpl{KB: kb}
+	tool, err := eino_tool_utils.InferTool[GetGameGuideInput, GetGameGuideOutput](
+		"get_game_guide",
+		"获取游戏基础指南和操作说明",
+		impl.invoke,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create get_game_guide tool: %v", err))
+	}
+	return tool
+}
+
+type GetQuestInfoInput struct{}
+
+type GetQuestInfoOutput struct {
+	Category  string               `json:"category"`
+	Questions []knowledge.Question `json:"questions"`
+}
+
+type getQuestInfoToolImpl struct {
 	KB *knowledge.KnowledgeBase
 }
 
-func (t *GetQuestInfoTool) Name() string {
-	return "get_quest_info"
-}
-
-func (t *GetQuestInfoTool) Description() string {
-	return "获取任务系统相关信息"
-}
-
-func (t *GetQuestInfoTool) Timeout() time.Duration {
-	return 15 * time.Second // 增加超时时间
-}
-
-func (t *GetQuestInfoTool) ParametersSchema() map[string]interface{} {
-	return map[string]interface{}{
-		"type":       "object",
-		"properties": map[string]interface{}{},
-	}
-}
-
-func (t *GetQuestInfoTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+func (t *getQuestInfoToolImpl) invoke(ctx context.Context, input GetQuestInfoInput) (GetQuestInfoOutput, error) {
 	for _, cat := range t.KB.Categories {
 		if cat.Name == "任务系统" {
-			return map[string]interface{}{
-				"category":  cat.Name,
-				"questions": cat.Questions,
+			return GetQuestInfoOutput{
+				Category:  cat.Name,
+				Questions: cat.Questions,
 			}, nil
 		}
 	}
-
-	return map[string]interface{}{
-		"message": "任务系统正在完善中...",
+	return GetQuestInfoOutput{
+		Category:  "任务系统",
+		Questions: nil,
 	}, nil
 }
 
-// GetScenarioInfoTool 获取场景信息
-type GetScenarioInfoTool struct {
+func NewGetQuestInfoTool(kb *knowledge.KnowledgeBase) eino_tool.InvokableTool {
+	impl := &getQuestInfoToolImpl{KB: kb}
+	tool, err := eino_tool_utils.InferTool[GetQuestInfoInput, GetQuestInfoOutput](
+		"get_quest_info",
+		"获取任务系统相关信息",
+		impl.invoke,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create get_quest_info tool: %v", err))
+	}
+	return tool
+}
+
+type GetScenarioInfoInput struct{}
+
+type GetScenarioInfoOutput struct {
+	Background string `json:"background"`
+	NPC        struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	} `json:"npc"`
+}
+
+type getScenarioInfoToolImpl struct {
 	KB *knowledge.KnowledgeBase
 }
 
-func (t *GetScenarioInfoTool) Name() string {
-	return "get_scenario_info"
-}
-
-func (t *GetScenarioInfoTool) Description() string {
-	return "获取当前场景的描述和信息"
-}
-
-func (t *GetScenarioInfoTool) Timeout() time.Duration {
-	return 15 * time.Second // 增加超时时间
-}
-
-func (t *GetScenarioInfoTool) ParametersSchema() map[string]interface{} {
-	return map[string]interface{}{
-		"type":       "object",
-		"properties": map[string]interface{}{},
-	}
-}
-
-func (t *GetScenarioInfoTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+func (t *getScenarioInfoToolImpl) invoke(ctx context.Context, input GetScenarioInfoInput) (GetScenarioInfoOutput, error) {
 	desc, err := knowledge.GetScenarioDesc("data/knowledge")
 	if err != nil {
-		return map[string]interface{}{
-			"message": "欢迎来到江南水乡！这里有着独特的水乡风情。",
+		return GetScenarioInfoOutput{
+			Background: "欢迎来到江南水乡！这里有着独特的水乡风情。",
 		}, nil
 	}
-
-	return map[string]interface{}{
-		"background": desc.Background,
-		"npc": map[string]interface{}{
-			"name":        desc.NPC.Name,
-			"description": desc.NPC.Description,
+	return GetScenarioInfoOutput{
+		Background: desc.Background,
+		NPC: struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}{
+			Name:        desc.NPC.Name,
+			Description: desc.NPC.Description,
 		},
 	}, nil
+}
+
+func NewGetScenarioInfoTool(kb *knowledge.KnowledgeBase) eino_tool.InvokableTool {
+	impl := &getScenarioInfoToolImpl{KB: kb}
+	tool, err := eino_tool_utils.InferTool[GetScenarioInfoInput, GetScenarioInfoOutput](
+		"get_scenario_info",
+		"获取当前场景的描述和信息",
+		impl.invoke,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create get_scenario_info tool: %v", err))
+	}
+	return tool
 }
