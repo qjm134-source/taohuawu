@@ -6,6 +6,8 @@ import (
 
 	eino_tool "github.com/cloudwego/eino/components/tool"
 	"github.com/watertown/guide/internal/knowledge"
+	"github.com/watertown/guide/internal/weather"
+	"github.com/watertown/guide/pkg/logging"
 )
 
 type Tool interface {
@@ -20,7 +22,7 @@ type ToolRegistry struct {
 	tools map[string]eino_tool.InvokableTool
 }
 
-func NewToolRegistry(kb *knowledge.KnowledgeBase) *ToolRegistry {
+func NewToolRegistry(kb *knowledge.KnowledgeBase, weatherService weather.Service, logger logging.Logger) *ToolRegistry {
 	registry := &ToolRegistry{
 		tools: make(map[string]eino_tool.InvokableTool),
 	}
@@ -29,7 +31,7 @@ func NewToolRegistry(kb *knowledge.KnowledgeBase) *ToolRegistry {
 	registry.Register(NewGetGameGuideTool(kb))
 	registry.Register(NewGetQuestInfoTool(kb))
 	registry.Register(NewGetScenarioInfoTool(kb))
-	registry.Register(NewGetWeatherTool())
+	registry.Register(NewGetWeatherTool(weatherService, logger))
 
 	return registry
 }

@@ -101,3 +101,4 @@ require (
 )
 
 replace google.golang.org/grpc => google.golang.org/grpc v1.58.3
+replace github.com/watertown/guide => .

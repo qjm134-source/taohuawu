@@ -21,6 +21,7 @@ type Config struct {
 	Knowledge     KnowledgeConfig     `yaml:"knowledge"`
 	Logging       LoggingConfig       `yaml:"logging"`
 	Observability ObservabilityConfig `yaml:"observability"`
+	Weather       WeatherConfig       `yaml:"weather"`
 }
 
 type ServerConfig struct {
@@ -133,6 +134,24 @@ type LangfuseConfig struct {
 	Host      string `yaml:"host"`
 	PublicKey string `yaml:"public_key"`
 	SecretKey string `yaml:"secret_key"`
+}
+
+type WeatherConfig struct {
+	Provider  string          `yaml:"provider"`
+	QWeather  QWeatherConfig  `yaml:"qweather"`
+	OpenMeteo OpenMeteoConfig `yaml:"openmeteo"`
+}
+
+type QWeatherConfig struct {
+	APIKey     string       `yaml:"api_key"`
+	BaseURL    string       `yaml:"base_url"`
+	Timeout    timeDuration `yaml:"timeout"`
+	MaxRetries int          `yaml:"max_retries"`
+}
+
+type OpenMeteoConfig struct {
+	Timeout    timeDuration `yaml:"timeout"`
+	MaxRetries int          `yaml:"max_retries"`
 }
 
 // timeDuration 包装 time.Duration 以支持 YAML 解析
@@ -273,6 +292,11 @@ func Load() (*Config, error) {
 		if enabled, err := strconv.ParseBool(obsPrometheus); err == nil {
 			cfg.Observability.Prometheus = enabled
 		}
+	}
+
+	if strings.HasPrefix(cfg.Weather.QWeather.APIKey, "${") && strings.HasSuffix(cfg.Weather.QWeather.APIKey, "}") {
+		envName := cfg.Weather.QWeather.APIKey[2 : len(cfg.Weather.QWeather.APIKey)-1]
+		cfg.Weather.QWeather.APIKey = os.Getenv(envName)
 	}
 
 	return cfg, nil

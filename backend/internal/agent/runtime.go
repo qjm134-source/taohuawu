@@ -471,10 +471,6 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 					attribute.Int64("ttft_ms", ttftMs))
 			}
 			chunkCount++
-			observability.AddEvent(llmCtx, "chunk_received",
-				attribute.Int("index", chunkCount),
-				attribute.Int("content_len", len(chunk.Content)),
-				attribute.String("finish_reason", chunk.FinishReason))
 			r.logger.Info("[HandleChatStream] Received chunk", "index", chunkCount, "content_len", len(chunk.Content), "model", chunk.Model, "finish_reason", chunk.FinishReason)
 
 			if chunk.Content != "" {

@@ -18,6 +18,7 @@ import (
 	"github.com/watertown/guide/internal/knowledge"
 	"github.com/watertown/guide/internal/llm"
 	"github.com/watertown/guide/internal/observability"
+	"github.com/watertown/guide/internal/weather"
 	"github.com/watertown/guide/internal/websocket"
 	"github.com/watertown/guide/pkg/logging"
 	"gorm.io/gorm"
@@ -276,13 +277,32 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 	// 创建会话管理器
 	s.sessionManager = agent.NewSessionManager()
 
+	// 创建天气服务
+	weatherService, err := weather.NewService(weather.Config{
+		Provider: s.config.Weather.Provider,
+		QWeather: weather.QWeatherConfig{
+			APIKey:     s.config.Weather.QWeather.APIKey,
+			BaseURL:    s.config.Weather.QWeather.BaseURL,
+			Timeout:    s.config.Weather.QWeather.Timeout.Duration,
+			MaxRetries: s.config.Weather.QWeather.MaxRetries,
+		},
+		OpenMeteo: weather.OpenMeteoConfig{
+			Timeout:    s.config.Weather.OpenMeteo.Timeout.Duration,
+			MaxRetries: s.config.Weather.OpenMeteo.MaxRetries,
+		},
+	}, s.logger)
+	if err != nil {
+		s.logger.Warn("Failed to create weather service", "error", err)
+	}
+	s.logger.Info("Weather service created", "provider", s.config.Weather.Provider)
+
 	// 创建工具注册表
 	var toolRegistry *tools.ToolRegistry
 	if knowledgeBase != nil {
-		toolRegistry = tools.NewToolRegistry(knowledgeBase)
+		toolRegistry = tools.NewToolRegistry(knowledgeBase, weatherService, s.logger)
 	} else {
 		s.logger.Warn("KnowledgeBase is nil, creating empty tool registry")
-		toolRegistry = tools.NewToolRegistry(nil)
+		toolRegistry = tools.NewToolRegistry(nil, weatherService, s.logger)
 	}
 
 	// 创建 EinoAgentAdapter（多模型路由器）

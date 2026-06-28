@@ -80,6 +80,12 @@ logging:
     max_age: 28       # days
     compress: true
 
+weather:
+  provider: openmeteo                   # 天气服务提供商: qweather(和风) / openmeteo
+  openmeteo:
+    timeout: 15s                        # 请求超时时间
+    max_retries: 3                      # 最大重试次数
+
 observability:
   enabled: false
   service_name: watertown-guide
