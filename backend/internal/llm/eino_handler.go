@@ -3,13 +3,18 @@ package llm
 import (
 	"context"
 	"fmt"
-	"time"
 
 	eino_callbacks "github.com/cloudwego/eino/callbacks"
 	eino_components "github.com/cloudwego/eino/components"
+	eino_compose "github.com/cloudwego/eino/compose"
 	eino_schema "github.com/cloudwego/eino/schema"
+	"github.com/watertown/guide/internal/observability"
 	"github.com/watertown/guide/pkg/logging"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+type callCounterKey struct{}
 
 type einoAgentHandler struct {
 	logger logging.Logger
@@ -20,8 +25,36 @@ func newEinoAgentHandler(logger logging.Logger) eino_callbacks.Handler {
 }
 
 func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.RunInfo, input eino_callbacks.CallbackInput) context.Context {
-	startTime := time.Now()
-	ctx = context.WithValue(ctx, "startTime", startTime)
+	var callCounter int
+	if val := ctx.Value(callCounterKey{}); val != nil {
+		callCounter = val.(int)
+	}
+	callCounter++
+	ctx = context.WithValue(ctx, callCounterKey{}, callCounter)
+
+	spanName := fmt.Sprintf("Eino.%s.%s", info.Component, info.Name)
+	purpose := ""
+	if info.Component == eino_components.ComponentOfChatModel {
+		spanName = fmt.Sprintf("Eino.%s.%s.%d", info.Component, info.Name, callCounter)
+		if callCounter == 1 {
+			purpose = "tool_decision"
+		} else {
+			purpose = "final_response"
+		}
+	} else if info.Component == eino_components.ComponentOfTool {
+		spanName = fmt.Sprintf("Eino.%s.%s.%d", info.Component, info.Name, callCounter)
+		purpose = "tool_execution"
+	}
+
+	ctx, _ = observability.StartSpanWithStartTime(ctx, spanName,
+		trace.WithAttributes(
+			attribute.String("component", string(info.Component)),
+			attribute.String("name", info.Name),
+			attribute.String("type", info.Type),
+			attribute.Int("call_number", callCounter),
+			attribute.String("purpose", purpose),
+		),
+	)
 
 	h.logger.Info("[Trace] OnStart",
 		"name", info.Name,
@@ -29,7 +62,6 @@ func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.Run
 		"component", info.Component,
 	)
 
-	// 根据组件类型记录不同的审计日志
 	switch info.Component {
 	case eino_components.ComponentOfChatModel:
 		h.logger.Info("[Audit] Model call started",
@@ -48,32 +80,37 @@ func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.Run
 }
 
 func (h *einoAgentHandler) OnEnd(ctx context.Context, info *eino_callbacks.RunInfo, output eino_callbacks.CallbackOutput) context.Context {
-	startTime, ok := ctx.Value("startTime").(time.Time)
-	latency := time.Duration(0)
-	if ok {
-		latency = time.Since(startTime)
+	span := trace.SpanFromContext(ctx)
+	if span != nil && span.IsRecording() {
+		if info.Component == eino_compose.ComponentOfGraph {
+			span.SetAttributes(
+				attribute.String("note", "Child spans sum may differ due to framework overhead (state management, message routing, loop control)"),
+				attribute.String("framework", "Eino ReAct Agent"),
+			)
+		}
+		span.End()
 	}
 
 	h.logger.Info("[Trace] OnEnd",
 		"name", info.Name,
 		"type", info.Type,
 		"component", info.Component,
-		"latency_ms", latency.Milliseconds(),
 	)
 
-	// 根据组件类型记录不同的审计日志
 	switch info.Component {
 	case eino_components.ComponentOfChatModel:
 		h.logger.Info("[Audit] Model call completed",
 			"model_name", info.Name,
-			"latency_ms", latency.Milliseconds(),
 			"output_preview", h.previewOutput(output),
 		)
 	case eino_components.ComponentOfTool:
 		h.logger.Info("[Audit] Tool call completed",
 			"tool_name", info.Name,
-			"latency_ms", latency.Milliseconds(),
 			"output", h.formatToolOutput(output),
+		)
+	case eino_compose.ComponentOfGraph:
+		h.logger.Info("[Audit] Graph execution completed",
+			"graph_name", info.Name,
 		)
 	}
 
@@ -81,10 +118,10 @@ func (h *einoAgentHandler) OnEnd(ctx context.Context, info *eino_callbacks.RunIn
 }
 
 func (h *einoAgentHandler) OnError(ctx context.Context, info *eino_callbacks.RunInfo, err error) context.Context {
-	startTime, ok := ctx.Value("startTime").(time.Time)
-	latency := time.Duration(0)
-	if ok {
-		latency = time.Since(startTime)
+	span := trace.SpanFromContext(ctx)
+	if span != nil && span.IsRecording() {
+		span.RecordError(err)
+		span.End()
 	}
 
 	h.logger.Error("[Trace] OnError",
@@ -92,23 +129,46 @@ func (h *einoAgentHandler) OnError(ctx context.Context, info *eino_callbacks.Run
 		"type", info.Type,
 		"component", info.Component,
 		"error", err.Error(),
-		"latency_ms", latency.Milliseconds(),
 	)
 
-	// 审计日志记录错误
 	h.logger.Error("[Audit] Component error",
 		"component", info.Component,
 		"name", info.Name,
 		"error", err.Error(),
-		"latency_ms", latency.Milliseconds(),
 	)
 
 	return ctx
 }
 
 func (h *einoAgentHandler) OnStartWithStreamInput(ctx context.Context, info *eino_callbacks.RunInfo, input *eino_schema.StreamReader[eino_callbacks.CallbackInput]) context.Context {
-	startTime := time.Now()
-	ctx = context.WithValue(ctx, "startTime", startTime)
+	var callCounter int
+	if val := ctx.Value(callCounterKey{}); val != nil {
+		callCounter = val.(int)
+	}
+	callCounter++
+	ctx = context.WithValue(ctx, callCounterKey{}, callCounter)
+
+	spanName := fmt.Sprintf("Eino.%s.%s", info.Component, info.Name)
+	purpose := ""
+	if info.Component == eino_components.ComponentOfChatModel {
+		spanName = fmt.Sprintf("Eino.%s.%s.%d", info.Component, info.Name, callCounter)
+		if callCounter == 1 {
+			purpose = "tool_decision"
+		} else {
+			purpose = "final_response"
+		}
+	} else if info.Component == eino_components.ComponentOfTool {
+		spanName = fmt.Sprintf("Eino.%s.%s.%d", info.Component, info.Name, callCounter)
+		purpose = "tool_execution"
+	}
+
+	ctx, _ = observability.StartSpan(ctx, spanName,
+		attribute.String("component", string(info.Component)),
+		attribute.String("name", info.Name),
+		attribute.String("type", info.Type),
+		attribute.Int("call_number", callCounter),
+		attribute.String("purpose", purpose),
+	)
 
 	h.logger.Info("[Trace] Stream start",
 		"name", info.Name,
@@ -125,23 +185,20 @@ func (h *einoAgentHandler) OnStartWithStreamInput(ctx context.Context, info *ein
 }
 
 func (h *einoAgentHandler) OnEndWithStreamOutput(ctx context.Context, info *eino_callbacks.RunInfo, output *eino_schema.StreamReader[eino_callbacks.CallbackOutput]) context.Context {
-	startTime, ok := ctx.Value("startTime").(time.Time)
-	latency := time.Duration(0)
-	if ok {
-		latency = time.Since(startTime)
+	span := trace.SpanFromContext(ctx)
+	if span != nil && span.IsRecording() {
+		span.End()
 	}
 
 	h.logger.Info("[Trace] Stream end",
 		"name", info.Name,
 		"type", info.Type,
 		"component", info.Component,
-		"latency_ms", latency.Milliseconds(),
 	)
 
 	h.logger.Info("[Audit] Stream call completed",
 		"component", info.Component,
 		"name", info.Name,
-		"latency_ms", latency.Milliseconds(),
 	)
 
 	return ctx

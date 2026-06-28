@@ -2,9 +2,12 @@ package llm
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"math/rand"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +33,27 @@ const (
 	StrategyFallback   Strategy = "fallback"
 	StrategyWeighted   Strategy = "weighted"
 )
+
+var defaultHTTPClient = &http.Client{
+	Timeout: 60 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			DualStack: true,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	},
+}
 
 type modelEntry struct {
 	name      string
@@ -81,9 +105,10 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 		}
 
 		chatModel, err := eino_openai.NewChatModel(context.Background(), &eino_openai.ChatModelConfig{
-			Model:   mc.Name,
-			APIKey:  mc.APIKey,
-			BaseURL: mc.BaseURL,
+			Model:      mc.Name,
+			APIKey:     mc.APIKey,
+			BaseURL:    mc.BaseURL,
+			HTTPClient: defaultHTTPClient,
 		})
 		if err != nil {
 			logger.Error("Failed to create Eino model", "model", mc.Name, "error", err)
