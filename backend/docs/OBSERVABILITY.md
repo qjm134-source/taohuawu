@@ -162,11 +162,11 @@ observability:
 | `middleware.go` | `GET /path` / `POST /path` | 每个 HTTP 请求自动创建 Server Span |
 | `runtime.go` | `HandleWelcome` | 欢迎消息处理 |
 | `runtime.go` | `HandleChat` | 普通对话处理 |
-| `runtime.go` | `HandleChatStream` | 流式对话处理（包含 6 个顶层子 Span + Eino 框架嵌套子 Span） |
+| `runtime.go` | `HandleChatStream` | 流式对话处理（包含 5 个顶层子 Span + Eino 框架嵌套子 Span） |
 
 ### 4.3 细粒度链路追踪（HandleChatStream）
 
-为实现**全链路耗时透明化**，我们为 `HandleChatStream` 添加了 **6 个顶层细粒度子 Span**，其中 `LLM.StreamChat` 内部还包含 **4-5 个嵌套子 Span**，可以清晰看到每个步骤的耗时分布，便于定位性能瓶颈：
+为实现**全链路耗时透明化**，我们为 `HandleChatStream` 添加了 **5 个顶层细粒度子 Span**，其中 `LLM.StreamChat` 内部还包含 **4-5 个嵌套子 Span**，可以清晰看到每个步骤的耗时分布，便于定位性能瓶颈：
 
 #### 完整 Span 层级结构
 
@@ -177,9 +177,9 @@ Agent.HandleChatStream (主 Span)
 ├── Context.Build           构建上下文消息（会话历史 + 摘要压缩）
 ├── LLM.HealthCheck         LLM 健康检查
 └── LLM.StreamChat          LLM 流式调用（主要耗时来源，包含嵌套子 Span）
-    ├── Eino.Graph.WaterTownReActAgent  Eino ReAct Agent 执行图
+    ├── Eino.Graph.WaterTownReActAgent   Eino ReAct Agent 执行图
     │   ├── Eino.ChatModel.ChatModel.1   模型调用（决策阶段，判断是否调用工具）
-    │   ├── Eino.ToolNode.Tools         工具调用节点
+    │   ├── Eino.ToolNode.Tools          工具调用节点
     │   │   └── Eino.Tool.get_weather    具体工具执行
     │   └── Eino.ChatModel.ChatModel.2   模型调用（响应阶段，基于工具结果生成回复）
     ├── LLM.TokenStreaming              Token 流传输（打字机效果）
@@ -189,56 +189,10 @@ Agent.HandleChatStream (主 Span)
     └── LLM.CacheWrite                  缓存写入（精确匹配 + 语义索引）
 ```
 
-#### 实现代码
 
-```go
-// internal/observability/tracer.go
-// 使用 StartChildSpan + EndChildSpan 自动记录耗时
+#### 输出效果（Jaeger Trace）
 
-// 1. 情绪检测
-_, emotionSpan := observability.StartChildSpan(ctx, "Emotion.Detect")
-em := r.emotionDetector.Detect(message)
-observability.EndChildSpan(ctx, emotionSpan)
-
-// 2. 精确缓存查询
-_, cacheSpan := observability.StartChildSpan(ctx, "Cache.ExactCheck")
-cached, hit := r.optimizer.GetCache(cacheKey)
-observability.EndChildSpan(ctx, cacheSpan)
-
-// 3. 语义缓存查询（包含 Embedding API 调用）
-_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
-cached, hit = r.optimizer.CheckSimilarity(ctx, message, 0.85)
-observability.EndChildSpan(ctx, similaritySpan)
-
-// 4. 构建上下文
-_, contextSpan := observability.StartChildSpan(ctx, "Context.Build")
-messages := r.buildContextMessages(session, message)
-observability.EndChildSpan(ctx, contextSpan)
-
-// 5. LLM 调用（内部包含 Eino 框架回调追踪）
-llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
-stream, err := r.llmAdapter.StreamChat(llmCtx, req)
-// ... 内部包含：Eino ReAct Agent 执行、Token 流传输、统计指标、会话更新、缓存写入
-observability.EndChildSpan(ctx, llmSpan)
-```
-
-#### 输出效果（JSON Trace）
-
-```json
-{
-  "Name": "Agent.HandleChatStream",
-  "Attributes": [
-    {"Key": "llm.model", "Value": {"Type": "STRING", "Value": "qwen3.5-27b"}},
-    {"Key": "llm.input_tokens", "Value": {"Type": "INT64", "Value": 208}},
-    {"Key": "llm.output_tokens", "Value": {"Type": "INT64", "Value": 192}},
-    {"Key": "llm.cost", "Value": {"Type": "FLOAT64", "Value": 0.000392}},
-    {"Key": "cache_hit", "Value": {"Type": "BOOL", "Value": false}}
-  ],
-  "Events": [
-    {"Name": "cache_hit", "Attributes": [{"Key": "type", "Value": {"Type": "STRING", "Value": "similarity"}}]}
-  ]
-}
-```
+![Jaeger Trace 瀑布图](./images/trace.png)
 
 #### 典型耗时分布
 
@@ -262,8 +216,7 @@ observability.EndChildSpan(ctx, llmSpan)
 ```
 Agent.HandleChatStream:  10111ms ████████████████████████████████████ 100%
 ├── Emotion.Detect:           2ms ▏  0%
-├── Cache.ExactCheck:         3ms ▏  0%
-├── Cache.SimilarityCheck:   50ms ▏  1%
+├── Cache.Check:             50ms ▏  1%
 ├── Context.Build:           15ms ▏  0%
 ├── LLM.HealthCheck:          3ms ▏  0%
 └── LLM.StreamChat:        9850ms ████████████████████████████████████  97%
