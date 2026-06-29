@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/watertown/guide/pkg/logging"
 )
 
 // 模型定价（每 1K tokens，单位：美元）
@@ -87,7 +89,7 @@ func GetSummarizer() Summarizer {
 }
 
 // NewOptimizer 创建优化器
-func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embeddingAPI EmbeddingAPI) *Optimizer {
+func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embeddingAPI EmbeddingAPI, logger logging.Logger) *Optimizer {
 	cacheConfig := CacheConfig{
 		Enabled:             true,
 		TTL:                 cacheTTL,
@@ -96,7 +98,7 @@ func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embedding
 	}
 
 	return &Optimizer{
-		cache:        NewLayeredCache(cacheConfig, embeddingAPI),
+		cache:        NewLayeredCache(cacheConfig, embeddingAPI, logger),
 		summary:      NewSummary(maxMessages, tokenLimit),
 		embeddingAPI: embeddingAPI,
 	}

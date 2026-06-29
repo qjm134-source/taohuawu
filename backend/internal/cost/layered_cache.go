@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/watertown/guide/pkg/logging"
 )
 
 // LayeredCache 多层缓存实现
@@ -16,10 +18,11 @@ type LayeredCache struct {
 	mu            sync.RWMutex
 	stats         CacheStats
 	ttl           time.Duration
+	logger        logging.Logger
 }
 
 // NewLayeredCache 创建多层缓存
-func NewLayeredCache(config CacheConfig, embeddingAPI EmbeddingAPI) *LayeredCache {
+func NewLayeredCache(config CacheConfig, embeddingAPI EmbeddingAPI, logger logging.Logger) *LayeredCache {
 	c := &LayeredCache{
 		config:        config,
 		exactCache:    make(map[string]*CacheEntry),
@@ -27,6 +30,7 @@ func NewLayeredCache(config CacheConfig, embeddingAPI EmbeddingAPI) *LayeredCach
 		toolCache:     make(map[string]interface{}),
 		embeddingAPI:  embeddingAPI,
 		ttl:           config.TTL,
+		logger:        logger,
 	}
 
 	// 启动定期清理
@@ -137,20 +141,26 @@ func (c *LayeredCache) buildSemanticIndex(ctx context.Context, question, answer,
 // GetSimilar 获取相似问题的缓存
 func (c *LayeredCache) GetSimilar(ctx context.Context, question string, threshold float64) (string, bool) {
 	if c.embeddingAPI == nil {
+		c.logger.Warn("Embedding API is not enabled, cannot get similar questions")
+		c.stats.Misses++
 		return "", false
 	}
 
 	embedding, err := c.embeddingAPI.GetEmbedding(ctx, question)
 	if err != nil {
+		c.logger.Errorf("Failed to get embedding for question: %v", err)
+		c.stats.Misses++
 		return "", false
 	}
 
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	skippedCount := 0
 	for _, entry := range c.semanticCache {
 		// 使用缓存的 embedding，避免重复调用 API
 		if entry.Embedding == nil || len(entry.Embedding) == 0 {
+			skippedCount++
 			continue
 		}
 
@@ -159,6 +169,9 @@ func (c *LayeredCache) GetSimilar(ctx context.Context, question string, threshol
 			return entry.Answer, true
 		}
 	}
+
+	c.stats.Misses++
+	c.logger.Infof("No similar question found, question: %s, skippedCount: %d", question, skippedCount)
 
 	return "", false
 }

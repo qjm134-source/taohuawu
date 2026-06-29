@@ -354,6 +354,7 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 		s.config.Cost.MaxHistoryMessages,
 		s.config.Cost.MaxHistoryTokens,
 		embeddingAPI,
+		s.logger,
 	)
 
 	// 初始化 LLM 摘要器
