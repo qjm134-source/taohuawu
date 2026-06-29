@@ -173,16 +173,15 @@ observability:
 ```
 Agent.HandleChatStream (主 Span)
 ├── Emotion.Detect          情绪检测
-├── Cache.ExactCheck        精确缓存查询
-├── Cache.SimilarityCheck   语义缓存查询（含 Embedding 调用）
-├── Context.Build          构建上下文消息（会话历史 + 摘要压缩）
+├── Cache.Check             缓存查询（含精确缓存查询 + Embedding 调用）
+├── Context.Build           构建上下文消息（会话历史 + 摘要压缩）
 ├── LLM.HealthCheck         LLM 健康检查
 └── LLM.StreamChat          LLM 流式调用（主要耗时来源，包含嵌套子 Span）
     ├── Eino.Graph.WaterTownReActAgent  Eino ReAct Agent 执行图
-    │   ├── Eino.ChatModel.ChatModel.N  模型调用（N=1,2...）
-    │   │   └── LLM.TimeToFirstToken    首 Token 到达耗时
-    │   └── Eino.ToolNode.Tools         工具调用节点
-    │       └── Eino.Tool.get_weather    具体工具执行
+    │   ├── Eino.ChatModel.ChatModel.1   模型调用（决策阶段，判断是否调用工具）
+    │   ├── Eino.ToolNode.Tools         工具调用节点
+    │   │   └── Eino.Tool.get_weather    具体工具执行
+    │   └── Eino.ChatModel.ChatModel.2   模型调用（响应阶段，基于工具结果生成回复）
     ├── LLM.TokenStreaming              Token 流传输（打字机效果）
     ├── LLM.StatsAndMetrics             统计指标记录与成本计算
     │   └── LLM.FallbackNonStream       降级非流式调用（可选）
