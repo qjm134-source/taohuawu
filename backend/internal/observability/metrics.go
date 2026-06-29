@@ -66,6 +66,23 @@ var (
 		[]string{"model"},
 	)
 
+	// 缓存指标
+	CacheHitsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cache_hits_total",
+			Help: "Total number of cache hits",
+		},
+		[]string{"cache_type"},
+	)
+
+	CacheMissesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cache_misses_total",
+			Help: "Total number of cache misses",
+		},
+		[]string{"tenant_id"},
+	)
+
 	CacheHitRatio = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "cache_hit_ratio",

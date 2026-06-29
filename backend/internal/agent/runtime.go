@@ -246,6 +246,7 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		observability.EndChildSpan(ctx, cacheSpan)
 		r.logger.Info("[HandleChat] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
+		observability.CacheHitsTotal.WithLabelValues("exact").Inc()
 		session.AddMessage("assistant", cached, emotionStr, nil)
 		stats.CacheHit = true
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
@@ -253,6 +254,7 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		return cached, emotionStr, stats, nil
 	}
 	observability.EndChildSpan(ctx, cacheSpan)
+	observability.CacheMissesTotal.WithLabelValues(session.ID).Inc()
 
 	// 检查语义缓存（相似问题匹配）
 	_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
@@ -260,6 +262,7 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		observability.EndChildSpan(ctx, similaritySpan)
 		r.logger.Info("[HandleChat] Semantic cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
+		observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
 		session.AddMessage("assistant", cached, emotionStr, nil)
 		stats.CacheHit = true
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
@@ -359,9 +362,9 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	emotionStr := string(em)
 	observability.EndChildSpan(ctx, emotionSpan)
 
-	// 2. 缓存查询子Span
+	// 2. 精确缓存查询子Span
 	cacheKey := session.ID + "_" + message
-	_, cacheSpan := observability.StartChildSpan(ctx, "Cache.Check")
+	_, cacheSpan := observability.StartChildSpan(ctx, "Cache.ExactCheck")
 	cached, hit := r.optimizer.GetCache(cacheKey)
 	observability.EndChildSpan(ctx, cacheSpan)
 
@@ -369,6 +372,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		r.logger.Info("[HandleChatStream] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		observability.AddEvent(ctx, "cache_hit", attribute.String("type", "exact"))
+		observability.CacheHitsTotal.WithLabelValues("exact").Inc()
 		observability.EndSpanWithDuration(ctx, span)
 		langfuseTrace.End()
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
@@ -384,12 +388,39 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		return contentChan, statsChan, nil
 	}
 
-	// 3. 构建上下文消息子Span
+	// 3. 语义缓存查询子Span
+	_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
+	cached, hit = r.optimizer.CheckSimilarity(ctx, message, 0.85)
+	observability.EndChildSpan(ctx, similaritySpan)
+
+	if hit && cached != "" {
+		r.logger.Info("[HandleChatStream] Semantic cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		span.SetAttributes(attribute.Bool("cache_hit", true))
+		observability.AddEvent(ctx, "cache_hit", attribute.String("type", "similarity"))
+		observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
+		observability.EndSpanWithDuration(ctx, span)
+		langfuseTrace.End()
+		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+
+		contentChan := make(chan string, 1)
+		contentChan <- cached
+		close(contentChan)
+
+		statsChan := make(chan *LLMStats, 1)
+		statsChan <- &LLMStats{CacheHit: true}
+		close(statsChan)
+
+		return contentChan, statsChan, nil
+	}
+
+	observability.CacheMissesTotal.WithLabelValues(session.ID).Inc()
+
+	// 4. 构建上下文消息子Span
 	_, contextSpan := observability.StartChildSpan(ctx, "Context.Build")
 	messages := r.buildContextMessages(session, message)
 	observability.EndChildSpan(ctx, contextSpan)
 
-	// 4. LLM 健康检查子Span
+	// 5. LLM 健康检查子Span
 	_, healthSpan := observability.StartChildSpan(ctx, "LLM.HealthCheck")
 	isHealthy := r.llmAdapter.IsHealthy()
 	observability.EndChildSpan(ctx, healthSpan)
