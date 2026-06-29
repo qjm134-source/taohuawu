@@ -20,19 +20,19 @@ websocket:
 llm:
   # 模型配置列表，按优先级排序
   models:
-    - name: mimo-v2.5
-      base_url: https://token-plan-cn.xiaomimimo.com/v1
-      api_key: ${MIMO_API_KEY}
-      enabled: true
-      max_tokens: 300
-      temperature: 0.5
-
     - name: qwen3.5-27b
       base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
       api_key: ${BAILIAN_API_KEY}
       enabled: true
       max_tokens: 500
       temperature: 0.7
+      
+    - name: mimo-v2.5
+      base_url: https://token-plan-cn.xiaomimimo.com/v1
+      api_key: ${MIMO_API_KEY}
+      enabled: false
+      max_tokens: 300
+      temperature: 0.5
 
   timeout: 60s           # 增加超时时间到 60 秒
   max_retries: 3         # 增加重试次数到 3 次
