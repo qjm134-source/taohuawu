@@ -62,7 +62,7 @@ cost:
     enabled: true
     type: remote                # remote 使用远程 API（推荐）; local 使用本地服务
     api_key: ${BAILIAN_API_KEY}  # 或直接填写 API Key（remote 模式必需）
-    base_url: https://api.lingyiwanwu.com/v1           # remote API 地址 / local 服务地址
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1          # remote API 地址 / local 服务地址
     model: qwen3-vl-embedding
     server_type: openai-compat          # local 模式后端类型: ollama / tei / openai-compat
 

@@ -32,7 +32,7 @@ func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.Run
 	callCounter++
 	ctx = context.WithValue(ctx, callCounterKey{}, callCounter)
 
-	h.logger.Debug("[EinoCallback] OnStart called", "component", info.Component, "name", info.Name, "type", info.Type)
+	h.logger.Info("[EinoCallback] OnStart called", "component", info.Component, "name", info.Name, "type", info.Type)
 
 	spanName := fmt.Sprintf("Eino.%s.%s", info.Component, info.Name)
 	purpose := ""

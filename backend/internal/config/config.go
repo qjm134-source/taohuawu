@@ -299,6 +299,15 @@ func Load() (*Config, error) {
 		cfg.Weather.QWeather.APIKey = os.Getenv(envName)
 	}
 
+	if strings.HasPrefix(cfg.Cost.Embedding.APIKey, "${") && strings.HasSuffix(cfg.Cost.Embedding.APIKey, "}") {
+		envName := cfg.Cost.Embedding.APIKey[2 : len(cfg.Cost.Embedding.APIKey)-1]
+		if envValue := os.Getenv(envName); envValue != "" {
+			cfg.Cost.Embedding.APIKey = envValue
+		} else {
+			fmt.Printf("Warning: environment variable %s is not set for embedding API key\n", envName)
+		}
+	}
+
 	return cfg, nil
 }
 
