@@ -108,7 +108,7 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(rate(cost_total[1h])) * 3600",
+          "expr": "sum(cost_total)",
           "interval": "",
           "legendFormat": "Cost",
           "refId": "A"
@@ -179,7 +179,7 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(rate(cache_hits_total[1h])) / (sum(rate(cache_hits_total[1h])) + sum(rate(cache_misses_total[1h]))) * 100",
+          "expr": "sum(cache_hits_total) / (sum(cache_hits_total) + sum(cache_misses_total)) * 100",
           "interval": "",
           "legendFormat": "Hit Ratio",
           "refId": "A"
@@ -250,7 +250,7 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, path))",
+          "expr": "histogram_quantile(0.99, sum(http_request_duration_seconds_bucket) by (le, path)) * 1000",
           "interval": "",
           "legendFormat": "{{path}}",
           "refId": "A"
@@ -321,7 +321,7 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(rate(llm_requests_total{status=\"success\"}[1h])) / sum(rate(llm_requests_total[1h])) * 100",
+          "expr": "sum(llm_requests_total{status=\"success\"}) / sum(llm_requests_total) * 100",
           "interval": "",
           "legendFormat": "Success Rate",
           "refId": "A"
@@ -401,7 +401,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(cache_hits_total[5m])) / (sum(rate(cache_hits_total[5m])) + sum(rate(cache_misses_total[5m]))) * 100",
+          "expr": "sum(increase(cache_hits_total[5m])) / (sum(increase(cache_hits_total[5m])) + sum(increase(cache_misses_total[5m]))) * 100",
           "interval": "",
           "legendFormat": "缓存命中率",
           "refId": "A"
@@ -481,7 +481,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(cost_total[5m])) * 3600",
+          "expr": "sum(increase(cost_total[5m])) / 300 * 3600",
           "interval": "",
           "legendFormat": "成本 ($/h)",
           "refId": "A"
@@ -561,7 +561,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_requests_total[5m]))",
+          "expr": "sum(increase(http_requests_total[5m]))",
           "interval": "",
           "legendFormat": "总请求",
           "refId": "A"
@@ -641,19 +641,19 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, path))",
+          "expr": "histogram_quantile(0.99, sum(http_request_duration_seconds_bucket) by (le, path)) * 1000",
           "interval": "",
           "legendFormat": "P99 - {{path}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, path))",
+          "expr": "histogram_quantile(0.95, sum(http_request_duration_seconds_bucket) by (le, path)) * 1000",
           "interval": "",
           "legendFormat": "P95 - {{path}}",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, path))",
+          "expr": "histogram_quantile(0.50, sum(http_request_duration_seconds_bucket) by (le, path)) * 1000",
           "interval": "",
           "legendFormat": "P50 - {{path}}",
           "refId": "C"
@@ -812,7 +812,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(cache_hits_total[5m])) by (cache_type)",
+          "expr": "sum(increase(cache_hits_total[5m])) by (cache_type)",
           "interval": "",
           "legendFormat": "{{cache_type}}",
           "refId": "A"
