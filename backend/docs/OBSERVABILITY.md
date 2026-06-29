@@ -411,6 +411,66 @@ sum by (cache_type) (cache_hits_total)
 sum by (tenant_id) (cache_misses_total)
 ```
 
+### 6.4 缓存指标实现
+
+缓存指标定义在 `internal/observability/metrics.go`，并在 `internal/agent/runtime.go` 中的 `HandleChat` 和 `HandleChatStream` 方法中使用：
+
+**指标定义：**
+
+```go
+// 缓存命中次数（区分精确匹配和语义匹配）
+CacheHitsTotal = promauto.NewCounterVec(
+    prometheus.CounterOpts{
+        Name: "cache_hits_total",
+        Help: "Total number of cache hits",
+    },
+    []string{"cache_type"},  // exact | similarity
+)
+
+// 缓存未命中次数
+CacheMissesTotal = promauto.NewCounterVec(
+    prometheus.CounterOpts{
+        Name: "cache_misses_total",
+        Help: "Total number of cache misses",
+    },
+    []string{"tenant_id"},
+)
+
+// 缓存命中率（通过 PromQL 计算，代码中不直接更新）
+CacheHitRatio = promauto.NewGaugeVec(
+    prometheus.CounterOpts{
+        Name: "cache_hit_ratio",
+        Help: "Cache hit ratio",
+    },
+    []string{"tenant_id"},
+)
+```
+
+**指标使用（`runtime.go`）：**
+
+```go
+// 精确缓存命中
+if cached, hit := r.optimizer.GetCache(cacheKey); hit {
+    observability.CacheHitsTotal.WithLabelValues("exact").Inc()
+}
+
+// 语义缓存命中
+if cached, hit := r.optimizer.CheckSimilarity(ctx, message, 0.85); hit {
+    observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
+}
+
+// 缓存未命中（精确和语义缓存都未命中时）
+observability.CacheMissesTotal.WithLabelValues(session.ID).Inc()
+```
+
+**说明：**
+
+- `cache_hit_ratio` 指标虽然已定义，但**不在代码中直接更新**，而是通过 PromQL 查询实时计算：
+  ```promql
+  rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))
+  ```
+- 缓存检查流程：先检查精确缓存 → 未命中则检查语义缓存 → 两者都未命中才调用 LLM API
+
 ---
 
 ## 7. 快速查看指标与链路
