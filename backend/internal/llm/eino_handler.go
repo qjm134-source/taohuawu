@@ -32,6 +32,8 @@ func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.Run
 	callCounter++
 	ctx = context.WithValue(ctx, callCounterKey{}, callCounter)
 
+	h.logger.Debug("[EinoCallback] OnStart called", "component", info.Component, "name", info.Name, "type", info.Type)
+
 	spanName := fmt.Sprintf("Eino.%s.%s", info.Component, info.Name)
 	purpose := ""
 	if info.Component == eino_components.ComponentOfChatModel {
@@ -43,6 +45,10 @@ func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.Run
 		}
 	} else if info.Component == eino_components.ComponentOfTool {
 		spanName = fmt.Sprintf("Eino.%s.%s.%d", info.Component, info.Name, callCounter)
+		purpose = "tool_execution"
+	} else if info.Component == eino_compose.ComponentOfLambda {
+		purpose = "state_management"
+	} else if info.Component == eino_compose.ComponentOfAgenticToolsNode || info.Component == eino_compose.ComponentOfToolsNode {
 		purpose = "tool_execution"
 	}
 
@@ -130,6 +136,10 @@ func (h *einoAgentHandler) OnStartWithStreamInput(ctx context.Context, info *ein
 		}
 	} else if info.Component == eino_components.ComponentOfTool {
 		spanName = fmt.Sprintf("Eino.%s.%s.%d", info.Component, info.Name, callCounter)
+		purpose = "tool_execution"
+	} else if info.Component == eino_compose.ComponentOfLambda {
+		purpose = "state_management"
+	} else if info.Component == eino_compose.ComponentOfAgenticToolsNode || info.Component == eino_compose.ComponentOfToolsNode {
 		purpose = "tool_execution"
 	}
 
