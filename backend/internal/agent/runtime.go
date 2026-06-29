@@ -52,6 +52,11 @@ type Runtime struct {
 	// inflightWelcome 防止同一个 player 并发触发 HandleWelcome，
 	// value 是 chan struct{}，第一个请求 close channel，后续请求等待。
 	inflightWelcome sync.Map // playerID → chan struct{}
+
+	// cacheStats 缓存统计
+	cacheHits   int64
+	cacheMisses int64
+	cacheMu     sync.Mutex
 }
 
 // Config Agent 配置
@@ -247,6 +252,7 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		r.logger.Info("[HandleChat] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		observability.CacheHitsTotal.WithLabelValues("exact").Inc()
+		r.recordCacheHit()
 		session.AddMessage("assistant", cached, emotionStr, nil)
 		stats.CacheHit = true
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
@@ -254,7 +260,8 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		return cached, emotionStr, stats, nil
 	}
 	observability.EndChildSpan(ctx, cacheSpan)
-	observability.CacheMissesTotal.WithLabelValues(session.ID).Inc()
+	observability.CacheMissesTotal.WithLabelValues("exact").Inc()
+	r.recordCacheMiss()
 
 	// 检查语义缓存（相似问题匹配）
 	_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
@@ -263,6 +270,7 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		r.logger.Info("[HandleChat] Semantic cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
+		r.recordCacheHit()
 		session.AddMessage("assistant", cached, emotionStr, nil)
 		stats.CacheHit = true
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
@@ -270,6 +278,8 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		return cached, emotionStr, stats, nil
 	}
 	observability.EndChildSpan(ctx, similaritySpan)
+	observability.CacheMissesTotal.WithLabelValues("similarity").Inc()
+	r.recordCacheMiss()
 
 	// 构建上下文消息（含摘要压缩）
 	messages := r.buildContextMessages(session, message)
@@ -373,6 +383,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		observability.AddEvent(ctx, "cache_hit", attribute.String("type", "exact"))
 		observability.CacheHitsTotal.WithLabelValues("exact").Inc()
+		r.recordCacheHit()
 		observability.EndSpanWithDuration(ctx, span)
 		langfuseTrace.End()
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
@@ -387,6 +398,9 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 		return contentChan, statsChan, nil
 	}
+
+	observability.CacheMissesTotal.WithLabelValues("exact").Inc()
+	r.recordCacheMiss()
 
 	// 3. 语义缓存查询子Span
 	_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
@@ -398,6 +412,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		observability.AddEvent(ctx, "cache_hit", attribute.String("type", "similarity"))
 		observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
+		r.recordCacheHit()
 		observability.EndSpanWithDuration(ctx, span)
 		langfuseTrace.End()
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
@@ -413,7 +428,8 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		return contentChan, statsChan, nil
 	}
 
-	observability.CacheMissesTotal.WithLabelValues(session.ID).Inc()
+	observability.CacheMissesTotal.WithLabelValues("similarity").Inc()
+	r.recordCacheMiss()
 
 	// 4. 构建上下文消息子Span
 	_, contextSpan := observability.StartChildSpan(ctx, "Context.Build")
@@ -811,6 +827,28 @@ func (r *Runtime) recordLLMMetrics(model, status string, durationSec float64, in
 	observability.LLMRequestTokens.WithLabelValues(model).Add(float64(inputTokens))
 	observability.LLMCompletionTokens.WithLabelValues(model).Add(float64(outputTokens))
 	observability.CostTotal.WithLabelValues(model).Add(costAmount)
+}
+
+// recordCacheHit 记录缓存命中
+func (r *Runtime) recordCacheHit() {
+	r.cacheMu.Lock()
+	r.cacheHits++
+	total := r.cacheHits + r.cacheMisses
+	if total > 0 {
+		observability.CacheHitRatio.Set(float64(r.cacheHits) / float64(total))
+	}
+	r.cacheMu.Unlock()
+}
+
+// recordCacheMiss 记录缓存未命中
+func (r *Runtime) recordCacheMiss() {
+	r.cacheMu.Lock()
+	r.cacheMisses++
+	total := r.cacheHits + r.cacheMisses
+	if total > 0 {
+		observability.CacheHitRatio.Set(float64(r.cacheHits) / float64(total))
+	}
+	r.cacheMu.Unlock()
 }
 
 // GetSession 获取会话

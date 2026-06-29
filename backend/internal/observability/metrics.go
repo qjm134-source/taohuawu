@@ -80,15 +80,14 @@ var (
 			Name: "cache_misses_total",
 			Help: "Total number of cache misses",
 		},
-		[]string{"tenant_id"},
+		[]string{"cache_type"},
 	)
 
-	CacheHitRatio = promauto.NewGaugeVec(
+	CacheHitRatio = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "cache_hit_ratio",
 			Help: "Cache hit ratio",
 		},
-		[]string{"tenant_id"},
 	)
 
 	// Agent 指标

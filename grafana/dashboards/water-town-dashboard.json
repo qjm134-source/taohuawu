@@ -179,7 +179,7 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(cache_hits_total) / (sum(cache_hits_total) + sum(cache_misses_total)) * 100",
+          "expr": "cache_hit_ratio * 100",
           "interval": "",
           "legendFormat": "Hit Ratio",
           "refId": "A"
@@ -321,7 +321,7 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(llm_requests_total{status=\"success\"}) / sum(llm_requests_total) * 100",
+          "expr": "sum(llm_requests_total{status=\"success\"}) / sum(llm_requests_total) * 100 or vector(0)",
           "interval": "",
           "legendFormat": "Success Rate",
           "refId": "A"
