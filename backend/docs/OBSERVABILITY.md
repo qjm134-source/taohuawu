@@ -517,11 +517,29 @@ rate(http_requests_total[1m])
 
 **搭配 Grafana**（如果希望更美观的 Dashboard）：
 
+项目已在 `docker-compose.yml` 中集成 Grafana，启动后自动配置 Prometheus 数据源并导入预置仪表盘：
+
 ```bash
-docker run -d --name grafana -p 3000:3000 grafana/grafana
+# 启动所有服务（包括 Grafana）
+docker-compose up -d
 ```
 
-然后在 Grafana 中添加 Prometheus 数据源（URL 填 `http://host.docker.internal:9090`），创建 Dashboard。
+**访问地址：**
+
+| 服务 | 地址 | 默认账号 |
+|------|------|---------|
+| Grafana | http://localhost:3001 | admin / admin123 |
+| Prometheus | http://localhost:9090 | - |
+
+**预置仪表盘：**
+
+项目已配置自动导入仪表盘（`grafana/dashboards/water-town-dashboard.json`），包含：
+- 核心指标：LLM 成本、缓存命中率、P99 延迟、LLM 调用成功率
+- 趋势图表：缓存命中率趋势、成本趋势、请求量趋势
+- 延迟分布：HTTP 请求 P50/P95/P99 分位数
+- 辅助指标：在线连接数、缓存命中类型分布、HTTP 状态码分布
+
+登录 Grafana 后，仪表盘会自动出现在 **Dashboards** 页面，无需手动配置。
 
 ### 7.3 开发模式：直接看 Trace 日志（无需额外组件）
 
