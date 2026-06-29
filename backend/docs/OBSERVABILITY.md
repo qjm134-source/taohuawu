@@ -162,24 +162,32 @@ observability:
 | `middleware.go` | `GET /path` / `POST /path` | 每个 HTTP 请求自动创建 Server Span |
 | `runtime.go` | `HandleWelcome` | 欢迎消息处理 |
 | `runtime.go` | `HandleChat` | 普通对话处理 |
-| `runtime.go` | `HandleChatStream` | 流式对话处理（包含 8 个细粒度子 Span） |
+| `runtime.go` | `HandleChatStream` | 流式对话处理（包含 6 个顶层子 Span + Eino 框架嵌套子 Span） |
 
 ### 4.3 细粒度链路追踪（HandleChatStream）
 
-为实现**全链路耗时透明化**，我们为 `HandleChatStream` 添加了 **8 个细粒度子 Span**，可以清晰看到每个步骤的耗时分布，便于定位性能瓶颈：
+为实现**全链路耗时透明化**，我们为 `HandleChatStream` 添加了 **6 个顶层细粒度子 Span**，其中 `LLM.StreamChat` 内部还包含 **4-5 个嵌套子 Span**，可以清晰看到每个步骤的耗时分布，便于定位性能瓶颈：
 
 #### 完整 Span 层级结构
 
 ```
 Agent.HandleChatStream (主 Span)
-├── Emotion.Detect        情绪检测
-├── Cache.Check            缓存查询（精确匹配 + 语义匹配）
+├── Emotion.Detect          情绪检测
+├── Cache.ExactCheck        精确缓存查询
+├── Cache.SimilarityCheck   语义缓存查询（含 Embedding 调用）
 ├── Context.Build          构建上下文消息（会话历史 + 摘要压缩）
-├── Tools.Register         工具注册
-├── LLM.HealthCheck        LLM 健康检查
-├── LLM.StreamChat         LLM 流式调用（主要耗时来源）
-├── Stream.Process         流式数据接收与处理
-└── Cache.Write           缓存写入
+├── LLM.HealthCheck         LLM 健康检查
+└── LLM.StreamChat          LLM 流式调用（主要耗时来源，包含嵌套子 Span）
+    ├── Eino.Graph.WaterTownReActAgent  Eino ReAct Agent 执行图
+    │   ├── Eino.ChatModel.ChatModel.N  模型调用（N=1,2...）
+    │   │   └── LLM.TimeToFirstToken    首 Token 到达耗时
+    │   └── Eino.ToolNode.Tools         工具调用节点
+    │       └── Eino.Tool.get_weather    具体工具执行
+    ├── LLM.TokenStreaming              Token 流传输（打字机效果）
+    ├── LLM.StatsAndMetrics             统计指标记录与成本计算
+    │   └── LLM.FallbackNonStream       降级非流式调用（可选）
+    ├── LLM.SessionUpdate               会话消息更新
+    └── LLM.CacheWrite                  缓存写入（精确匹配 + 语义索引）
 ```
 
 #### 实现代码
@@ -193,19 +201,25 @@ _, emotionSpan := observability.StartChildSpan(ctx, "Emotion.Detect")
 em := r.emotionDetector.Detect(message)
 observability.EndChildSpan(ctx, emotionSpan)
 
-// 2. 缓存查询
-_, cacheSpan := observability.StartChildSpan(ctx, "Cache.Check")
+// 2. 精确缓存查询
+_, cacheSpan := observability.StartChildSpan(ctx, "Cache.ExactCheck")
 cached, hit := r.optimizer.GetCache(cacheKey)
 observability.EndChildSpan(ctx, cacheSpan)
 
-// 3. 构建上下文
+// 3. 语义缓存查询（包含 Embedding API 调用）
+_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
+cached, hit = r.optimizer.CheckSimilarity(ctx, message, 0.85)
+observability.EndChildSpan(ctx, similaritySpan)
+
+// 4. 构建上下文
 _, contextSpan := observability.StartChildSpan(ctx, "Context.Build")
 messages := r.buildContextMessages(session, message)
 observability.EndChildSpan(ctx, contextSpan)
 
-// 4. LLM 调用
-_, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
-stream, err := r.llmAdapter.StreamChat(ctx, req)
+// 5. LLM 调用（内部包含 Eino 框架回调追踪）
+llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
+stream, err := r.llmAdapter.StreamChat(llmCtx, req)
+// ... 内部包含：Eino ReAct Agent 执行、Token 流传输、统计指标、会话更新、缓存写入
 observability.EndChildSpan(ctx, llmSpan)
 ```
 
@@ -215,10 +229,14 @@ observability.EndChildSpan(ctx, llmSpan)
 {
   "Name": "Agent.HandleChatStream",
   "Attributes": [
-    {"Key": "llm.model", "Value": {"Type": "STRING", "Value": "mimo-v2-5"}},
+    {"Key": "llm.model", "Value": {"Type": "STRING", "Value": "qwen3.5-27b"}},
     {"Key": "llm.input_tokens", "Value": {"Type": "INT64", "Value": 208}},
     {"Key": "llm.output_tokens", "Value": {"Type": "INT64", "Value": 192}},
-    {"Key": "llm.cost", "Value": {"Type": "FLOAT64", "Value": 0.000392}}
+    {"Key": "llm.cost", "Value": {"Type": "FLOAT64", "Value": 0.000392}},
+    {"Key": "cache_hit", "Value": {"Type": "BOOL", "Value": false}}
+  ],
+  "Events": [
+    {"Name": "cache_hit", "Attributes": [{"Key": "type", "Value": {"Type": "STRING", "Value": "similarity"}}]}
   ]
 }
 ```
@@ -227,30 +245,41 @@ observability.EndChildSpan(ctx, llmSpan)
 
 | Span 名称 | 典型耗时 | 说明 |
 |-----------|----------|------|
-| `LLM.StreamChat` | 几秒 ~ 几十秒 | **主要耗时来源**，受模型响应速度影响 |
-| `Stream.Process` | 几百毫秒 | 处理流式数据 |
+| `LLM.StreamChat` | 几秒 ~ 几十秒 | **主要耗时来源**，包含 Eino ReAct Agent 执行、模型调用、工具调用 |
+| `Eino.Graph.WaterTownReActAgent` | 几秒 ~ 几十秒 | Eino 框架执行图，包含模型和工具调用的完整生命周期 |
+| `Eino.ChatModel.ChatModel.N` | 几秒 ~ 十几秒 | 单个模型调用（决策阶段或最终响应阶段） |
+| `LLM.TokenStreaming` | 几百毫秒 ~ 几秒 | Token 流传输，受输出长度和网络影响 |
+| `Cache.SimilarityCheck` | 几十毫秒 ~ 几百毫秒 | 语义缓存查询（包含 Embedding API 调用） |
 | `Context.Build` | 几毫秒 ~ 几十毫秒 | 构建上下文消息（会话历史越多越慢） |
-| `Cache.Check` | 几毫秒 | 查询缓存（包含精确匹配 + 语义匹配） |
+| `Cache.ExactCheck` | 几毫秒 | 精确缓存查询（内存查找） |
 | `Emotion.Detect` | < 1 毫秒 | 情绪检测（本地计算） |
-| `Tools.Register` | < 1 毫秒 | 工具注册 |
 | `LLM.HealthCheck` | < 1 毫秒 | 健康检查 |
-| `Cache.Write` | < 1 毫秒 | 写入缓存 |
+| `LLM.StatsAndMetrics` | < 1 毫秒 | 统计指标计算 |
+| `LLM.SessionUpdate` | < 1 毫秒 | 会话消息更新 |
+| `LLM.CacheWrite` | < 1 毫秒 | 写入缓存 |
 
 #### 性能分析示例
 
 ```
 Agent.HandleChatStream:  10111ms ████████████████████████████████████ 100%
 ├── Emotion.Detect:           2ms ▏  0%
-├── Cache.Check:              5ms ▏  0%
+├── Cache.ExactCheck:         3ms ▏  0%
+├── Cache.SimilarityCheck:   50ms ▏  1%
 ├── Context.Build:           15ms ▏  0%
-├── Tools.Register:           1ms ▏  0%
 ├── LLM.HealthCheck:          3ms ▏  0%
-├── LLM.StreamChat:        9850ms ████████████████████████████████████  97%
-├── Stream.Process:        200ms ▏  2%
-└── Cache.Write:             1ms ▏  0%
+└── LLM.StreamChat:        9850ms ████████████████████████████████████  97%
+    ├── Eino.Graph.WaterTownReActAgent:  9500ms ████████████████████  94%
+    │   ├── Eino.ChatModel.ChatModel.1:  2000ms ████████  20%  (工具决策)
+    │   ├── Eino.ToolNode.Tools:        1500ms ██████  15%    (工具调用)
+    │   │   └── Eino.Tool.get_weather:  1200ms █████  12%
+    │   └── Eino.ChatModel.ChatModel.2:  5500ms ████████████  54%  (最终响应)
+    ├── LLM.TokenStreaming:             200ms ▏  2%
+    ├── LLM.StatsAndMetrics:             10ms ▏  0%
+    ├── LLM.SessionUpdate:                5ms ▏  0%
+    └── LLM.CacheWrite:                  10ms ▏  0%
 ```
 
-> **关键洞察**：LLM 调用占总耗时的 **97%+**，是主要性能瓶颈。如果需要优化，应该从模型选择、网络延迟、缓存命中率等方面入手。
+> **关键洞察**：LLM 调用占总耗时的 **97%+**，其中 Eino ReAct Agent 执行占大部分。如果需要优化，应该从模型选择、网络延迟、缓存命中率等方面入手。
 
 ### 4.4 链路关联
 
@@ -585,7 +614,7 @@ sum by (cache_type) (rate(cache_hits_total[5m]))
 | `internal/cost/optimizer.go` | 缓存系统 + 成本优化 |
 | `internal/cost/layered_cache.go` | 多层缓存实现（精确匹配 + 语义匹配） |
 | `internal/cost/embedding.go` | Embedding API 客户端（支持本地和远程） |
-| `internal/llm/eino_handler.go` | Eino Callbacks Handler，实现模型调用和工具调用的 trace/audit 日志 |
+| `internal/llm/eino_handler.go` | Eino Callbacks Handler，实现模型调用、工具调用、Graph 执行等组件的 trace/audit 日志 |
 
 ---
 
