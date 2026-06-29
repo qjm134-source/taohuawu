@@ -35,7 +35,7 @@ func NewOpenMeteoService(cfg OpenMeteoConfig, logger logging.Logger) Service {
 
 func (s *openMeteoService) GetWeather(ctx context.Context, city string) (*WeatherData, error) {
 	startTime := time.Now()
-	s.logger.Infof("[Weather] [OpenMeteo] Start: city=%s", city)
+	s.logger.Debugf("[Weather] [OpenMeteo] Start: city=%s", city)
 
 	lat, lon, err := s.geocode(ctx, city)
 	if err != nil {
@@ -50,7 +50,7 @@ func (s *openMeteoService) GetWeather(ctx context.Context, city string) (*Weathe
 	}
 
 	latency := time.Since(startTime).Milliseconds()
-	s.logger.Infof("[Weather] [OpenMeteo] Complete: city=%s, temp=%.1f°C, weather=%s, latency=%dms", city, weather.TemperatureC, weather.Weather, latency)
+	s.logger.Debugf("[Weather] [OpenMeteo] Complete: city=%s, temp=%.1f°C, weather=%s, latency=%dms", city, weather.TemperatureC, weather.Weather, latency)
 
 	return weather, nil
 }
@@ -60,11 +60,11 @@ func (s *openMeteoService) geocode(ctx context.Context, city string) (float64, f
 
 	var lastErr error
 	for attempt := 1; attempt <= s.maxRetries; attempt++ {
-		s.logger.Infof("[Weather] [OpenMeteo] [Geocode] Attempt %d/%d: city=%s", attempt, s.maxRetries, city)
+		s.logger.Debugf("[Weather] [OpenMeteo] [Geocode] Attempt %d/%d: city=%s", attempt, s.maxRetries, city)
 
 		lat, lon, err := s.doGeocode(ctx, u)
 		if err == nil {
-			s.logger.Infof("[Weather] [OpenMeteo] [Geocode] Success: city=%s, lat=%.4f, lon=%.4f", city, lat, lon)
+			s.logger.Debugf("[Weather] [OpenMeteo] [Geocode] Success: city=%s, lat=%.4f, lon=%.4f", city, lat, lon)
 			return lat, lon, nil
 		}
 
@@ -124,11 +124,11 @@ func (s *openMeteoService) queryWeather(ctx context.Context, lat, lon float64) (
 
 	var lastErr error
 	for attempt := 1; attempt <= s.maxRetries; attempt++ {
-		s.logger.Infof("[Weather] [OpenMeteo] [Query] Attempt %d/%d: lat=%.4f, lon=%.4f", attempt, s.maxRetries, lat, lon)
+		s.logger.Debugf("[Weather] [OpenMeteo] [Query] Attempt %d/%d: lat=%.4f, lon=%.4f", attempt, s.maxRetries, lat, lon)
 
 		weather, err := s.doQueryWeather(ctx, u)
 		if err == nil {
-			s.logger.Infof("[Weather] [OpenMeteo] [Query] Success: lat=%.4f, lon=%.4f, temp=%.1f°C, weather=%s", lat, lon, weather.TemperatureC, weather.Weather)
+			s.logger.Debugf("[Weather] [OpenMeteo] [Query] Success: lat=%.4f, lon=%.4f, temp=%.1f°C, weather=%s", lat, lon, weather.TemperatureC, weather.Weather)
 			return weather, nil
 		}
 

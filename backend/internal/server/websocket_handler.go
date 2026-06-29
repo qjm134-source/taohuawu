@@ -67,8 +67,6 @@ func (h *WebSocketHandler) Handle(c *gin.Context) {
 
 // handleMessage 处理消息
 func (h *WebSocketHandler) handleMessage(client *websocket.Client, message []byte) {
-	h.logger.Info("Received raw message", "length", len(message), "preview", string(message[:min(len(message), 200)]))
-
 	// 解析消息
 	var msg websocket.Message
 	if err := json.Unmarshal(message, &msg); err != nil {
@@ -79,17 +77,12 @@ func (h *WebSocketHandler) handleMessage(client *websocket.Client, message []byt
 	// 记录接收消息指标
 	observability.WebSocketMessagesTotal.WithLabelValues(string(msg.Type), "in").Inc()
 
-	h.logger.Info("Parsed message", "type", msg.Type, "requestId", msg.RequestID, "tenantId", msg.TenantID)
-
 	switch msg.Type {
 	case websocket.MessageTypeConnection:
-		h.logger.Info("Routing message to connection handler", "type", msg.Type)
 		h.handleConnection(client, &msg)
 	case websocket.MessageTypeChatMessage:
-		h.logger.Info("Routing message to chat handler", "type", msg.Type)
 		h.handleChatMessage(client, &msg)
 	case websocket.MessageTypePing:
-		h.logger.Info("Routing message to ping handler", "type", msg.Type)
 		h.handlePing(client, &msg)
 	default:
 		h.logger.Warn("Unknown message type", "type", msg.Type)
@@ -98,15 +91,11 @@ func (h *WebSocketHandler) handleMessage(client *websocket.Client, message []byt
 
 // handleConnection 处理连接消息
 func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *websocket.Message) {
-	h.logger.Info("Handling connection", "requestId", msg.RequestID, "tenantId", msg.TenantID)
-
 	var payload websocket.ConnectionPayload
 	if err := msg.ParsePayload(&payload); err != nil {
 		h.logger.Error("Failed to parse connection payload", "error", err)
 		return
 	}
-
-	h.logger.Info("Connection payload parsed", "playerId", payload.PlayerID, "deviceId", payload.DeviceID, "nickname", payload.Nickname)
 
 	// 设置客户端信息
 	client.TenantID = msg.TenantID
@@ -128,7 +117,6 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 	// 查找或创建玩家
 	player, err := h.playerRepo.GetByDeviceID(payload.DeviceID, msg.TenantID)
 	if err != nil {
-		h.logger.Info("Player not found, creating new player", "deviceId", payload.DeviceID)
 		// 创建新玩家
 		player = &database.Player{
 			ID:             uuid.New().String(),
@@ -145,7 +133,6 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 		}
 		h.logger.Info("Player created", "playerId", player.ID)
 	} else {
-		h.logger.Info("Player found", "playerId", player.ID, "nickname", player.Nickname)
 		// 更新最后访问时间
 		_ = h.playerRepo.UpdateLastVisit(player.ID)
 	}
@@ -160,8 +147,6 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 	session := h.runtime.GetSession(player.ID, msg.TenantID)
 	session.Nickname = payload.Nickname
 
-	h.logger.Info("Getting welcome message", "playerId", player.ID)
-
 	// 处理欢迎
 	reply, err := h.runtime.HandleWelcome(context.Background(), session)
 	if err != nil {
@@ -169,8 +154,6 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 		// 即使失败也发送欢迎消息
 		reply = "欢迎来到江南水乡！我是导游小荷，很高兴为你服务。"
 	}
-
-	h.logger.Info("Welcome message generated", "reply_length", len(reply))
 
 	// 标记已访问
 	h.runtime.MarkVisited(session.ID)
@@ -193,27 +176,19 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 		return
 	}
 
-	h.logger.Info("Sending welcome message", "playerId", player.ID, "isFirstVisit", session.IsFirstVisit)
-
 	if err := client.SendMessage(welcomeMsg); err != nil {
 		h.logger.Error("Failed to send welcome message", "error", err)
 		return
 	}
-
-	h.logger.Info("Welcome message sent successfully")
 }
 
 // handleChatMessage 处理聊天消息
 func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *websocket.Message) {
-	h.logger.Info("Handling chat message", "requestId", msg.RequestID)
-
 	var payload websocket.ChatMessagePayload
 	if err := msg.ParsePayload(&payload); err != nil {
 		h.logger.Error("Failed to parse chat payload", "error", err)
 		return
 	}
-
-	h.logger.Info("Chat payload parsed", "playerId", payload.PlayerID, "message", payload.Message)
 
 	// 查找玩家
 	player, err := h.playerRepo.GetByID(payload.PlayerID)
@@ -223,8 +198,6 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		// 尝试用 deviceId 查找
 		player, err = h.playerRepo.GetByDeviceID(client.ID, msg.TenantID)
 		if err != nil {
-			h.logger.Warn("Player not found by deviceId, creating new player", "deviceId", client.ID)
-
 			// 创建新玩家
 			player = &database.Player{
 				ID:             uuid.New().String(),
@@ -250,8 +223,6 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 				return
 			}
 
-			h.logger.Info("New player created", "playerId", player.ID)
-
 			// 发送欢迎消息给新玩家
 			welcomeMsg, _ := websocket.NewMessage(
 				websocket.MessageTypeWelcome,
@@ -269,14 +240,8 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		}
 	}
 
-	h.logger.Info("Player found", "player_id", player.ID, "nickname", player.Nickname)
-
 	// 获取会话
 	session := h.runtime.GetSession(player.ID, msg.TenantID)
-	h.logger.Info("Session retrieved", "sessionId", session.ID)
-
-	// 处理聊天（使用流式响应）
-	h.logger.Info("Calling LLM for chat (streaming)", "player_id", player.ID, "message", payload.Message)
 	contentChan, statsChan, err := h.runtime.HandleChatStream(context.Background(), session, payload.Message)
 	if err != nil {
 		h.logger.Error("Failed to handle chat stream", "error", err, "player_id", player.ID)
@@ -316,11 +281,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 	}
 
 	// 等待统计信息
-	h.logger.Info("Waiting for stats from statsChan")
 	stats := <-statsChan
-	h.logger.Info("Received stats from statsChan", "model", stats.Model, "latencyMs", stats.LatencyMs, "inputTokens", stats.InputTokens, "outputTokens", stats.OutputTokens, "totalTokens", stats.TotalTokens, "cost", stats.Cost)
-	emotion := stats.Model // 临时使用，实际应该从上下文获取
-
 	h.logger.Info("Chat stream completed", "reply_length", fullReply.Len(), "model", stats.Model, "tokens", stats.TotalTokens)
 
 	// 增加对话计数
@@ -334,7 +295,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		SessionID:   session.ID,
 		UserMessage: payload.Message,
 		AIMessage:   fullReply.String(),
-		Emotion:     emotion,
+		Emotion:     stats.Model, // 临时使用，实际应该从上下文获取
 		ToolsUsed:   database.JSON{Data: stats.ToolsUsed},
 		LLMModel:    stats.Model,
 		LLMTokens:   stats.TotalTokens,
@@ -344,8 +305,6 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 	}
 	if err := h.convRepo.Create(conv); err != nil {
 		h.logger.Error("Failed to create conversation", "error", err)
-	} else {
-		h.logger.Info("Conversation saved", "convId", conv.ID)
 	}
 
 	// 记录审计日志
@@ -373,13 +332,8 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		h.logger.Info("Preparing to save audit log", "auditId", auditLog.ID, "tenantId", auditLog.TenantID, "playerId", auditLog.PlayerID)
 		if err := h.auditRepo.Create(auditLog); err != nil {
 			h.logger.Error("Failed to create audit log", "error", err, "auditId", auditLog.ID)
-		} else {
-			h.logger.Info("Audit log saved successfully", "auditId", auditLog.ID, "tenantId", auditLog.TenantID)
 		}
 	}
-
-	// 发送最终消息（包含统计信息）
-	h.logger.Info("Sending final message with stats", "model", stats.Model, "inputTokens", stats.InputTokens, "outputTokens", stats.OutputTokens, "totalTokens", stats.TotalTokens, "cost", stats.Cost)
 
 	finalMsg, _ := websocket.NewMessage(
 		websocket.MessageTypeNPCReplyChunk,
@@ -389,7 +343,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 			GuideName:    agent.GuideName,
 			Chunk:        "",
 			IsFinal:      true,
-			Emotion:      emotion,
+			Emotion:      stats.Model, // 临时使用
 			Model:        stats.Model,
 			InputTokens:  stats.InputTokens,
 			OutputTokens: stats.OutputTokens,

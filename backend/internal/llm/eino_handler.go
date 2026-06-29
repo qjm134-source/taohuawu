@@ -46,30 +46,22 @@ func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.Run
 		purpose = "tool_execution"
 	}
 
-	ctx, _ = observability.StartSpanWithStartTime(ctx, spanName,
-		trace.WithAttributes(
-			attribute.String("component", string(info.Component)),
-			attribute.String("name", info.Name),
-			attribute.String("type", info.Type),
-			attribute.Int("call_number", callCounter),
-			attribute.String("purpose", purpose),
-		),
-	)
+	ctx, _ = observability.StartChildSpan(ctx, spanName)
+	if purpose != "" {
+		span := trace.SpanFromContext(ctx)
+		if span != nil && span.IsRecording() {
+			span.SetAttributes(
+				attribute.String("component", string(info.Component)),
+				attribute.String("name", info.Name),
+				attribute.String("type", info.Type),
+				attribute.Int("call_number", callCounter),
+				attribute.String("purpose", purpose),
+			)
+		}
+	}
 
-	h.logger.Info("[Trace] OnStart",
-		"name", info.Name,
-		"type", info.Type,
-		"component", info.Component,
-	)
-
-	switch info.Component {
-	case eino_components.ComponentOfChatModel:
-		h.logger.Info("[Audit] Model call started",
-			"model_name", info.Name,
-			"type", info.Type,
-			"input_preview", h.previewInput(input),
-		)
-	case eino_components.ComponentOfTool:
+	// 只记录工具调用的审计日志
+	if info.Component == eino_components.ComponentOfTool {
 		h.logger.Info("[Audit] Tool call started",
 			"tool_name", info.Name,
 			"input", h.formatToolInput(input),
@@ -91,26 +83,11 @@ func (h *einoAgentHandler) OnEnd(ctx context.Context, info *eino_callbacks.RunIn
 		span.End()
 	}
 
-	h.logger.Info("[Trace] OnEnd",
-		"name", info.Name,
-		"type", info.Type,
-		"component", info.Component,
-	)
-
-	switch info.Component {
-	case eino_components.ComponentOfChatModel:
-		h.logger.Info("[Audit] Model call completed",
-			"model_name", info.Name,
-			"output_preview", h.previewOutput(output),
-		)
-	case eino_components.ComponentOfTool:
+	// 只记录工具调用的审计日志
+	if info.Component == eino_components.ComponentOfTool {
 		h.logger.Info("[Audit] Tool call completed",
 			"tool_name", info.Name,
 			"output", h.formatToolOutput(output),
-		)
-	case eino_compose.ComponentOfGraph:
-		h.logger.Info("[Audit] Graph execution completed",
-			"graph_name", info.Name,
 		)
 	}
 
@@ -124,13 +101,7 @@ func (h *einoAgentHandler) OnError(ctx context.Context, info *eino_callbacks.Run
 		span.End()
 	}
 
-	h.logger.Error("[Trace] OnError",
-		"name", info.Name,
-		"type", info.Type,
-		"component", info.Component,
-		"error", err.Error(),
-	)
-
+	// 记录错误日志
 	h.logger.Error("[Audit] Component error",
 		"component", info.Component,
 		"name", info.Name,
@@ -162,24 +133,26 @@ func (h *einoAgentHandler) OnStartWithStreamInput(ctx context.Context, info *ein
 		purpose = "tool_execution"
 	}
 
-	ctx, _ = observability.StartSpan(ctx, spanName,
-		attribute.String("component", string(info.Component)),
-		attribute.String("name", info.Name),
-		attribute.String("type", info.Type),
-		attribute.Int("call_number", callCounter),
-		attribute.String("purpose", purpose),
-	)
+	ctx, _ = observability.StartChildSpan(ctx, spanName)
+	if purpose != "" {
+		span := trace.SpanFromContext(ctx)
+		if span != nil && span.IsRecording() {
+			span.SetAttributes(
+				attribute.String("component", string(info.Component)),
+				attribute.String("name", info.Name),
+				attribute.String("type", info.Type),
+				attribute.Int("call_number", callCounter),
+				attribute.String("purpose", purpose),
+			)
+		}
+	}
 
-	h.logger.Info("[Trace] Stream start",
-		"name", info.Name,
-		"type", info.Type,
-		"component", info.Component,
-	)
-
-	h.logger.Info("[Audit] Stream call started",
-		"component", info.Component,
-		"name", info.Name,
-	)
+	// 只记录工具调用的审计日志
+	if info.Component == eino_components.ComponentOfTool {
+		h.logger.Info("[Audit] Tool stream started",
+			"tool_name", info.Name,
+		)
+	}
 
 	return ctx
 }
@@ -190,16 +163,12 @@ func (h *einoAgentHandler) OnEndWithStreamOutput(ctx context.Context, info *eino
 		span.End()
 	}
 
-	h.logger.Info("[Trace] Stream end",
-		"name", info.Name,
-		"type", info.Type,
-		"component", info.Component,
-	)
-
-	h.logger.Info("[Audit] Stream call completed",
-		"component", info.Component,
-		"name", info.Name,
-	)
+	// 只记录工具调用的审计日志
+	if info.Component == eino_components.ComponentOfTool {
+		h.logger.Info("[Audit] Tool stream completed",
+			"tool_name", info.Name,
+		)
+	}
 
 	return ctx
 }

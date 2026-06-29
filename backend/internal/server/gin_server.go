@@ -219,10 +219,16 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 
 		c.Next()
 
+		// 跳过 health 和 metrics 路径的日志记录（太频繁）
+		path := c.Request.URL.Path
+		if path == "/health" || path == "/metrics" {
+			return
+		}
+
 		duration := time.Since(start)
 		s.logger.Info("HTTP request",
 			"method", c.Request.Method,
-			"path", c.Request.URL.Path,
+			"path", path,
 			"status", c.Writer.Status(),
 			"duration", duration,
 		)

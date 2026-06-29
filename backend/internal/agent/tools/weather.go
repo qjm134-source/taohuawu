@@ -36,7 +36,7 @@ type getWeatherToolImpl struct {
 func (t *getWeatherToolImpl) invoke(ctx context.Context, input GetWeatherInput) (GetWeatherOutput, error) {
 	startTime := time.Now()
 	city := t.normalizeCity(input.City)
-	t.logger.Infof("[Weather] [Invoke] Start: city=%s", city)
+	t.logger.Debugf("[Weather] [Invoke] Start: city=%s", city)
 
 	weatherData, err := t.weatherService.GetWeather(ctx, city)
 	if err != nil {
@@ -45,7 +45,7 @@ func (t *getWeatherToolImpl) invoke(ctx context.Context, input GetWeatherInput) 
 	}
 
 	latency := time.Since(startTime).Milliseconds()
-	t.logger.Infof("[Weather] [Invoke] Complete: city=%s, temp=%.1f°C, weather=%s, latency=%dms", city, weatherData.TemperatureC, weatherData.Weather, latency)
+	t.logger.Debugf("[Weather] [Invoke] Complete: city=%s, temp=%.1f°C, weather=%s, latency=%dms", city, weatherData.TemperatureC, weatherData.Weather, latency)
 
 	return GetWeatherOutput{
 		City:         weatherData.City,

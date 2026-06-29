@@ -153,14 +153,11 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 		{Role: eino_schema.User, Content: prompt},
 	}
 
-	r.logger.Info("[HandleWelcome] LLM health check", "healthy", r.llmAdapter.IsHealthy())
-
 	var msg *eino_schema.Message
 	var usage *llm.ChatUsage
 	var err error
 
 	if r.llmAdapter.IsHealthy() {
-		r.logger.Info("[HandleWelcome] Calling primary LLM")
 		llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
 		msg, usage, err = r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 		llmCancel()
@@ -171,7 +168,7 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 			msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 		}
 	} else {
-		r.logger.Info("[HandleWelcome] Primary LLM unhealthy, using fallback")
+		r.logger.Warn("[HandleWelcome] Primary LLM unhealthy, using fallback")
 		msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 	}
 
@@ -241,12 +238,13 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	// 检测情绪
 	em := r.emotionDetector.Detect(message)
 	emotionStr := string(em)
-	r.logger.Info("[HandleChat] Emotion detected", "emotion", emotionStr)
 
-	// 检查缓存（使用 session ID 隔离，确保每个会话有独立缓存）
+	// 检查精确缓存
 	cacheKey := session.ID + "_" + message
+	_, cacheSpan := observability.StartChildSpan(ctx, "Cache.ExactCheck")
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
-		r.logger.Info("[HandleChat] Exact cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		observability.EndChildSpan(ctx, cacheSpan)
+		r.logger.Info("[HandleChat] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		session.AddMessage("assistant", cached, emotionStr, nil)
 		stats.CacheHit = true
@@ -254,9 +252,12 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		langfuseTrace.End()
 		return cached, emotionStr, stats, nil
 	}
+	observability.EndChildSpan(ctx, cacheSpan)
 
 	// 检查语义缓存（相似问题匹配）
+	_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
 	if cached, hit := r.optimizer.CheckSimilarity(ctx, message, 0.85); hit {
+		observability.EndChildSpan(ctx, similaritySpan)
 		r.logger.Info("[HandleChat] Semantic cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		session.AddMessage("assistant", cached, emotionStr, nil)
@@ -265,20 +266,17 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		langfuseTrace.End()
 		return cached, emotionStr, stats, nil
 	}
+	observability.EndChildSpan(ctx, similaritySpan)
 
 	// 构建上下文消息（含摘要压缩）
 	messages := r.buildContextMessages(session, message)
-
-	r.logger.Info("[HandleChat] Building LLM request", "message_count", len(messages))
 
 	var msg *eino_schema.Message
 	var usage *llm.ChatUsage
 	var err error
 	startTime := time.Now()
 
-	r.logger.Info("[HandleChat] Checking LLM health", "healthy", r.llmAdapter.IsHealthy())
 	if r.llmAdapter.IsHealthy() {
-		r.logger.Info("[HandleChat] Calling primary LLM")
 		llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
 		msg, usage, err = r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		llmCancel()
@@ -340,6 +338,8 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 
 // HandleChatStream 处理聊天（流式）
 func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, message string) (<-chan string, <-chan *LLMStats, error) {
+	startTime := time.Now()
+
 	r.logger.Info("[HandleChatStream] Start", "sessionId", session.ID, "message", message)
 
 	ctx, span := observability.StartSpanWithStartTime(ctx, "Agent.HandleChatStream",
@@ -359,52 +359,72 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	emotionStr := string(em)
 	observability.EndChildSpan(ctx, emotionSpan)
 
-	// 2. 缓存查询子Span
+	// 2. 精确缓存查询子Span
 	cacheKey := session.ID + "_" + message
-	_, cacheSpan := observability.StartChildSpan(ctx, "Cache.Check")
+	_, cacheSpan := observability.StartChildSpan(ctx, "Cache.ExactCheck")
 	cached, hit := r.optimizer.GetCache(cacheKey)
 	observability.EndChildSpan(ctx, cacheSpan)
 
 	if hit && cached != "" {
 		r.logger.Info("[HandleChatStream] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
+		observability.AddEvent(ctx, "cache_hit", attribute.String("type", "exact"))
 		observability.EndSpanWithDuration(ctx, span)
 		langfuseTrace.End()
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+
 		contentChan := make(chan string, 1)
-		statsChan := make(chan *LLMStats, 1)
 		contentChan <- cached
 		close(contentChan)
+
+		statsChan := make(chan *LLMStats, 1)
 		statsChan <- &LLMStats{CacheHit: true}
 		close(statsChan)
+
 		return contentChan, statsChan, nil
 	}
 
-	// 3. 构建上下文消息子Span
+	// 3. 语义缓存查询子Span
+	_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
+	cached, hit = r.optimizer.CheckSimilarity(ctx, message, 0.85)
+	observability.EndChildSpan(ctx, similaritySpan)
+
+	if hit && cached != "" {
+		r.logger.Info("[HandleChatStream] Semantic cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		span.SetAttributes(attribute.Bool("cache_hit", true))
+		observability.AddEvent(ctx, "cache_hit", attribute.String("type", "similarity"))
+		observability.EndSpanWithDuration(ctx, span)
+		langfuseTrace.End()
+		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+
+		contentChan := make(chan string, 1)
+		contentChan <- cached
+		close(contentChan)
+
+		statsChan := make(chan *LLMStats, 1)
+		statsChan <- &LLMStats{CacheHit: true}
+		close(statsChan)
+
+		return contentChan, statsChan, nil
+	}
+
+	// 4. 构建上下文消息子Span
 	_, contextSpan := observability.StartChildSpan(ctx, "Context.Build")
 	messages := r.buildContextMessages(session, message)
 	observability.EndChildSpan(ctx, contextSpan)
 
-	r.logger.Info("[HandleChatStream] Building LLM request", "message_count", len(messages))
-
-	startTime := time.Now()
-
-	var stream llm.Stream
-	var err error
-
+	// 5. LLM 健康检查子Span
 	_, healthSpan := observability.StartChildSpan(ctx, "LLM.HealthCheck")
 	isHealthy := r.llmAdapter.IsHealthy()
 	observability.EndChildSpan(ctx, healthSpan)
 
-	r.logger.Info("[HandleChatStream] Checking LLM health", "healthy", isHealthy)
-
-	llmStartTime := time.Now()
+	var stream llm.Stream
+	var err error
 
 	// 创建 LLM.StreamChat span（必须在 StreamChat 调用之前创建）
-	llmCtx, llmSpan := observability.StartChildSpanAt(ctx, "LLM.StreamChat", llmStartTime)
+	llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
 
 	if isHealthy {
-		r.logger.Info("[HandleChatStream] Calling primary LLM stream")
 		stream, err = r.llmAdapter.StreamChat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 
 		if err != nil {
@@ -427,12 +447,6 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
 	}
 
-	streamReadyTime := time.Now()
-	// 结束连接建立 span，记录连接耗时
-	_, connSpan := observability.StartChildSpanAt(llmCtx, "LLM.Connection", llmStartTime)
-	connSpan.SetAttributes(attribute.Int64("connection_ms", streamReadyTime.Sub(llmStartTime).Milliseconds()))
-	connSpan.End()
-
 	contentChan := make(chan string, 100)
 	statsChan := make(chan *LLMStats, 1)
 
@@ -446,58 +460,58 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			CacheHit: false,
 		}
 
-		// 创建等待首 token 的子 span
-		_, waitSpan := observability.StartChildSpanAt(llmCtx, "LLM.WaitForFirstToken", streamReadyTime)
-
 		chunkCount := 0
 		var finishReason string
 		var ttftMs int64 = 0
 		var streamSpan trace.Span
 		for {
 			chunk, err := stream.Recv()
+
+			// 流正常结束，退出循环
 			if errors.Is(err, io.EOF) {
 				break
 			}
+
+			// 流读取错误，记录错误并退出循环
 			if err != nil {
 				r.logger.Error("[HandleChatStream] Stream recv error", "error", err)
-				waitSpan.End()
 				_, errorSpan := observability.StartChildSpan(llmCtx, "LLM.StreamError")
 				errorSpan.RecordError(err)
 				errorSpan.End()
 				break
 			}
+
+			// 空 chunk，跳过继续读取
 			if chunk == nil {
 				continue
 			}
 
-			// 收到第一个 chunk，结束等待 span
+			// 收到第一个 chunk，结束等待 span 并记录耗时
 			if chunkCount == 0 {
-				ttftMs = time.Since(streamReadyTime).Milliseconds()
-				waitSpan.SetAttributes(attribute.Int64("ttft_ms", ttftMs))
-				waitSpan.End()
-
 				// 创建 token 流传输 span
 				_, streamSpan = observability.StartChildSpan(llmCtx, "LLM.TokenStreaming")
 			}
 			chunkCount++
-			r.logger.Info("[HandleChatStream] Received chunk", "index", chunkCount, "content_len", len(chunk.Content), "model", chunk.Model, "finish_reason", chunk.FinishReason)
 
+			// chunk 有内容，发送给前端并累加到完整回复
 			if chunk.Content != "" {
 				contentChan <- chunk.Content
 				fullReply.WriteString(chunk.Content)
 			}
 
+			// 记录模型名称（只记录一次）
 			if chunk.Model != "" && stats.Model == "" {
 				stats.Model = chunk.Model
-				r.logger.Info("[HandleChatStream] Model detected", "model", stats.Model)
 			}
 
+			// 记录 token 使用情况（usage 信息可能在最后一个 chunk 返回）
 			if chunk.Usage.TotalTokens > 0 {
 				stats.InputTokens = chunk.Usage.PromptTokens
 				stats.OutputTokens = chunk.Usage.CompletionTokens
 				stats.TotalTokens = chunk.Usage.TotalTokens
 			}
 
+			// 收到结束原因，退出循环（流式结束）
 			if chunk.FinishReason != "" {
 				finishReason = chunk.FinishReason
 				break
@@ -507,8 +521,8 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		// 结束 token 流传输 span
 		observability.EndChildSpan(llmCtx, streamSpan)
 
-		// 创建后处理 span
-		_, postSpan := observability.StartChildSpan(llmCtx, "LLM.PostProcessing")
+		// 创建统计指标记录 span
+		_, postSpan := observability.StartChildSpan(llmCtx, "LLM.StatsAndMetrics")
 
 		if fullReply.Len() == 0 && !strings.Contains(finishReason, "tool_calls") {
 			r.logger.Warn("[HandleChatStream] Stream returned empty data, falling back to non-streaming")

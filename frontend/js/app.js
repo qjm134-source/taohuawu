@@ -205,14 +205,17 @@
             // 累加片段
             streamingReply += chunk;
 
-            // 更新气泡显示当前累积的回复
-            UI.updateBubble(streamingReply);
+            // 更新气泡显示当前累积的回复（使用打字机效果）
+            UI.updateBubble(streamingReply, false, true);
 
             // 如果收到任何回复，清除超时计时器
             clearMessageTimeout();
 
             // 如果是最后一个片段
             if (isFinal) {
+                // 完成打字机效果
+                UI.completeStreaming();
+
                 // 更新调试面板
                 console.log('[App] Final payload:', JSON.stringify(payload));
                 console.log('[App] Final payload model:', payload.model);

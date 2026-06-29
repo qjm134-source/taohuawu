@@ -9,6 +9,9 @@ const UI = (() => {
     // 对话历史
     let chatHistory = [];
 
+    // 打字机实例
+    let typewriter = null;
+
     /**
      * 初始化 UI，缓存所有 DOM 元素
      */
@@ -35,6 +38,14 @@ const UI = (() => {
 
         // 加载本地历史
         loadHistory();
+
+        // 初始化打字机实例
+        if (elements.bubbleContent) {
+            typewriter = Typewriter.create(elements.bubbleContent, null, {
+                speed: 80,
+                startDelay: 0,
+            });
+        }
     }
 
     /**
@@ -76,8 +87,9 @@ const UI = (() => {
      * 更新导游气泡
      * @param {string} message - 气泡内容
      * @param {boolean} isThinking - 是否为"思考中"状态
+     * @param {boolean} append - 是否追加模式（流式），默认 false
      */
-    function updateBubble(message, isThinking = false) {
+    function updateBubble(message, isThinking = false, append = false) {
         const bubble = elements.speechBubble;
         const content = elements.bubbleContent;
         if (!bubble || !content) return;
@@ -86,12 +98,27 @@ const UI = (() => {
             content.innerHTML = '<span class="bubble-thinking">小荷正在思考...</span>';
             bubble.classList.add('visible');
         } else {
-            content.textContent = message;
-            // 触发气泡动画：先移除再添加
             bubble.classList.remove('visible');
-            // 强制回流
             void bubble.offsetWidth;
             bubble.classList.add('visible');
+
+            if (append && typewriter) {
+                typewriter.start(message, true);
+            } else {
+                if (typewriter) {
+                    typewriter.stop();
+                }
+                content.textContent = message;
+            }
+        }
+    }
+
+    /**
+     * 完成流式显示（停止打字机，显示完整内容）
+     */
+    function completeStreaming() {
+        if (typewriter) {
+            typewriter.skip();
         }
     }
 
@@ -357,6 +384,7 @@ const UI = (() => {
         showWelcome,
         updateBubble,
         hideBubble,
+        completeStreaming,
         getInputAndClear,
         setInputEnabled,
         focusInput,
