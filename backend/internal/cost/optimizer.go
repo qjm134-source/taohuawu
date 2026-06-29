@@ -104,9 +104,21 @@ func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embedding
 	}
 }
 
-// GetCache 获取缓存（仅精确匹配）
+// GetCache 获取缓存（包含语义匹配）
 func (o *Optimizer) GetCache(question string) (string, bool) {
-	return o.cache.Get(context.Background(), question, "")
+	// 先尝试精确匹配
+	if answer, ok := o.cache.Get(context.Background(), question, ""); ok {
+		return answer, true
+	}
+
+	// 如果有 embedding API，尝试语义匹配
+	if o.embeddingAPI != nil {
+		if answer, ok, _ := o.cache.GetWithSemantic(context.Background(), question, ""); ok {
+			return answer, true
+		}
+	}
+
+	return "", false
 }
 
 // GetCacheWithModel 获取指定模型的缓存
