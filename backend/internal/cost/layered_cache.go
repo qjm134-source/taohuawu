@@ -39,7 +39,7 @@ func NewLayeredCache(config CacheConfig, embeddingAPI EmbeddingAPI, logger loggi
 	return c
 }
 
-// Get 获取缓存（先精确匹配，再语义匹配）
+// Get 获取缓存（仅精确匹配）
 func (c *LayeredCache) Get(ctx context.Context, question string, model string) (string, bool) {
 	// 第一层：精确匹配
 	if answer, ok := c.getExact(question, model); ok {
@@ -53,13 +53,6 @@ func (c *LayeredCache) Get(ctx context.Context, question string, model string) (
 
 // GetWithSemantic 获取缓存（包含语义匹配）
 func (c *LayeredCache) GetWithSemantic(ctx context.Context, question string, model string) (string, bool, CacheType) {
-	// 第一层：精确匹配
-	if answer, ok := c.getExact(question, model); ok {
-		c.stats.Hits++
-		return answer, true, CacheTypeExact
-	}
-
-	// 第二层：语义匹配（如果启用）
 	if c.embeddingAPI != nil {
 		if answer, ok := c.getSimilar(ctx, question, c.config.SimilarityThreshold); ok {
 			c.stats.Hits++
