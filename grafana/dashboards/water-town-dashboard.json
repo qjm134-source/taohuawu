@@ -84,7 +84,7 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(cost_total)",
+          "expr": "sum(rate(cost_total[5m])) * 3600",
           "interval": "",
           "legendFormat": "Cost",
           "refId": "A"
@@ -297,7 +297,7 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(llm_requests_total{status=\"success\"}) / sum(llm_requests_total) * 100 or vector(0)",
+          "expr": "sum(rate(llm_requests_total{status=\"success\"}[5m])) / sum(rate(llm_requests_total[5m])) * 100",
           "interval": "",
           "legendFormat": "Success Rate",
           "refId": "A"
