@@ -48,10 +48,6 @@
 
 ## 2. Prometheus 指标清单
 
-以下是使用 Grafana 展示的指标大盘效果：
-
-![Grafana 仪表盘](images/grafana.png)
-
 启动服务后，通过 `GET /metrics` 获取所有指标（需启用 `prometheus: true`）。
 
 ### 2.1 HTTP 层指标（中间件自动采集）
@@ -93,6 +89,10 @@
 | `cache_hits_total` | Counter | `cache_type` | 缓存命中次数（精确匹配/语义匹配） |
 | `cache_misses_total` | Counter | `tenant_id` | 缓存未命中次数 |
 | `cache_hit_ratio` | Gauge | `tenant_id` | 缓存命中率 |
+
+以下是使用 Grafana 展示的指标大盘效果：
+
+![Grafana 仪表盘](images/grafana.png)
 
 ---
 
