@@ -282,7 +282,7 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	r.recordCacheMiss()
 
 	// 构建上下文消息（含摘要压缩）
-	messages := r.buildContextMessages(session, message)
+	messages := r.buildContextMessages(session, message, emotionStr)
 
 	var msg *eino_schema.Message
 	var usage *llm.ChatUsage
@@ -372,7 +372,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	emotionStr := string(em)
 	observability.EndChildSpan(ctx, emotionSpan)
 
-	// 2. 精确缓存查询子Span
+	// 2. 缓存查询子Span
 	cacheKey := session.ID + "_" + message
 	_, cacheSpan := observability.StartChildSpan(ctx, "Cache.Check")
 	cached, hit := r.optimizer.GetCache(cacheKey)
@@ -404,7 +404,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 	// 3. 构建上下文消息子Span
 	_, contextSpan := observability.StartChildSpan(ctx, "Context.Build")
-	messages := r.buildContextMessages(session, message)
+	messages := r.buildContextMessages(session, message, emotionStr)
 	observability.EndChildSpan(ctx, contextSpan)
 
 	// 4. LLM 健康检查子Span
@@ -650,13 +650,13 @@ func (r *Runtime) handleNonStreamChat(ctx context.Context, messages []*eino_sche
 // buildContextMessages 构建 LLM 请求的消息上下文。
 // 优先使用 LLM 摘要替代硬截断：当历史消息预估 Token 数超过阈值时，
 // 将早期消息压缩为一段摘要文本，保留最近的 N 条原始消息。
-func (r *Runtime) buildContextMessages(session *Session, currentMessage string) []*eino_schema.Message {
+func (r *Runtime) buildContextMessages(session *Session, currentMessage string, emotion string) []*eino_schema.Message {
 	allMessages := session.GetMessages(0)
 
 	if len(allMessages) == 0 {
 		return []*eino_schema.Message{
 			{Role: eino_schema.System, Content: SystemPrompt},
-			{Role: eino_schema.User, Content: currentMessage},
+			{Role: eino_schema.User, Content: fmt.Sprintf("[情绪:%s] %s", emotion, currentMessage)},
 		}
 	}
 
@@ -695,7 +695,7 @@ func (r *Runtime) buildContextMessages(session *Session, currentMessage string) 
 		}
 		messages = append(messages, &eino_schema.Message{
 			Role:    eino_schema.User,
-			Content: currentMessage,
+			Content: fmt.Sprintf("[情绪:%s] %s", emotion, currentMessage),
 		})
 		return messages
 	}
@@ -765,7 +765,7 @@ func (r *Runtime) buildContextMessages(session *Session, currentMessage string) 
 
 	messages = append(messages, &eino_schema.Message{
 		Role:    eino_schema.User,
-		Content: currentMessage,
+		Content: fmt.Sprintf("[情绪:%s] %s", emotion, currentMessage),
 	})
 
 	return messages

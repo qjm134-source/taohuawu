@@ -13,12 +13,12 @@ import (
 	"time"
 
 	eino_openai "github.com/cloudwego/eino-ext/components/model/openai"
+	eino_adk "github.com/cloudwego/eino/adk"
 	eino_model "github.com/cloudwego/eino/components/model"
 	eino_tool "github.com/cloudwego/eino/components/tool"
 	eino_compose "github.com/cloudwego/eino/compose"
-	eino_agent "github.com/cloudwego/eino/flow/agent"
-	eino_react "github.com/cloudwego/eino/flow/agent/react"
 	eino_schema "github.com/cloudwego/eino/schema"
+
 	"github.com/watertown/guide/internal/config"
 	"github.com/watertown/guide/pkg/logging"
 )
@@ -58,7 +58,7 @@ var defaultHTTPClient = &http.Client{
 type modelEntry struct {
 	name      string
 	modelName string
-	model     *eino_openai.ChatModel
+	model     eino_model.ToolCallingChatModel
 	weight    float64
 }
 
@@ -68,9 +68,11 @@ type modelStats struct {
 	errorCount   int
 }
 
+// EinoAgentAdapter uses ADK ChatModelAgent with Runner for execution
 type EinoAgentAdapter struct {
 	mu               sync.RWMutex
-	agent            *eino_react.Agent
+	agent            *eino_adk.ChatModelAgent
+	runner           *eino_adk.Runner
 	models           []modelEntry
 	fallback         []string
 	strategy         Strategy
@@ -80,11 +82,13 @@ type EinoAgentAdapter struct {
 	stats            map[string]*modelStats
 	capabilityMap    map[string][]string
 	timeout          time.Duration
-	primaryModelName string // 主模型的配置名称，用于日志和指标
+	primaryModelName string
+	primaryIndex     int
+	maxRetries       int
 }
 
 func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []eino_tool.InvokableTool) *EinoAgentAdapter {
-	logger.Info("[NewEinoAgentAdapter] Creating adapter", "tool_count", len(tools))
+	logger.Info("[NewEinoAgentAdapter] Creating ADK adapter", "tool_count", len(tools))
 	for _, t := range tools {
 		info, _ := t.Info(context.Background())
 		logger.Info("[NewEinoAgentAdapter] Tool registered", "name", info.Name, "desc", info.Desc)
@@ -97,6 +101,7 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 		stats:         make(map[string]*modelStats),
 		capabilityMap: make(map[string][]string),
 		timeout:       cfg.Timeout.Duration,
+		maxRetries:    cfg.MaxRetries,
 	}
 
 	for _, mc := range cfg.Models {
@@ -130,39 +135,119 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 	if len(adapter.models) > 0 {
 		primaryModel := adapter.selectPrimaryModel()
 		adapter.primaryModelName = primaryModel.modelName
-		adapter.agent = adapter.buildEinoAgent(primaryModel.model, tools)
+
+		// Find primary index
+		for i, m := range adapter.models {
+			if m.name == primaryModel.name {
+				adapter.primaryIndex = i
+				break
+			}
+		}
+
+		// Build ADK agent with failover config
+		agent, err := adapter.buildADKAgent(tools)
+		if err != nil {
+			logger.Error("Failed to build ADK agent", "error", err)
+			return adapter
+		}
+		adapter.agent = agent
+
+		// Build Runner
+		adapter.runner = adapter.buildRunner(agent)
 	}
 
 	return adapter
 }
 
-func (a *EinoAgentAdapter) buildEinoAgent(primaryModel *eino_openai.ChatModel, tools []eino_tool.InvokableTool) *eino_react.Agent {
-	config := &eino_react.AgentConfig{
-		ToolCallingModel: primaryModel,
-		GraphName:        "WaterTownReActAgent",
-	}
+func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino_adk.ChatModelAgent, error) {
+	primaryModel := a.models[a.primaryIndex]
+	a.logger.Info("[buildADKAgent] Building ADK agent", "primary_model", primaryModel.name)
 
+	// Build ToolsConfig
+	var toolsConfig eino_adk.ToolsConfig
 	if len(tools) > 0 {
-		a.logger.Info("[buildEinoAgent] Registering tools for ReAct agent", "tool_count", len(tools))
-		einoToolList := make([]eino_tool.BaseTool, 0, len(tools))
+		a.logger.Info("[buildADKAgent] Registering tools for ADK agent", "tool_count", len(tools))
+		baseTools := make([]eino_tool.BaseTool, 0, len(tools))
 		for _, t := range tools {
 			info, _ := t.Info(context.Background())
-			a.logger.Info("[buildEinoAgent] Adding tool", "name", info.Name)
-			einoToolList = append(einoToolList, t)
+			a.logger.Info("[buildADKAgent] Adding tool", "name", info.Name)
+			baseTools = append(baseTools, t)
 		}
-		config.ToolsConfig = eino_compose.ToolsNodeConfig{
-			Tools: einoToolList,
+		toolsConfig = eino_adk.ToolsConfig{
+			ToolsNodeConfig: eino_compose.ToolsNodeConfig{
+				Tools: baseTools,
+			},
 		}
 	}
 
-	agent, err := eino_react.NewAgent(context.Background(), config)
+	// Build ModelFailoverConfig with reference to adapter for failover logic
+	var failoverConfig *eino_adk.ModelFailoverConfig[*eino_schema.Message]
+	if len(a.models) > 1 {
+		failoverConfig = &eino_adk.ModelFailoverConfig[*eino_schema.Message]{
+			MaxRetries: uint(a.maxRetries),
+			ShouldFailover: func(ctx context.Context, output *eino_schema.Message, err error) bool {
+				if ctx.Err() != nil {
+					return false
+				}
+				if err != nil {
+					return true
+				}
+				if output == nil || output.Content == "" {
+					return true
+				}
+				return false
+			},
+			GetFailoverModel: func(ctx context.Context, failoverCtx *eino_adk.FailoverContext[*eino_schema.Message]) (eino_model.BaseModel[*eino_schema.Message], []*eino_schema.Message, error) {
+				return a.getFailoverModel(ctx, failoverCtx)
+			},
+		}
+	}
+
+	// Create ChatModelAgent config
+	config := &eino_adk.ChatModelAgentConfig{
+		Name:                "WaterTownGuide",
+		Instruction:         "", // System prompt is handled externally by the Runtime
+		Model:               primaryModel.model,
+		ToolsConfig:         toolsConfig,
+		ModelFailoverConfig: failoverConfig,
+		MaxIterations:       20,
+	}
+
+	agent, err := eino_adk.NewChatModelAgent(context.Background(), config)
 	if err != nil {
-		a.logger.Error("Failed to create ReAct agent", "error", err)
-		return nil
+		a.logger.Error("Failed to create ADK ChatModelAgent", "error", err)
+		return nil, err
 	}
 
-	a.logger.Info("[buildEinoAgent] ReAct agent created successfully", "tool_count", len(tools))
-	return agent
+	a.logger.Info("[buildADKAgent] ADK agent created successfully")
+	return agent, nil
+}
+
+func (a *EinoAgentAdapter) getFailoverModel(ctx context.Context, failoverCtx *eino_adk.FailoverContext[*eino_schema.Message]) (eino_model.BaseModel[*eino_schema.Message], []*eino_schema.Message, error) {
+	attempt := int(failoverCtx.FailoverAttempt)
+	n := len(a.models)
+
+	if n <= 1 || attempt >= n {
+		return nil, nil, nil
+	}
+
+	// Simple round-robin failover strategy
+	idx := (a.primaryIndex + attempt) % n
+	if idx == a.primaryIndex {
+		return nil, nil, nil
+	}
+
+	entry := a.models[idx]
+	a.logger.Info("ADK failover: selecting next model", "attempt", attempt, "model", entry.name)
+	return entry.model, failoverCtx.InputMessages, nil
+}
+
+func (a *EinoAgentAdapter) buildRunner(agent *eino_adk.ChatModelAgent) *eino_adk.Runner {
+	a.logger.Info("[buildRunner] Creating Runner", "enable_streaming", true)
+	return eino_adk.NewRunner(context.Background(), eino_adk.RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+	})
 }
 
 func (a *EinoAgentAdapter) selectPrimaryModel() modelEntry {
@@ -191,6 +276,7 @@ func (a *EinoAgentAdapter) selectPrimaryModel() modelEntry {
 			}
 		}
 	case StrategyCost, StrategyLatency, StrategyCapability:
+		// These strategies would require additional implementation
 	}
 	if len(a.models) > 0 {
 		return a.models[0]
@@ -199,12 +285,12 @@ func (a *EinoAgentAdapter) selectPrimaryModel() modelEntry {
 }
 
 func (a *EinoAgentAdapter) IsHealthy() bool {
-	return a.agent != nil
+	return a.agent != nil && a.runner != nil
 }
 
 func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (*eino_schema.Message, *ChatUsage, error) {
-	if a.agent == nil {
-		return nil, nil, errors.New("no ReAct agent available")
+	if a.agent == nil || a.runner == nil {
+		return nil, nil, errors.New("no ADK agent available")
 	}
 
 	chatOpts := &ChatOptions{}
@@ -212,48 +298,73 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 		o(chatOpts)
 	}
 
+	// Build model options
 	modelOpts := []eino_model.Option{
 		eino_model.WithTemperature(chatOpts.Temperature),
 		eino_model.WithMaxTokens(chatOpts.MaxTokens),
 	}
 
-	// 创建回调处理器用于 trace 和审计日志
+	// Create callback handler for trace and audit logs
 	handler := newEinoAgentHandler(a.logger)
 
-	agentOpts := []eino_agent.AgentOption{
-		eino_react.WithChatModelOptions(modelOpts...),
-		eino_agent.WithComposeOptions(
-			eino_compose.WithCallbacks(handler),
-		),
+	// Build AgentRunOptions
+	runOpts := []eino_adk.AgentRunOption{
+		eino_adk.WithChatModelOptions(modelOpts),
+		eino_adk.WithCallbacks(handler),
 	}
 
-	a.logger.Info("[Chat] Starting ReAct agent generate", "message_count", len(messages))
+	a.logger.Info("[Chat] Starting ADK agent run", "message_count", len(messages))
 	startTime := time.Now()
-	msg, err := a.agent.Generate(ctx, messages, agentOpts...)
+
+	// Use Runner to execute
+	iter := a.runner.Run(ctx, messages, runOpts...)
+
+	// Collect results from AsyncIterator
+	var finalMsg *eino_schema.Message
+	var lastErr error
+
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			lastErr = event.Err
+			a.logger.Error("[Chat] ADK event error", "error", event.Err)
+			continue
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			// Try to get the message using GetMessage()
+			msgVariant := event.Output.MessageOutput
+			if m, err := msgVariant.GetMessage(); err == nil && m != nil {
+				finalMsg = m
+			}
+		}
+	}
 
 	latency := time.Since(startTime)
-	modelName := a.getCurrentModelName(msg)
-	a.recordStats(modelName, latency, msg == nil || msg.Content == "")
+	modelName := a.getCurrentModelName(finalMsg)
+	a.recordStats(modelName, latency, lastErr != nil || finalMsg == nil)
 
-	if err != nil {
-		a.logger.Error("[Chat] ReAct agent generate failed", "error", err, "latency", latency)
-		return nil, nil, err
+	if lastErr != nil {
+		a.logger.Error("[Chat] ADK agent run failed", "error", lastErr, "latency", latency)
+		return nil, nil, lastErr
 	}
 
-	if msg == nil {
-		a.logger.Error("[Chat] No response from ReAct agent", "latency", latency)
-		return nil, nil, errors.New("no response from ReAct agent")
+	if finalMsg == nil {
+		a.logger.Error("[Chat] No response from ADK agent", "latency", latency)
+		return nil, nil, errors.New("no response from ADK agent")
 	}
 
-	usage := a.extractUsage(msg)
-	a.logger.Info("[Chat] ReAct agent generate success", "model", modelName, "latency", latency, "content_len", len(msg.Content))
+	usage := a.extractUsage(finalMsg)
+	a.logger.Info("[Chat] ADK agent run success", "model", modelName, "latency", latency, "content_len", len(finalMsg.Content))
 
-	return msg, &usage, nil
+	return finalMsg, &usage, nil
 }
 
 func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (Stream, error) {
-	if a.agent == nil {
-		return nil, errors.New("no ReAct agent available")
+	if a.agent == nil || a.runner == nil {
+		return nil, errors.New("no ADK agent available")
 	}
 
 	chatOpts := &ChatOptions{}
@@ -266,94 +377,171 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 		eino_model.WithMaxTokens(chatOpts.MaxTokens),
 	}
 
-	// 创建回调处理器用于 trace 和审计日志
-	handler := newEinoAgentHandler(a.logger)
-
-	agentOpts := []eino_agent.AgentOption{
-		eino_react.WithChatModelOptions(modelOpts...),
-		eino_agent.WithComposeOptions(
-			eino_compose.WithCallbacks(handler),
-		),
+	runOpts := []eino_adk.AgentRunOption{
+		eino_adk.WithChatModelOptions(modelOpts),
 	}
 
-	a.logger.Info("[StreamChat] Starting ReAct agent stream", "message_count", len(messages))
-	stream, err := a.agent.Stream(ctx, messages, agentOpts...)
-	if err != nil {
-		a.logger.Error("[StreamChat] ReAct agent stream failed", "error", err)
-		return nil, err
-	}
+	a.logger.Info("[StreamChat] Starting ADK agent run (streaming)", "message_count", len(messages))
 
-	return &reactStream{
+	iter := a.runner.Run(ctx, messages, runOpts...)
+
+	return &adkStream{
 		adapter:   a,
-		stream:    stream,
+		iter:      iter,
 		ctx:       ctx,
 		startTime: time.Now(),
 	}, nil
 }
 
-type reactStream struct {
+// singleChunkStream returns the complete response at once
+// This is a fallback when ADK returns non-streaming response
+type singleChunkStream struct {
+	adapter   *EinoAgentAdapter
+	message   *eino_schema.Message
+	startTime time.Time
+	sent      bool
+}
+
+func (s *singleChunkStream) Recv() (*StreamChunk, error) {
+	if s.sent {
+		return nil, io.EOF
+	}
+	s.sent = true
+
+	// Record stats
+	latency := time.Since(s.startTime)
+	modelName := s.adapter.getCurrentModelName(s.message)
+	s.adapter.recordStats(modelName, latency, false)
+
+	return &StreamChunk{
+		Content:      s.message.Content,
+		FinishReason: s.message.ResponseMeta.FinishReason,
+		Model:        modelName,
+		Usage:        s.adapter.extractUsage(s.message),
+	}, nil
+}
+
+func (s *singleChunkStream) Close() error {
+	return nil
+}
+
+// adkStream wraps ADK AsyncIterator to implement Stream interface
+type adkStream struct {
 	adapter    *EinoAgentAdapter
-	stream     *eino_schema.StreamReader[*eino_schema.Message]
+	iter       *eino_adk.AsyncIterator[*eino_adk.AgentEvent]
 	ctx        context.Context
 	startTime  time.Time
 	modelName  string
 	hasContent bool
+	closed     bool
+	mu         sync.Mutex
+	msgStream  *eino_schema.StreamReader[*eino_schema.Message]
 }
 
-func (s *reactStream) Recv() (*StreamChunk, error) {
-	msg, err := s.stream.Recv()
-	if errors.Is(err, io.EOF) {
-		s.recordStats()
-		s.adapter.logger.Info("[ReactStream] Stream closed", "model", s.modelName, "has_content", s.hasContent)
+func (s *adkStream) Recv() (*StreamChunk, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
 		return nil, io.EOF
 	}
-	if err != nil {
-		if !errors.Is(err, context.Canceled) {
-			s.adapter.logger.Error("[ReactStream] Recv error", "error", err)
+
+	for {
+		if s.msgStream != nil {
+			chunk, err := s.msgStream.Recv()
+			if err == io.EOF {
+				s.msgStream = nil
+				continue
+			}
+			if err != nil {
+				s.closed = true
+				s.adapter.logger.Error("[ADKStream] Message stream error", "error", err)
+				return nil, err
+			}
+			s.hasContent = true
+			if s.modelName == "" {
+				s.modelName = s.adapter.getCurrentModelName(chunk)
+			}
+			return &StreamChunk{
+				Content:      chunk.Content,
+				FinishReason: chunk.ResponseMeta.FinishReason,
+				Model:        s.modelName,
+				Usage:        s.adapter.extractUsage(chunk),
+			}, nil
 		}
-		return nil, err
-	}
-	if msg == nil {
-		return nil, nil
-	}
 
-	if s.modelName == "" {
-		s.modelName = s.adapter.getCurrentModelName(msg)
-	}
+		event, ok := s.iter.Next()
+		if !ok {
+			s.closed = true
+			s.recordStats()
+			s.adapter.logger.Info("[ADKStream] No more events")
+			return nil, io.EOF
+		}
 
-	if msg.Content != "" {
-		s.hasContent = true
-	}
+		if event.Err != nil {
+			s.adapter.logger.Error("[ADKStream] Event error", "error", event.Err)
+			continue
+		}
 
-	return &StreamChunk{
-		Content:      msg.Content,
-		FinishReason: msg.ResponseMeta.FinishReason,
-		Model:        s.modelName,
-		Usage:        s.adapter.extractUsage(msg),
-	}, nil
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			msgVariant := event.Output.MessageOutput
+
+			if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
+				s.msgStream = msgVariant.MessageStream
+				s.adapter.logger.Info("[ADKStream] Streaming mode enabled")
+				continue
+			}
+
+			if m, err := msgVariant.GetMessage(); err == nil && m != nil {
+				if s.modelName == "" {
+					s.modelName = s.adapter.getCurrentModelName(m)
+				}
+				if m.Role == eino_schema.Assistant && m.Content != "" {
+					s.hasContent = true
+					s.adapter.logger.Info("[ADKStream] Non-streaming response", "content_len", len(m.Content))
+					return &StreamChunk{
+						Content:      m.Content,
+						FinishReason: m.ResponseMeta.FinishReason,
+						Model:        s.modelName,
+						Usage:        s.adapter.extractUsage(m),
+					}, nil
+				}
+			}
+		}
+	}
 }
 
-func (s *reactStream) Close() error {
-	s.stream.Close()
+func (s *adkStream) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.msgStream != nil {
+		s.msgStream.Close()
+		s.msgStream = nil
+	}
 	s.recordStats()
+	s.adapter.logger.Info("[ADKStream] Stream closed", "model", s.modelName, "has_content", s.hasContent)
 	return nil
 }
 
-func (s *reactStream) recordStats() {
-	if s.hasContent {
+func (s *adkStream) recordStats() {
+	if s.hasContent && s.startTime != (time.Time{}) {
 		latency := time.Since(s.startTime)
 		s.adapter.recordStats(s.modelName, latency, false)
+		s.startTime = time.Time{} // Prevent double recording
 	}
 }
 
 func (a *EinoAgentAdapter) getCurrentModelName(msg *eino_schema.Message) string {
-	// 优先从 eino 消息 Extra 中获取
-	if msg != nil && msg.ResponseMeta != nil {
+	if msg != nil && msg.Extra != nil {
 		if name, ok := msg.Extra["model_name"].(string); ok && name != "" {
 			return name
 		}
 	}
-	// 回退到配置中的主模型名称
 	if a.primaryModelName != "" {
 		return a.primaryModelName
 	}
