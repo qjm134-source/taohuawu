@@ -25,7 +25,7 @@ llm:
       api_key: ${BAILIAN_API_KEY}
       enabled: true
       max_tokens: 500
-      temperature: 0.7
+      temperature: 0.5
       
     - name: mimo-v2.5
       base_url: https://token-plan-cn.xiaomimimo.com/v1
@@ -63,7 +63,7 @@ cost:
     type: remote                # remote 使用远程 API（推荐）; local 使用本地服务
     api_key: ${BAILIAN_API_KEY}  # 或直接填写 API Key（remote 模式必需）
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1          # remote API 地址 / local 服务地址
-    model: qwen3-vl-embedding
+    model: text-embedding-v1
     server_type: openai-compat          # local 模式后端类型: ollama / tei / openai-compat
 
 knowledge:

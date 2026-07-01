@@ -627,6 +627,7 @@ observability:
 - [多模型配置](MODEL_CONFIG.md) — 配置参数详解
 - [可观测性指南](docs/OBSERVABILITY.md) — Prometheus + OpenTelemetry + Langfuse 使用说明
 - [缓存系统设计](docs/CACHE_SYSTEM.md) — 多层缓存架构（精确匹配 + 语义匹配）
+- [Token 计算与成本统计](docs/TOKEN_AND_COST.md) — Token 获取/估算/压缩/成本统计全链路
 
 ## API 文档
 

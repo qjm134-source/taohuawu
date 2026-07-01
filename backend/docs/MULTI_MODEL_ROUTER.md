@@ -2,7 +2,7 @@
 
 ## 架构概述
 
-多模型路由系统基于 **Eino 框架**构建，提供统一的 LLM 服务层。通过 Eino 的 `ChatModelAgent` 实现模型调用、故障转移和重试机制，所有模型统一通过 OpenAI 兼容接口接入。
+多模型路由系统基于 **Eino 框架**构建，提供统一的 LLM 服务层。通过 Eino 的 `ReAct Agent` 实现模型调用，并在 `ToolCallingModel` 层通过 `failoverChatModel` 包装器实现模型级故障转移，所有模型统一通过 OpenAI 兼容接口接入。
 
 ### 核心组件
 
@@ -22,17 +22,16 @@
                      │ eino_schema.Message
                      │
 ┌────────────────────▼────────────────────────────────────┐
-│              Eino ChatModelAgent                         │
+│              Eino ReAct Agent                            │
 │  ┌─────────────────────────────────────────────────┐   │
-│  │  ModelFailoverConfig (故障转移配置)              │   │
-│  │  • MaxRetries - 最大重试次数                      │   │
+│  │  ToolCallingModel = failoverChatModel            │   │
+│  │  (模型级故障转移包装器)                           │   │
+│  │  • MaxRetries - 最大故障转移尝试次数              │   │
 │  │  • ShouldFailover - 判断是否需要降级              │   │
 │  │  • GetFailoverModel - 选择降级模型                │   │
 │  └─────────────────────────────────────────────────┘   │
 │  ┌─────────────────────────────────────────────────┐   │
-│  │  ModelRetryConfig (重试配置)                      │   │
-│  │  • MaxRetries - 重试次数                          │   │
-│  │  • ShouldRetry - 判断是否重试                     │   │
+│  │  ToolsNode (工具调用)                            │   │
 │  └─────────────────────────────────────────────────┘   │
 │  ┌─────────────────────────────────────────────────┐   │
 │  │  路由策略引擎 (Strategy Engine)                  │   │
@@ -245,11 +244,23 @@ if streamErr != nil && !hasContent {
 
 ## Eino ModelFailoverConfig 详解
 
+### 实现方式
+
+项目使用 `github.com/cloudwego/eino/adk` 包中的 `ModelFailoverConfig` 类型语义，但没有直接迁移到 ADK `ChatModelAgent`；而是将 `ReAct Agent` 的 `ToolCallingModel` 替换为一个自定义的 `failoverChatModel` 包装器。
+
+这个包装器：
+
+- 实现 `model.ToolCallingChatModel` 接口
+- 持有所有启用的 `eino_openai.ChatModel`
+- 在 `Generate` / `Stream` 中先调用主模型，失败后再调用 `GetFailoverModel` 选择下一个模型
+- 通过 `ShouldFailover` 判断是否需要降级
+- 将实际使用的模型名写入返回消息的 `Extra["model_name"]`，供指标和日志使用
+
 ### 配置结构
 
 ```go
 failoverConfig := &eino_adk.ModelFailoverConfig[*eino_schema.Message]{
-    MaxRetries: uint(len(a.models) - 1),  // 最大重试次数
+    MaxRetries: uint(len(a.models) - 1),  // 最大故障转移尝试次数
     ShouldFailover: func(ctx context.Context, outputMessage *eino_schema.Message, outputErr error) bool {
         // 判断是否需要降级
         if ctx.Err() != nil {
@@ -258,13 +269,10 @@ failoverConfig := &eino_adk.ModelFailoverConfig[*eino_schema.Message]{
         return outputErr != nil || (outputMessage != nil && outputMessage.Content == "")
     },
     GetFailoverModel: func(ctx context.Context, failoverCtx *eino_adk.FailoverContext[*eino_schema.Message]) (
-        failoverModel eino_model.BaseModel[*eino_schema.Message], 
-        failoverModelInputMessages []*eino_schema.Message, 
+        failoverModel eino_model.BaseModel[*eino_schema.Message],
+        failoverModelInputMessages []*eino_schema.Message,
         failoverErr error) {
-        // 根据策略选择降级模型
-        // Fallback: 返回降级链下一个
-        // Weighted: 按权重随机选择
-        // Latency: 选择延迟最低的
+        // 按配置顺序返回下一个模型，优先尝试上次成功的模型
     },
 }
 ```
@@ -274,10 +282,21 @@ failoverConfig := &eino_adk.ModelFailoverConfig[*eino_schema.Message]{
 ```
 1. 主模型调用失败
 2. ShouldFailover 判断是否需要降级
-3. GetFailoverModel 返回下一个模型
+3. GetFailoverModel 返回下一个模型（优先上次成功模型，否则按配置顺序）
 4. 继续尝试，直到成功或达到 MaxRetries
-5. 所有模型失败 → 返回 FallbackAdapter 预设回复
+5. 所有模型失败 → ReAct agent 返回错误 → agent.Runtime 调用 FallbackAdapter 兜底
 ```
+
+### 流式故障转移
+
+流式调用同样支持故障转移：
+
+- 先尝试主模型的 `Stream` 初始化
+- 如果初始化失败或流读取过程中出现错误，按 `ShouldFailover` 判断
+- 满足条件时切换到下一个模型重新流式输出
+
+> 注意：为了检测流式 mid-stream 错误，包装器会先把一份流副本完整消费一遍，确认无误后再返回另一份副本。这会略微改变流式 chunk 到达时间（等效总耗时不变，但首个 chunk 可能稍晚）。
+
 
 ## 工具调用（Function Calling）
 
@@ -494,9 +513,10 @@ strategy: fallback  # 或 cost/latency/capability/weighted/fixed
 |------|------|
 | LLM 框架 | Eino (CloudWeGo) |
 | ChatModel | Eino OpenAI ChatModel |
-| 故障转移 | Eino ModelFailoverConfig |
-| 重试机制 | Eino ModelRetryConfig |
+| Agent | Eino ReAct Agent |
+| 故障转移 | 自定义 failoverChatModel + Eino ADK ModelFailoverConfig 语义 |
 | 配置管理 | YAML + 环境变量 |
+
 
 ---
 
