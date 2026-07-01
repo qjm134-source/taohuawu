@@ -20,6 +20,7 @@ import (
 	eino_schema "github.com/cloudwego/eino/schema"
 
 	"github.com/watertown/guide/internal/config"
+	"github.com/watertown/guide/internal/observability"
 	"github.com/watertown/guide/pkg/logging"
 )
 
@@ -344,7 +345,8 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 
 	latency := time.Since(startTime)
 	modelName := a.getCurrentModelName(finalMsg)
-	a.recordStats(modelName, latency, lastErr != nil || finalMsg == nil)
+	usage := a.extractUsage(finalMsg)
+	a.recordStats(modelName, latency, lastErr != nil || finalMsg == nil, &usage)
 
 	if lastErr != nil {
 		a.logger.Error("[Chat] ADK agent run failed", "error", lastErr, "latency", latency)
@@ -356,7 +358,7 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 		return nil, nil, errors.New("no response from ADK agent")
 	}
 
-	usage := a.extractUsage(finalMsg)
+	usage = a.extractUsage(finalMsg)
 	a.logger.Info("[Chat] ADK agent run success", "model", modelName, "latency", latency, "content_len", len(finalMsg.Content))
 
 	return finalMsg, &usage, nil
@@ -377,8 +379,11 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 		eino_model.WithMaxTokens(chatOpts.MaxTokens),
 	}
 
+	handler := newEinoAgentHandler(a.logger)
+
 	runOpts := []eino_adk.AgentRunOption{
 		eino_adk.WithChatModelOptions(modelOpts),
+		eino_adk.WithCallbacks(handler),
 	}
 
 	a.logger.Info("[StreamChat] Starting ADK agent run", "message_count", len(messages))
@@ -423,6 +428,7 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 		return &adkStream{
 			adapter:   a,
 			msgStream: finalStream,
+			startTime: time.Now(),
 		}, nil
 	}
 
@@ -456,7 +462,8 @@ func (s *singleChunkStream) Recv() (*StreamChunk, error) {
 	// Record stats
 	latency := time.Since(s.startTime)
 	modelName := s.adapter.getCurrentModelName(s.message)
-	s.adapter.recordStats(modelName, latency, false)
+	usage := s.adapter.extractUsage(s.message)
+	s.adapter.recordStats(modelName, latency, false, &usage)
 
 	return &StreamChunk{
 		Content:      s.message.Content,
@@ -476,6 +483,8 @@ type adkStream struct {
 	adapter   *EinoAgentAdapter
 	msgStream *eino_schema.StreamReader[*eino_schema.Message]
 	modelName string
+	startTime time.Time
+	usage     *ChatUsage
 	mu        sync.Mutex
 	closed    bool
 }
@@ -490,16 +499,19 @@ func (s *adkStream) Recv() (*StreamChunk, error) {
 
 	if s.msgStream == nil {
 		s.closed = true
+		s.recordStats(true)
 		return nil, io.EOF
 	}
 
 	chunk, err := s.msgStream.Recv()
 	if err == io.EOF {
 		s.closed = true
+		s.recordStats(false)
 		return nil, io.EOF
 	}
 	if err != nil {
 		s.closed = true
+		s.recordStats(true)
 		return nil, err
 	}
 
@@ -507,11 +519,14 @@ func (s *adkStream) Recv() (*StreamChunk, error) {
 		s.modelName = s.adapter.getCurrentModelName(chunk)
 	}
 
+	s.usage = &ChatUsage{}
+	*s.usage = s.adapter.extractUsage(chunk)
+
 	return &StreamChunk{
 		Content:      chunk.Content,
 		FinishReason: chunk.ResponseMeta.FinishReason,
 		Model:        s.modelName,
-		Usage:        s.adapter.extractUsage(chunk),
+		Usage:        *s.usage,
 	}, nil
 }
 
@@ -527,7 +542,15 @@ func (s *adkStream) Close() error {
 		s.msgStream.Close()
 		s.msgStream = nil
 	}
+	s.recordStats(true)
 	return nil
+}
+
+func (s *adkStream) recordStats(isError bool) {
+	if s.startTime != (time.Time{}) && s.modelName != "" {
+		latency := time.Since(s.startTime)
+		s.adapter.recordStats(s.modelName, latency, isError, s.usage)
+	}
 }
 
 func (a *EinoAgentAdapter) getCurrentModelName(msg *eino_schema.Message) string {
@@ -554,7 +577,7 @@ func (a *EinoAgentAdapter) extractUsage(msg *eino_schema.Message) ChatUsage {
 	}
 }
 
-func (a *EinoAgentAdapter) recordStats(modelName string, latency time.Duration, isError bool) {
+func (a *EinoAgentAdapter) recordStats(modelName string, latency time.Duration, isError bool, usage *ChatUsage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -565,6 +588,18 @@ func (a *EinoAgentAdapter) recordStats(modelName string, latency time.Duration, 
 	a.stats[modelName].totalLatency += latency
 	if isError {
 		a.stats[modelName].errorCount++
+	}
+
+	status := "success"
+	if isError {
+		status = "error"
+	}
+	observability.LLMRequestsTotal.WithLabelValues(modelName, status).Inc()
+	observability.LLMRequestDuration.WithLabelValues(modelName).Observe(latency.Seconds())
+
+	if usage != nil && usage.Model != "" {
+		observability.LLMRequestTokens.WithLabelValues(usage.Model).Add(float64(usage.PromptTokens))
+		observability.LLMCompletionTokens.WithLabelValues(usage.Model).Add(float64(usage.CompletionTokens))
 	}
 }
 
