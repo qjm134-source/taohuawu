@@ -14,7 +14,6 @@ import (
 
 	eino_openai "github.com/cloudwego/eino-ext/components/model/openai"
 	eino_adk "github.com/cloudwego/eino/adk"
-	eino_callbacks "github.com/cloudwego/eino/callbacks"
 	eino_model "github.com/cloudwego/eino/components/model"
 	eino_tool "github.com/cloudwego/eino/components/tool"
 	eino_compose "github.com/cloudwego/eino/compose"
@@ -378,133 +377,65 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 		eino_model.WithMaxTokens(chatOpts.MaxTokens),
 	}
 
-	streamCh := make(chan *eino_schema.StreamReader[*eino_schema.Message], 1)
-	errCh := make(chan error, 1)
-	msgResult := make(chan *eino_schema.Message, 1)
-
-	handler := &streamResultHandler{
-		logger:    a.logger,
-		streamCh:  streamCh,
-		errCh:     errCh,
-		msgResult: msgResult,
-	}
-
 	runOpts := []eino_adk.AgentRunOption{
 		eino_adk.WithChatModelOptions(modelOpts),
-		eino_adk.WithCallbacks(handler),
 	}
 
 	a.logger.Info("[StreamChat] Starting ADK agent run", "message_count", len(messages))
 
 	iter := a.runner.Run(ctx, messages, runOpts...)
 
-	go func() {
-		for {
-			event, ok := iter.Next()
-			if !ok {
-				break
+	var finalStream *eino_schema.StreamReader[*eino_schema.Message]
+	var finalMsg *eino_schema.Message
+	var hasContent bool
+
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+
+		if event.Err != nil {
+			a.logger.Error("[StreamChat] Event error", "error", event.Err)
+			continue
+		}
+
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			msgVariant := event.Output.MessageOutput
+
+			if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
+				finalStream = msgVariant.MessageStream
+				a.logger.Info("[StreamChat] Got MessageStream", "has_content", hasContent)
 			}
-			if event.Err != nil {
-				select {
-				case errCh <- event.Err:
-				default:
+
+			if m, err := msgVariant.GetMessage(); err == nil && m != nil {
+				if m.Role == eino_schema.Assistant && m.Content != "" {
+					hasContent = true
+					finalMsg = m
+					a.logger.Info("[StreamChat] Got message content", "content_len", len(m.Content))
 				}
 			}
 		}
-	}()
+	}
 
-	select {
-	case stream := <-streamCh:
+	if finalStream != nil {
+		a.logger.Info("[StreamChat] Returning final stream")
 		return &adkStream{
 			adapter:   a,
-			msgStream: stream,
-			ctx:       ctx,
-			startTime: time.Now(),
+			msgStream: finalStream,
 		}, nil
-	case msg := <-msgResult:
+	}
+
+	if finalMsg != nil {
+		a.logger.Info("[StreamChat] Returning final message", "content_len", len(finalMsg.Content))
 		return &singleChunkStream{
 			adapter:   a,
-			message:   msg,
+			message:   finalMsg,
 			startTime: time.Now(),
 		}, nil
-	case err := <-errCh:
-		return nil, err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-// streamResultHandler collects the final MessageStream from ADK callbacks
-type streamResultHandler struct {
-	logger    logging.Logger
-	streamCh  chan<- *eino_schema.StreamReader[*eino_schema.Message]
-	errCh     chan<- error
-	msgResult chan<- *eino_schema.Message
-}
-
-func (h *streamResultHandler) OnStart(ctx context.Context, info *eino_callbacks.RunInfo, input eino_callbacks.CallbackInput) context.Context {
-	h.logger.Info("[StreamResultHandler] OnStart", "component", info.Component)
-	return ctx
-}
-
-func (h *streamResultHandler) OnEnd(ctx context.Context, info *eino_callbacks.RunInfo, output eino_callbacks.CallbackOutput) context.Context {
-	if output == nil {
-		return ctx
 	}
 
-	if agentOutput, ok := output.(*eino_adk.AgentCallbackOutput); ok && agentOutput.Events != nil {
-		go func() {
-			for {
-				event, ok := agentOutput.Events.Next()
-				if !ok {
-					break
-				}
-				if event.Err != nil {
-					select {
-					case h.errCh <- event.Err:
-					default:
-					}
-					continue
-				}
-				if event.Output != nil && event.Output.MessageOutput != nil {
-					msgVariant := event.Output.MessageOutput
-					if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
-						h.logger.Info("[StreamResultHandler] Got MessageStream")
-						select {
-						case h.streamCh <- msgVariant.MessageStream:
-						default:
-						}
-					}
-					if m, err := msgVariant.GetMessage(); err == nil && m != nil {
-						if m.Role == eino_schema.Assistant && m.Content != "" {
-							h.logger.Info("[StreamResultHandler] Got final message", "content_len", len(m.Content))
-							select {
-							case h.msgResult <- m:
-							default:
-							}
-						}
-					}
-				}
-			}
-		}()
-	}
-	return ctx
-}
-
-func (h *streamResultHandler) OnError(ctx context.Context, info *eino_callbacks.RunInfo, err error) context.Context {
-	select {
-	case h.errCh <- err:
-	default:
-	}
-	return ctx
-}
-
-func (h *streamResultHandler) OnStartWithStreamInput(ctx context.Context, info *eino_callbacks.RunInfo, input *eino_schema.StreamReader[eino_callbacks.CallbackInput]) context.Context {
-	return ctx
-}
-
-func (h *streamResultHandler) OnEndWithStreamOutput(ctx context.Context, info *eino_callbacks.RunInfo, output *eino_schema.StreamReader[eino_callbacks.CallbackOutput]) context.Context {
-	return ctx
+	return nil, errors.New("no response from ADK agent")
 }
 
 // singleChunkStream returns the complete response at once
@@ -540,15 +471,13 @@ func (s *singleChunkStream) Close() error {
 }
 
 // adkStream wraps ADK MessageStream to implement Stream interface
+// It simply converts *eino_schema.Message to *StreamChunk
 type adkStream struct {
-	adapter    *EinoAgentAdapter
-	ctx        context.Context
-	startTime  time.Time
-	modelName  string
-	hasContent bool
-	closed     bool
-	mu         sync.Mutex
-	msgStream  *eino_schema.StreamReader[*eino_schema.Message]
+	adapter   *EinoAgentAdapter
+	msgStream *eino_schema.StreamReader[*eino_schema.Message]
+	modelName string
+	mu        sync.Mutex
+	closed    bool
 }
 
 func (s *adkStream) Recv() (*StreamChunk, error) {
@@ -561,25 +490,19 @@ func (s *adkStream) Recv() (*StreamChunk, error) {
 
 	if s.msgStream == nil {
 		s.closed = true
-		s.recordStats()
-		s.adapter.logger.Info("[ADKStream] No message stream available")
 		return nil, io.EOF
 	}
 
 	chunk, err := s.msgStream.Recv()
 	if err == io.EOF {
 		s.closed = true
-		s.recordStats()
-		s.adapter.logger.Info("[ADKStream] Message stream ended")
 		return nil, io.EOF
 	}
 	if err != nil {
 		s.closed = true
-		s.adapter.logger.Error("[ADKStream] Message stream error", "error", err)
 		return nil, err
 	}
 
-	s.hasContent = true
 	if s.modelName == "" {
 		s.modelName = s.adapter.getCurrentModelName(chunk)
 	}
@@ -604,17 +527,7 @@ func (s *adkStream) Close() error {
 		s.msgStream.Close()
 		s.msgStream = nil
 	}
-	s.recordStats()
-	s.adapter.logger.Info("[ADKStream] Stream closed", "model", s.modelName, "has_content", s.hasContent)
 	return nil
-}
-
-func (s *adkStream) recordStats() {
-	if s.hasContent && s.startTime != (time.Time{}) {
-		latency := time.Since(s.startTime)
-		s.adapter.recordStats(s.modelName, latency, false)
-		s.startTime = time.Time{} // Prevent double recording
-	}
 }
 
 func (a *EinoAgentAdapter) getCurrentModelName(msg *eino_schema.Message) string {
