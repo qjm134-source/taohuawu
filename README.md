@@ -57,15 +57,13 @@
 
 | 亮点 | 说明 |
 |------|------|
-| **多模型智能路由** | 基于 Eino 框架，统一 OpenAI 兼容接口，支持 6 种路由策略和自动降级 |
+| **多模型智能路由** | 基于 Eino 框架，统一多模型接入，支持 6 种路由策略和自动降级 |
 | **Eino ModelFailover** | 内置故障转移和重试机制，简化配置，提高可靠性 |
-| **EMA 运行时统计** | 指数移动平均跟踪模型延迟与错误率，动态优化路由决策 |
 | **任务分类器** | 根据消息内容自动识别 Code / Reasoning / Chinese / LongText / General 任务类型 |
 | **实时工具调用** | 支持 Function Calling，例如询问天气时自动调用 `get_weather` 工具 |
 | **成本优化** | 相似问题缓存、历史消息摘要、Token 估算、成本计算 |
-| **企业级可用性** | Eino ModelFailover + 流式降级 + FallbackAdapter 兜底 |
+| **可用性** | Eino ModelFailover + 流式降级 + FallbackAdapter 兜底 |
 | **可观测性** | Prometheus 指标 + OpenTelemetry 分布式追踪 + 审计日志 + Langfuse（LLM 专项），详见 [可观测性指南](./backend/docs/OBSERVABILITY.md) |
-| **多租户支持** | 租户隔离、独立资源池、审计日志 |
 
 ---
 
@@ -260,6 +258,106 @@ taohuawu/
 ├── RENDER_DEPLOY.md                  # Render 部署指南
 └── README.md                         # 本文件
 ```
+
+---
+
+## 可观测性指南
+
+本项目提供完整的 **Metrics + Traces + Logs + LLM 专项可观测** 能力，基于 **Prometheus** 暴露指标、**OpenTelemetry** 采集链路、**Langfuse** 专项追踪 LLM 调用，并通过 **审计日志** 记录关键操作。你可以用它监控 LLM 调用成本、WebSocket 连接状态、HTTP 接口性能、缓存命中率以及全链路延迟。
+
+- **Metrics**：告诉你系统"发生了什么"，例如 QPS、延迟、错误率、Token 消耗、成本、缓存命中率。
+- **Traces**：告诉你"一次请求经历了什么"，例如 WebSocket 消息经过哪些函数、每个阶段耗时多久。
+- **LLM 专项可观测（Langfuse）**：告诉你"每次 LLM 调用的完整细节"，包括输入 Prompt、输出内容、Token 数、成本、用户反馈。
+- **Logs**：审计日志记录谁在什么时间做了什么操作，已在 `/api/v1/audit` 提供查询。
+
+## 1. Prometheus 指标清单
+
+### 1.1 HTTP 层指标（中间件自动采集）
+
+| 指标名称 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `http_requests_total` | Counter | `method`, `path`, `status` | HTTP 请求总数 |
+| `http_request_duration_seconds` | Histogram | `method`, `path` | HTTP 请求耗时分布 |
+| `http_requests_in_flight` | Gauge | - | 当前正在处理的 HTTP 请求数 |
+
+### 1.2 Agent 层指标
+
+| 指标名称 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `agent_requests_total` | Counter | `action`, `status` | Agent 调用次数：`action=welcome/chat`，`status=success/error` |
+| `agent_request_duration_seconds` | Histogram | `action` | Agent 处理耗时 |
+
+### 1.3 LLM 层指标
+
+| 指标名称 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `llm_requests_total` | Counter | `model`, `status` | 每个模型的调用次数与状态 |
+| `llm_request_duration_seconds` | Histogram | `model` | 每个模型的调用耗时 |
+| `llm_request_tokens_total` | Counter | `model` | 每个模型的输入 Token 累计 |
+| `llm_completion_tokens_total` | Counter | `model` | 每个模型的输出 Token 累计 |
+| `cost_total` | Counter | `model` | 每个模型的累计成本（美元） |
+
+### 1.4 WebSocket 层指标
+
+| 指标名称 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `websocket_connections` | Gauge | `tenant_id` | 每个租户的当前活跃连接数 |
+| `websocket_messages_total` | Counter | `type`, `direction` | WebSocket 消息总数：`direction=in/out` |
+
+### 1.5 缓存层指标
+
+| 指标名称 | 类型 | 标签 | 说明 |
+|---|---|---|---|
+| `cache_hits_total` | Counter | `cache_type` | 缓存命中次数（精确匹配/语义匹配） |
+| `cache_misses_total` | Counter | `tenant_id` | 缓存未命中次数 |
+| `cache_hit_ratio` | Gauge | `tenant_id` | 缓存命中率 |
+
+以下是使用 Grafana 展示的指标大盘效果：
+
+![Grafana 仪表盘](backend/docs/images/grafana.png)
+
+---
+
+## 2. OpenTelemetry 分布式追踪
+
+### 2.1 已接入的 Span
+
+| 位置 | Span 名称 | 说明 |
+|---|---|---|
+| `middleware.go` | `GET /path` / `POST /path` | 每个 HTTP 请求自动创建 Server Span |
+| `runtime.go` | `HandleWelcome` | 欢迎消息处理 |
+| `runtime.go` | `HandleChat` | 普通对话处理 |
+| `runtime.go` | `HandleChatStream` | 流式对话处理（包含 5 个顶层子 Span + Eino 框架嵌套子 Span） |
+
+### 2.2 细粒度链路追踪（HandleChatStream）
+
+为实现**全链路耗时透明化**，我们为 `HandleChatStream` 添加了 **5 个顶层细粒度子 Span**，其中 `LLM.StreamChat` 内部还包含 **4-5 个嵌套子 Span**，可以清晰看到每个步骤的耗时分布，便于定位性能瓶颈：
+
+#### 完整 Span 层级结构
+
+```
+Agent.HandleChatStream (主 Span)
+├── Emotion.Detect          情绪检测
+├── Cache.Check             缓存查询（含精确缓存查询 + Embedding 调用）
+├── Context.Build           构建上下文消息（会话历史 + 摘要压缩）
+├── LLM.HealthCheck         LLM 健康检查
+└── LLM.StreamChat          LLM 流式调用（主要耗时来源，包含嵌套子 Span）
+    ├── Eino.Graph.WaterTownReActAgent   Eino ReAct Agent 执行图
+    │   ├── Eino.ChatModel.ChatModel.1   模型调用（决策阶段，判断是否调用工具）
+    │   ├── Eino.ToolNode.Tools          工具调用节点
+    │   │   └── Eino.Tool.get_weather    具体工具执行
+    │   └── Eino.ChatModel.ChatModel.2   模型调用（响应阶段，基于工具结果生成回复）
+    ├── LLM.TokenStreaming              Token 流传输（打字机效果）
+    ├── LLM.StatsAndMetrics             统计指标记录与成本计算
+    │   └── LLM.FallbackNonStream       降级非流式调用（可选）
+    ├── LLM.SessionUpdate               会话消息更新
+    └── LLM.CacheWrite                  缓存写入（精确匹配 + 语义索引）
+```
+
+
+#### 输出效果（Jaeger Trace）
+
+![Jaeger Trace 瀑布图](./backend/docs/images/trace.png)
 
 ---
 
