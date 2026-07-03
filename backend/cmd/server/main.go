@@ -14,6 +14,7 @@ import (
 	"github.com/watertown/guide/internal/observability"
 	"github.com/watertown/guide/internal/server"
 	"github.com/watertown/guide/pkg/logging"
+	"github.com/watertown/guide/pkg/utils"
 )
 
 func main() {
@@ -100,6 +101,7 @@ func main() {
 
 	// 启动服务器
 	go func() {
+		defer utils.RecoverWithCustomLogger("server", logger)
 		if err := srv.Start(); err != nil {
 			logger.Fatal("Server failed", "error", err)
 		}

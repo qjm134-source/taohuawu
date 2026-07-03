@@ -350,7 +350,7 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 }
 
 // HandleChatStream 处理聊天（流式）
-func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, message string) (<-chan string, <-chan *LLMStats, error) {
+func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, message string) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
 	startTime := time.Now()
 
 	r.logger.Info("[HandleChatStream] Start", "sessionId", session.ID, "message", message)
@@ -388,15 +388,22 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		langfuseTrace.End()
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 
-		contentChan := make(chan string, 1)
-		contentChan <- cached
-		close(contentChan)
+		eventChan := make(chan *llm.StreamEvent, 2)
+		eventChan <- &llm.StreamEvent{
+			Type:    llm.StreamEventTypeChunk,
+			Content: cached,
+		}
+		eventChan <- &llm.StreamEvent{
+			Type:       llm.StreamEventTypeAction,
+			ActionType: "exit",
+		}
+		close(eventChan)
 
 		statsChan := make(chan *LLMStats, 1)
 		statsChan <- &LLMStats{CacheHit: true}
 		close(statsChan)
 
-		return contentChan, statsChan, nil
+		return eventChan, statsChan, nil
 	}
 
 	observability.CacheMissesTotal.WithLabelValues("check").Inc()
@@ -412,7 +419,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	isHealthy := r.llmAdapter.IsHealthy()
 	observability.EndChildSpan(ctx, healthSpan)
 
-	var stream llm.Stream
+	var stream llm.EventStream
 	var err error
 
 	// 创建 LLM.StreamChat span（必须在 StreamChat 调用之前创建）
@@ -441,11 +448,12 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
 	}
 
-	contentChan := make(chan string, 100)
+	eventChan := make(chan *llm.StreamEvent, 100)
 	statsChan := make(chan *LLMStats, 1)
 
 	go func() {
-		defer close(contentChan)
+		defer utils.RecoverWithCustomLogger("HandleChatStream", r.logger)
+		defer close(eventChan)
 		defer stream.Close()
 		defer observability.EndChildSpan(llmCtx, llmSpan)
 
@@ -459,14 +467,12 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		var ttftMs int64 = 0
 		var streamSpan trace.Span
 		for {
-			chunk, err := stream.Recv()
+			event, err := stream.Recv()
 
-			// 流正常结束，退出循环
 			if errors.Is(err, io.EOF) {
 				break
 			}
 
-			// 流读取错误，记录错误并退出循环
 			if err != nil {
 				r.logger.Error("[HandleChatStream] Stream recv error", "error", err)
 				_, errorSpan := observability.StartChildSpan(llmCtx, "LLM.StreamError")
@@ -475,55 +481,56 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				break
 			}
 
-			// 空 chunk，跳过继续读取
-			if chunk == nil {
+			if event == nil {
 				continue
 			}
 
-			// 收到第一个 chunk，结束等待 span 并记录耗时
-			if chunkCount == 0 {
-				// 创建 token 流传输 span
-				_, streamSpan = observability.StartChildSpan(llmCtx, "LLM.TokenStreaming")
-			}
-			chunkCount++
+			if event.Type == llm.StreamEventTypeChunk {
+				if chunkCount == 0 {
+					_, streamSpan = observability.StartChildSpan(llmCtx, "LLM.TokenStreaming")
+				}
+				chunkCount++
 
-			// chunk 有内容，发送给前端并累加到完整回复
-			if chunk.Content != "" {
-				contentChan <- chunk.Content
-				fullReply.WriteString(chunk.Content)
+				if event.Content != "" {
+					fullReply.WriteString(event.Content)
+				}
+
+				if event.Model != "" && stats.Model == "" {
+					stats.Model = event.Model
+				}
+
+				if event.Usage != nil && event.Usage.TotalTokens > 0 {
+					stats.InputTokens = event.Usage.PromptTokens
+					stats.OutputTokens = event.Usage.CompletionTokens
+					stats.TotalTokens = event.Usage.TotalTokens
+				}
+
+				if event.FinishReason != "" {
+					finishReason = event.FinishReason
+				}
+			} else if event.Type == llm.StreamEventTypeToolCalls {
+				var toolNames []string
+				for _, tc := range event.ToolCalls {
+					toolNames = append(toolNames, tc.ToolName)
+				}
+				stats.ToolsUsed = toolNames
+			} else if event.Type == llm.StreamEventTypeAction && event.ActionType == "exit" {
+				if event.Model != "" && stats.Model == "" {
+					stats.Model = event.Model
+				}
+				if event.Usage != nil && event.Usage.TotalTokens > 0 {
+					stats.InputTokens = event.Usage.PromptTokens
+					stats.OutputTokens = event.Usage.CompletionTokens
+					stats.TotalTokens = event.Usage.TotalTokens
+				}
 			}
 
-			// 记录模型名称（只记录一次）
-			if chunk.Model != "" && stats.Model == "" {
-				stats.Model = chunk.Model
-			}
-
-			// 记录 token 使用情况（usage 信息可能在最后一个 chunk 返回）
-			if chunk.Usage.TotalTokens > 0 {
-				stats.InputTokens = chunk.Usage.PromptTokens
-				stats.OutputTokens = chunk.Usage.CompletionTokens
-				stats.TotalTokens = chunk.Usage.TotalTokens
-			}
-
-			// 收到结束原因，退出循环（流式结束）
-			if chunk.FinishReason != "" {
-				finishReason = chunk.FinishReason
-				break
-			}
+			eventChan <- event
 		}
 
-		// 结束 token 流传输 span
 		observability.EndChildSpan(llmCtx, streamSpan)
 
-		// 创建统计指标记录 span
 		_, postSpan := observability.StartChildSpan(llmCtx, "LLM.StatsAndMetrics")
-
-		if fullReply.Len() == 0 && !strings.Contains(finishReason, "tool_calls") {
-			r.logger.Warn("[HandleChatStream] Stream returned empty data, falling back to non-streaming")
-			_, fallbackSpan := observability.StartChildSpan(llmCtx, "LLM.FallbackNonStream")
-			r.handleNonStreamChat(ctx, messages, contentChan, &fullReply, stats)
-			fallbackSpan.End()
-		}
 
 		stats.LatencyMs = time.Since(startTime).Milliseconds()
 		stats.Cost = cost.CalculateCost(stats.Model, stats.InputTokens, stats.OutputTokens)
@@ -538,7 +545,6 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 		observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(startTime).Seconds())
 
-		// 在 LLM.StreamChat span 上添加关键属性
 		llmSpan.SetAttributes(
 			attribute.String("model", model),
 			attribute.Int("input_tokens", stats.InputTokens),
@@ -562,7 +568,6 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 		postSpan.End()
 
-		// 记录 session 更新 span
 		_, sessionSpan := observability.StartChildSpan(llmCtx, "LLM.SessionUpdate")
 		session.AddMessage("user", message, emotionStr, nil)
 		if fullReply.Len() > 0 {
@@ -573,7 +578,6 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			attribute.Int("assistant_msg_len", fullReply.Len()))
 		sessionSpan.End()
 
-		// 记录缓存写入 span
 		if fullReply.Len() > 0 {
 			_, cacheSpan := observability.StartChildSpan(llmCtx, "LLM.CacheWrite")
 			r.optimizer.SetCache(cacheKey, fullReply.String())
@@ -595,7 +599,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		r.logger.Info("[HandleChatStream] Complete", "reply_length", fullReply.Len(), "latency", stats.LatencyMs)
 	}()
 
-	return contentChan, statsChan, nil
+	return eventChan, statsChan, nil
 }
 
 // handleNonStreamChat 处理非流式调用，并模拟流式响应

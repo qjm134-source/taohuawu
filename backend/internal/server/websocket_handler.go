@@ -11,9 +11,11 @@ import (
 
 	"github.com/watertown/guide/internal/agent"
 	"github.com/watertown/guide/internal/database"
+	"github.com/watertown/guide/internal/llm"
 	"github.com/watertown/guide/internal/observability"
 	"github.com/watertown/guide/internal/websocket"
 	"github.com/watertown/guide/pkg/logging"
+	"github.com/watertown/guide/pkg/utils"
 )
 
 // WebSocketHandler WebSocket 处理器
@@ -61,8 +63,14 @@ func (h *WebSocketHandler) Handle(c *gin.Context) {
 	client := websocket.NewClient(conn, "", "", nil)
 
 	// 先启动读写泵
-	go client.WritePump()
-	go client.ReadPump(h.hub, h.handleMessage)
+	go func() {
+		defer utils.RecoverWithCustomLogger("WritePump", h.logger)
+		client.WritePump()
+	}()
+	go func() {
+		defer utils.RecoverWithCustomLogger("ReadPump", h.logger)
+		client.ReadPump(h.hub, h.handleMessage)
+	}()
 }
 
 // handleMessage 处理消息
@@ -242,7 +250,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 
 	// 获取会话
 	session := h.runtime.GetSession(player.ID, msg.TenantID)
-	contentChan, statsChan, err := h.runtime.HandleChatStream(context.Background(), session, payload.Message)
+	eventChan, statsChan, err := h.runtime.HandleChatStream(context.Background(), session, payload.Message)
 	if err != nil {
 		h.logger.Error("Failed to handle chat stream", "error", err, "player_id", player.ID)
 
@@ -262,22 +270,36 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 
 	var fullReply strings.Builder
 
-	// 流式发送响应
-	for chunk := range contentChan {
-		fullReply.WriteString(chunk)
+	// 流式发送响应（透明推送所有事件）
+	for event := range eventChan {
+		if event.Type == llm.StreamEventTypeChunk && event.Content != "" {
+			fullReply.WriteString(event.Content)
+		}
 
-		// 发送流式消息片段
-		chunkMsg, _ := websocket.NewMessage(
-			websocket.MessageTypeNPCReplyChunk,
+		toolCalls := make([]websocket.ToolCall, 0, len(event.ToolCalls))
+		for _, tc := range event.ToolCalls {
+			toolCalls = append(toolCalls, websocket.ToolCall{
+				ID:       tc.ID,
+				ToolName: tc.ToolName,
+				Params:   tc.Params,
+			})
+		}
+
+		eventMsg, _ := websocket.NewMessage(
+			websocket.MessageTypeStreamEvent,
 			msg.RequestID,
 			msg.TenantID,
-			websocket.NPCReplyChunkPayload{
-				GuideName: agent.GuideName,
-				Chunk:     chunk,
-				IsFinal:   false,
+			websocket.StreamEventPayload{
+				Type:         string(event.Type),
+				Content:      event.Content,
+				ToolCalls:    toolCalls,
+				ToolResult:   event.ToolResult,
+				ActionType:   event.ActionType,
+				Model:        event.Model,
+				FinishReason: event.FinishReason,
 			},
 		)
-		_ = client.SendMessage(chunkMsg)
+		_ = client.SendMessage(eventMsg)
 	}
 
 	// 等待统计信息
@@ -335,27 +357,8 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 		}
 	}
 
-	finalMsg, _ := websocket.NewMessage(
-		websocket.MessageTypeNPCReplyChunk,
-		msg.RequestID,
-		msg.TenantID,
-		websocket.NPCReplyChunkPayload{
-			GuideName:    agent.GuideName,
-			Chunk:        "",
-			IsFinal:      true,
-			Emotion:      stats.Model, // 临时使用
-			Model:        stats.Model,
-			InputTokens:  stats.InputTokens,
-			OutputTokens: stats.OutputTokens,
-			TotalTokens:  stats.TotalTokens,
-			Cost:         stats.Cost,
-			LatencyMs:    stats.LatencyMs,
-		},
-	)
-	_ = client.SendMessage(finalMsg)
-
 	// 记录发出的消息指标
-	observability.WebSocketMessagesTotal.WithLabelValues(string(websocket.MessageTypeNPCReplyChunk), "out").Inc()
+	observability.WebSocketMessagesTotal.WithLabelValues(string(websocket.MessageTypeStreamEvent), "out").Inc()
 }
 
 // handlePing 处理心跳

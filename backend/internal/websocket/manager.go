@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/watertown/guide/internal/observability"
+	"github.com/watertown/guide/pkg/utils"
 )
 
 const (
@@ -95,7 +96,10 @@ func (h *Hub) Run() {
 				case client.Send <- message:
 				default:
 					// 客户端缓冲区满，断开连接
-					go h.UnregisterClient(client)
+					go func() {
+						defer utils.RecoverWithLog("Hub.UnregisterClient")
+						h.UnregisterClient(client)
+					}()
 				}
 			}
 			h.mu.RUnlock()
@@ -134,7 +138,10 @@ func (h *Hub) BroadcastToTenant(tenantID string, message []byte) {
 			case client.Send <- message:
 			default:
 				// 客户端缓冲区满，断开连接
-				go h.UnregisterClient(client)
+				go func() {
+					defer utils.RecoverWithLog("Hub.UnregisterClient")
+					h.UnregisterClient(client)
+				}()
 			}
 		}
 	}

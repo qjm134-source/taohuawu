@@ -21,6 +21,7 @@ import (
 	"github.com/watertown/guide/internal/weather"
 	"github.com/watertown/guide/internal/websocket"
 	"github.com/watertown/guide/pkg/logging"
+	"github.com/watertown/guide/pkg/utils"
 	"gorm.io/gorm"
 )
 
@@ -278,7 +279,10 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 
 	// 创建 WebSocket Hub
 	s.agentHub = websocket.NewHub()
-	go s.agentHub.Run()
+	go func() {
+		defer utils.RecoverWithCustomLogger("Hub.Run", s.logger)
+		s.agentHub.Run()
+	}()
 
 	// 创建会话管理器
 	s.sessionManager = agent.NewSessionManager()

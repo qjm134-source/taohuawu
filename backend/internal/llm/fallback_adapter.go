@@ -41,7 +41,7 @@ func (a *FallbackAdapter) Chat(ctx context.Context, messages []*eino_schema.Mess
 	}, &ChatUsage{Model: "fallback"}, nil
 }
 
-func (a *FallbackAdapter) StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (Stream, error) {
+func (a *FallbackAdapter) StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (EventStream, error) {
 	userMessage := ""
 	for _, msg := range messages {
 		if msg.Role == eino_schema.User {
@@ -52,30 +52,37 @@ func (a *FallbackAdapter) StreamChat(ctx context.Context, messages []*eino_schem
 
 	response := a.matchResponse(userMessage)
 
-	return &fallbackStream{
+	return &fallbackEventStream{
 		response:  response,
 		pos:       0,
 		chunkSize: 10,
 	}, nil
 }
 
-type fallbackStream struct {
+type fallbackEventStream struct {
 	response  string
 	pos       int
 	chunkSize int
 	closed    bool
+	sentExit  bool
 }
 
-func (s *fallbackStream) Recv() (*StreamChunk, error) {
+func (s *fallbackEventStream) Recv() (*StreamEvent, error) {
 	if s.closed {
 		return nil, io.EOF
 	}
 
-	if s.pos >= len(s.response) {
+	if s.sentExit {
 		s.closed = true
-		return &StreamChunk{
-			FinishReason: "stop",
-			Model:        "fallback",
+		return nil, io.EOF
+	}
+
+	if s.pos >= len(s.response) {
+		s.sentExit = true
+		return &StreamEvent{
+			Type:       StreamEventTypeAction,
+			ActionType: "exit",
+			Model:      "fallback",
 		}, nil
 	}
 
@@ -84,16 +91,17 @@ func (s *fallbackStream) Recv() (*StreamChunk, error) {
 		end = len(s.response)
 	}
 
-	chunk := &StreamChunk{
+	event := &StreamEvent{
+		Type:    StreamEventTypeChunk,
 		Content: s.response[s.pos:end],
 		Model:   "fallback",
 	}
 	s.pos = end
 
-	return chunk, nil
+	return event, nil
 }
 
-func (s *fallbackStream) Close() error {
+func (s *fallbackEventStream) Close() error {
 	s.closed = true
 	return nil
 }

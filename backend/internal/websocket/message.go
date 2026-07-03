@@ -18,6 +18,7 @@ const (
 	MessageTypeWelcome       MessageType = "WELCOME"
 	MessageTypeNPCReply      MessageType = "NPC_REPLY"
 	MessageTypeNPCReplyChunk MessageType = "NPC_REPLY_CHUNK" // 流式响应片段
+	MessageTypeStreamEvent   MessageType = "STREAM_EVENT"    // 流式事件（透明推送所有事件）
 	MessageTypeError         MessageType = "ERROR"
 	MessageTypePong          MessageType = "PONG"
 )
@@ -96,6 +97,24 @@ type ErrorPayload struct {
 // PongPayload 心跳响应负载
 type PongPayload struct {
 	ServerTime int64 `json:"serverTime"`
+}
+
+// ToolCall 工具调用信息
+type ToolCall struct {
+	ID       string                 `json:"id"`
+	ToolName string                 `json:"tool_name"`
+	Params   map[string]interface{} `json:"params"`
+}
+
+// StreamEventPayload 流式事件负载（透明推送所有Agent事件）
+type StreamEventPayload struct {
+	Type         string     `json:"type"`
+	Content      string     `json:"content,omitempty"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	ToolResult   string     `json:"tool_result,omitempty"`
+	ActionType   string     `json:"action_type,omitempty"`
+	Model        string     `json:"model,omitempty"`
+	FinishReason string     `json:"finish_reason,omitempty"`
 }
 
 // NewMessage 创建消息

@@ -69,7 +69,6 @@ type modelStats struct {
 	errorCount   int
 }
 
-// EinoAgentAdapter uses ADK ChatModelAgent with Runner for execution
 type EinoAgentAdapter struct {
 	mu               sync.RWMutex
 	agent            *eino_adk.ChatModelAgent
@@ -137,7 +136,6 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 		primaryModel := adapter.selectPrimaryModel()
 		adapter.primaryModelName = primaryModel.modelName
 
-		// Find primary index
 		for i, m := range adapter.models {
 			if m.name == primaryModel.name {
 				adapter.primaryIndex = i
@@ -145,7 +143,6 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 			}
 		}
 
-		// Build ADK agent with failover config
 		agent, err := adapter.buildADKAgent(tools)
 		if err != nil {
 			logger.Error("Failed to build ADK agent", "error", err)
@@ -153,7 +150,6 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 		}
 		adapter.agent = agent
 
-		// Build Runner
 		adapter.runner = adapter.buildRunner(agent)
 	}
 
@@ -164,7 +160,6 @@ func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino
 	primaryModel := a.models[a.primaryIndex]
 	a.logger.Info("[buildADKAgent] Building ADK agent", "primary_model", primaryModel.name)
 
-	// Build ToolsConfig
 	var toolsConfig eino_adk.ToolsConfig
 	if len(tools) > 0 {
 		a.logger.Info("[buildADKAgent] Registering tools for ADK agent", "tool_count", len(tools))
@@ -181,7 +176,6 @@ func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino
 		}
 	}
 
-	// Build ModelFailoverConfig with reference to adapter for failover logic
 	var failoverConfig *eino_adk.ModelFailoverConfig[*eino_schema.Message]
 	if len(a.models) > 1 {
 		failoverConfig = &eino_adk.ModelFailoverConfig[*eino_schema.Message]{
@@ -204,10 +198,9 @@ func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino
 		}
 	}
 
-	// Create ChatModelAgent config
 	config := &eino_adk.ChatModelAgentConfig{
 		Name:                "WaterTownGuide",
-		Instruction:         "", // System prompt is handled externally by the Runtime
+		Instruction:         "",
 		Model:               primaryModel.model,
 		ToolsConfig:         toolsConfig,
 		ModelFailoverConfig: failoverConfig,
@@ -232,7 +225,6 @@ func (a *EinoAgentAdapter) getFailoverModel(ctx context.Context, failoverCtx *ei
 		return nil, nil, nil
 	}
 
-	// Simple round-robin failover strategy
 	idx := (a.primaryIndex + attempt) % n
 	if idx == a.primaryIndex {
 		return nil, nil, nil
@@ -277,7 +269,6 @@ func (a *EinoAgentAdapter) selectPrimaryModel() modelEntry {
 			}
 		}
 	case StrategyCost, StrategyLatency, StrategyCapability:
-		// These strategies would require additional implementation
 	}
 	if len(a.models) > 0 {
 		return a.models[0]
@@ -299,16 +290,13 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 		o(chatOpts)
 	}
 
-	// Build model options
 	modelOpts := []eino_model.Option{
 		eino_model.WithTemperature(chatOpts.Temperature),
 		eino_model.WithMaxTokens(chatOpts.MaxTokens),
 	}
 
-	// Create callback handler for trace and audit logs
 	handler := newEinoAgentHandler(a.logger)
 
-	// Build AgentRunOptions
 	runOpts := []eino_adk.AgentRunOption{
 		eino_adk.WithChatModelOptions(modelOpts),
 		eino_adk.WithCallbacks(handler),
@@ -317,10 +305,8 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 	a.logger.Info("[Chat] Starting ADK agent run", "message_count", len(messages))
 	startTime := time.Now()
 
-	// Use Runner to execute
 	iter := a.runner.Run(ctx, messages, runOpts...)
 
-	// Collect results from AsyncIterator
 	var finalMsg *eino_schema.Message
 	var lastErr error
 
@@ -335,7 +321,6 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 			continue
 		}
 		if event.Output != nil && event.Output.MessageOutput != nil {
-			// Try to get the message using GetMessage()
 			msgVariant := event.Output.MessageOutput
 			if m, err := msgVariant.GetMessage(); err == nil && m != nil {
 				finalMsg = m
@@ -364,7 +349,7 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 	return finalMsg, &usage, nil
 }
 
-func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (Stream, error) {
+func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (EventStream, error) {
 	if a.agent == nil || a.runner == nil {
 		return nil, errors.New("no ADK agent available")
 	}
@@ -390,147 +375,164 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 
 	iter := a.runner.Run(ctx, messages, runOpts...)
 
-	var finalStream *eino_schema.StreamReader[*eino_schema.Message]
-	var finalMsg *eino_schema.Message
-	var hasContent bool
+	return &adkEventStream{
+		adapter:   a,
+		iter:      iter,
+		ctx:       ctx,
+		startTime: time.Now(),
+	}, nil
+}
+
+type adkEventStream struct {
+	adapter *EinoAgentAdapter
+	iter    interface {
+		Next() (*eino_adk.AgentEvent, bool)
+	}
+	ctx         context.Context
+	msgStream   *eino_schema.StreamReader[*eino_schema.Message]
+	modelName   string
+	startTime   time.Time
+	usage       *ChatUsage
+	mu          sync.Mutex
+	closed      bool
+	eventBuffer []*StreamEvent
+}
+
+func (s *adkEventStream) Recv() (*StreamEvent, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, io.EOF
+	}
+
+	if len(s.eventBuffer) > 0 {
+		event := s.eventBuffer[0]
+		s.eventBuffer = s.eventBuffer[1:]
+		s.mu.Unlock()
+		return event, nil
+	}
+
+	if s.msgStream != nil {
+		msgStream := s.msgStream
+		s.mu.Unlock()
+		return s.recvFromMsgStream(msgStream)
+	}
+	s.mu.Unlock()
 
 	for {
-		event, ok := iter.Next()
+		event, ok := s.iter.Next()
 		if !ok {
-			break
+			s.mu.Lock()
+			s.closed = true
+			s.recordStats(false)
+			s.mu.Unlock()
+			return &StreamEvent{
+				Type:       StreamEventTypeAction,
+				ActionType: "exit",
+				Model:      s.modelName,
+				Usage:      s.usage,
+			}, nil
 		}
 
 		if event.Err != nil {
-			a.logger.Error("[StreamChat] Event error", "error", event.Err)
+			s.adapter.logger.Error("[adkEventStream] Event error", "error", event.Err)
 			continue
 		}
 
 		if event.Output != nil && event.Output.MessageOutput != nil {
 			msgVariant := event.Output.MessageOutput
 
+			if msgVariant.Role == eino_schema.Tool {
+				continue
+			}
+
 			if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
-				finalStream = msgVariant.MessageStream
-				a.logger.Info("[StreamChat] Got MessageStream", "has_content", hasContent)
+				s.mu.Lock()
+				s.msgStream = msgVariant.MessageStream
+				s.mu.Unlock()
+				s.adapter.logger.Info("[adkEventStream] Got MessageStream")
+				return s.recvFromMsgStream(msgVariant.MessageStream)
 			}
 
 			if m, err := msgVariant.GetMessage(); err == nil && m != nil {
+				if len(m.ToolCalls) > 0 {
+					continue
+				}
+
 				if m.Role == eino_schema.Assistant && m.Content != "" {
-					hasContent = true
-					finalMsg = m
-					a.logger.Info("[StreamChat] Got message content", "content_len", len(m.Content))
+					s.mu.Lock()
+					if s.modelName == "" {
+						s.modelName = s.adapter.getCurrentModelName(m)
+					}
+					s.usage = &ChatUsage{}
+					*s.usage = s.adapter.extractUsage(m)
+					modelName := s.modelName
+					usage := s.usage
+					s.mu.Unlock()
+
+					return &StreamEvent{
+						Type:         StreamEventTypeChunk,
+						Content:      m.Content,
+						FinishReason: m.ResponseMeta.FinishReason,
+						Model:        modelName,
+						Usage:        usage,
+					}, nil
 				}
 			}
 		}
 	}
-
-	if finalStream != nil {
-		a.logger.Info("[StreamChat] Returning final stream")
-		return &adkStream{
-			adapter:   a,
-			msgStream: finalStream,
-			startTime: time.Now(),
-		}, nil
-	}
-
-	if finalMsg != nil {
-		a.logger.Info("[StreamChat] Returning final message", "content_len", len(finalMsg.Content))
-		return &singleChunkStream{
-			adapter:   a,
-			message:   finalMsg,
-			startTime: time.Now(),
-		}, nil
-	}
-
-	return nil, errors.New("no response from ADK agent")
 }
 
-// singleChunkStream returns the complete response at once
-// This is a fallback when ADK returns non-streaming response
-type singleChunkStream struct {
-	adapter   *EinoAgentAdapter
-	message   *eino_schema.Message
-	startTime time.Time
-	sent      bool
-}
-
-func (s *singleChunkStream) Recv() (*StreamChunk, error) {
-	if s.sent {
-		return nil, io.EOF
-	}
-	s.sent = true
-
-	// Record stats
-	latency := time.Since(s.startTime)
-	modelName := s.adapter.getCurrentModelName(s.message)
-	usage := s.adapter.extractUsage(s.message)
-	s.adapter.recordStats(modelName, latency, false, &usage)
-
-	return &StreamChunk{
-		Content:      s.message.Content,
-		FinishReason: s.message.ResponseMeta.FinishReason,
-		Model:        modelName,
-		Usage:        s.adapter.extractUsage(s.message),
-	}, nil
-}
-
-func (s *singleChunkStream) Close() error {
-	return nil
-}
-
-// adkStream wraps ADK MessageStream to implement Stream interface
-// It simply converts *eino_schema.Message to *StreamChunk
-type adkStream struct {
-	adapter   *EinoAgentAdapter
-	msgStream *eino_schema.StreamReader[*eino_schema.Message]
-	modelName string
-	startTime time.Time
-	usage     *ChatUsage
-	mu        sync.Mutex
-	closed    bool
-}
-
-func (s *adkStream) Recv() (*StreamChunk, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
-		return nil, io.EOF
-	}
-
-	if s.msgStream == nil {
-		s.closed = true
-		s.recordStats(true)
-		return nil, io.EOF
-	}
-
-	chunk, err := s.msgStream.Recv()
+func (s *adkEventStream) recvFromMsgStream(msgStream *eino_schema.StreamReader[*eino_schema.Message]) (*StreamEvent, error) {
+	chunk, err := msgStream.Recv()
 	if err == io.EOF {
-		s.closed = true
-		s.recordStats(false)
-		return nil, io.EOF
+		msgStream.Close()
+		s.mu.Lock()
+		s.msgStream = nil
+		s.mu.Unlock()
+		var finishReason string
+		if chunk != nil && chunk.ResponseMeta != nil {
+			finishReason = chunk.ResponseMeta.FinishReason
+		}
+		return &StreamEvent{
+			Type:         StreamEventTypeChunk,
+			Content:      "",
+			FinishReason: finishReason,
+			Model:        s.modelName,
+			Usage:        s.usage,
+		}, nil
 	}
 	if err != nil {
-		s.closed = true
-		s.recordStats(true)
+		msgStream.Close()
+		s.mu.Lock()
+		s.msgStream = nil
+		s.mu.Unlock()
 		return nil, err
 	}
 
+	s.mu.Lock()
 	if s.modelName == "" {
 		s.modelName = s.adapter.getCurrentModelName(chunk)
 	}
-
 	s.usage = &ChatUsage{}
 	*s.usage = s.adapter.extractUsage(chunk)
+	s.mu.Unlock()
 
-	return &StreamChunk{
+	var finishReason string
+	if chunk.ResponseMeta != nil {
+		finishReason = chunk.ResponseMeta.FinishReason
+	}
+
+	return &StreamEvent{
+		Type:         StreamEventTypeChunk,
 		Content:      chunk.Content,
-		FinishReason: chunk.ResponseMeta.FinishReason,
+		FinishReason: finishReason,
 		Model:        s.modelName,
-		Usage:        *s.usage,
+		Usage:        s.usage,
 	}, nil
 }
 
-func (s *adkStream) Close() error {
+func (s *adkEventStream) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -546,7 +548,7 @@ func (s *adkStream) Close() error {
 	return nil
 }
 
-func (s *adkStream) recordStats(isError bool) {
+func (s *adkEventStream) recordStats(isError bool) {
 	if s.startTime != (time.Time{}) && s.modelName != "" {
 		latency := time.Since(s.startTime)
 		s.adapter.recordStats(s.modelName, latency, isError, s.usage)

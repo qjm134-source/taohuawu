@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/watertown/guide/pkg/logging"
+	"github.com/watertown/guide/pkg/utils"
 )
 
 // LayeredCache 多层缓存实现
@@ -34,7 +35,10 @@ func NewLayeredCache(config CacheConfig, embeddingAPI EmbeddingAPI, logger loggi
 	}
 
 	// 启动定期清理
-	go c.cleanup()
+	go func() {
+		defer utils.RecoverWithCustomLogger("LayeredCache.cleanup", c.logger)
+		c.cleanup()
+	}()
 
 	return c
 }
@@ -105,7 +109,10 @@ func (c *LayeredCache) Set(ctx context.Context, question string, answer string, 
 
 	// 如果有 Embedding API，同时构建语义索引
 	if c.embeddingAPI != nil {
-		go c.buildSemanticIndex(ctx, question, answer, model, tokensSaved)
+		go func() {
+			defer utils.RecoverWithCustomLogger("LayeredCache.buildSemanticIndex", c.logger)
+			c.buildSemanticIndex(ctx, question, answer, model, tokensSaved)
+		}()
 	}
 }
 

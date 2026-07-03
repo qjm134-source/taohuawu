@@ -40,8 +40,39 @@ type Stream interface {
 	Close() error
 }
 
+type StreamEventType string
+
+const (
+	StreamEventTypeChunk      StreamEventType = "stream_chunk"
+	StreamEventTypeToolCalls  StreamEventType = "tool_calls"
+	StreamEventTypeToolResult StreamEventType = "tool_result"
+	StreamEventTypeAction     StreamEventType = "action"
+)
+
+type ToolCall struct {
+	ID       string                 `json:"id"`
+	ToolName string                 `json:"tool_name"`
+	Params   map[string]interface{} `json:"params"`
+}
+
+type StreamEvent struct {
+	Type         StreamEventType `json:"type"`
+	Content      string          `json:"content,omitempty"`
+	ToolCalls    []ToolCall      `json:"tool_calls,omitempty"`
+	ToolResult   string          `json:"tool_result,omitempty"`
+	ActionType   string          `json:"action_type,omitempty"`
+	Model        string          `json:"model,omitempty"`
+	Usage        *ChatUsage      `json:"usage,omitempty"`
+	FinishReason string          `json:"finish_reason,omitempty"`
+}
+
+type EventStream interface {
+	Recv() (*StreamEvent, error)
+	Close() error
+}
+
 type Adapter interface {
 	Chat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (*eino_schema.Message, *ChatUsage, error)
-	StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (Stream, error)
+	StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (EventStream, error)
 	IsHealthy() bool
 }

@@ -3,6 +3,8 @@ package websocket
 import (
 	"context"
 	"sync"
+
+	"github.com/watertown/guide/pkg/utils"
 )
 
 // WorkerPool 工作池（按租户隔离）
@@ -38,6 +40,7 @@ func (p *WorkerPool) Acquire(tenantID string, size int) context.CancelFunc {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
+		defer utils.RecoverWithLog("WorkerPool")
 		pool <- struct{}{}
 		<-ctx.Done()
 		<-pool
