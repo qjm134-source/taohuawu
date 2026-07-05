@@ -422,8 +422,9 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	var stream llm.EventStream
 	var err error
 
-	// 创建 LLM.StreamChat span（必须在 StreamChat 调用之前创建）
 	llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
+
+	eventChan := make(chan *llm.StreamEvent, 100)
 
 	if isHealthy {
 		stream, err = r.llmAdapter.StreamChat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
@@ -448,14 +449,13 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
 	}
 
-	eventChan := make(chan *llm.StreamEvent, 100)
 	statsChan := make(chan *LLMStats, 1)
 
 	go func() {
 		defer utils.RecoverWithCustomLogger("HandleChatStream", r.logger)
 		defer close(eventChan)
-		defer stream.Close()
 		defer observability.EndChildSpan(llmCtx, llmSpan)
+		defer stream.Close()
 
 		var fullReply strings.Builder
 		stats := &LLMStats{
@@ -466,6 +466,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		var finishReason string
 		var ttftMs int64 = 0
 		var streamSpan trace.Span
+
 		for {
 			event, err := stream.Recv()
 
@@ -484,6 +485,8 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 			if event == nil {
 				continue
 			}
+
+			r.logger.Debug("[HandleChatStream] Got event from adapter", "type", event.Type, "content_len", len(event.Content))
 
 			if event.Type == llm.StreamEventTypeChunk {
 				if chunkCount == 0 {
@@ -508,12 +511,20 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 				if event.FinishReason != "" {
 					finishReason = event.FinishReason
 				}
-			} else if event.Type == llm.StreamEventTypeToolCalls {
-				var toolNames []string
-				for _, tc := range event.ToolCalls {
-					toolNames = append(toolNames, tc.ToolName)
+
+				if len(event.ToolCalls) > 0 && len(stats.ToolsUsed) == 0 {
+					var toolNames []string
+					for _, tc := range event.ToolCalls {
+						toolNames = append(toolNames, tc.ToolName)
+					}
+					stats.ToolsUsed = toolNames
 				}
-				stats.ToolsUsed = toolNames
+
+				select {
+				case eventChan <- event:
+				case <-ctx.Done():
+					return
+				}
 			} else if event.Type == llm.StreamEventTypeAction && event.ActionType == "exit" {
 				if event.Model != "" && stats.Model == "" {
 					stats.Model = event.Model
@@ -524,8 +535,22 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 					stats.TotalTokens = event.Usage.TotalTokens
 				}
 			}
+		}
 
-			eventChan <- event
+		if finishReason == "" && fullReply.Len() > 0 {
+			finishReason = "stop"
+		}
+
+		if finishReason != "" {
+			select {
+			case eventChan <- &llm.StreamEvent{
+				Type:         llm.StreamEventTypeChunk,
+				Content:      "",
+				FinishReason: finishReason,
+				Model:        stats.Model,
+			}:
+			case <-ctx.Done():
+			}
 		}
 
 		observability.EndChildSpan(llmCtx, streamSpan)

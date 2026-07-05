@@ -41,6 +41,26 @@ func (a *FallbackAdapter) Chat(ctx context.Context, messages []*eino_schema.Mess
 	}, &ChatUsage{Model: "fallback"}, nil
 }
 
+type fallbackEventStream struct {
+	streamChan <-chan *StreamResult
+	done       chan struct{}
+}
+
+func (s *fallbackEventStream) Recv() (*StreamEvent, error) {
+	result, ok := <-s.streamChan
+	if !ok {
+		return nil, io.EOF
+	}
+	if result.Err != nil {
+		return nil, result.Err
+	}
+	return result.Event, nil
+}
+
+func (s *fallbackEventStream) Close() {
+	close(s.done)
+}
+
 func (a *FallbackAdapter) StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (EventStream, error) {
 	userMessage := ""
 	for _, msg := range messages {
@@ -52,58 +72,60 @@ func (a *FallbackAdapter) StreamChat(ctx context.Context, messages []*eino_schem
 
 	response := a.matchResponse(userMessage)
 
-	return &fallbackEventStream{
-		response:  response,
-		pos:       0,
-		chunkSize: 10,
-	}, nil
-}
+	streamChan := make(chan *StreamResult, 10)
+	done := make(chan struct{})
 
-type fallbackEventStream struct {
-	response  string
-	pos       int
-	chunkSize int
-	closed    bool
-	sentExit  bool
-}
+	go func() {
+		defer close(streamChan)
 
-func (s *fallbackEventStream) Recv() (*StreamEvent, error) {
-	if s.closed {
-		return nil, io.EOF
-	}
+		pos := 0
+		chunkSize := 10
 
-	if s.sentExit {
-		s.closed = true
-		return nil, io.EOF
-	}
+		for pos < len(response) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			default:
+			}
 
-	if s.pos >= len(s.response) {
-		s.sentExit = true
-		return &StreamEvent{
-			Type:       StreamEventTypeAction,
-			ActionType: "exit",
-			Model:      "fallback",
-		}, nil
-	}
+			end := pos + chunkSize
+			if end > len(response) {
+				end = len(response)
+			}
 
-	end := s.pos + s.chunkSize
-	if end > len(s.response) {
-		end = len(s.response)
-	}
+			select {
+			case streamChan <- &StreamResult{
+				Event: &StreamEvent{
+					Type:    StreamEventTypeChunk,
+					Content: response[pos:end],
+					Model:   "fallback",
+				},
+			}:
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			}
 
-	event := &StreamEvent{
-		Type:    StreamEventTypeChunk,
-		Content: s.response[s.pos:end],
-		Model:   "fallback",
-	}
-	s.pos = end
+			pos = end
+		}
 
-	return event, nil
-}
+		select {
+		case streamChan <- &StreamResult{
+			Event: &StreamEvent{
+				Type:       StreamEventTypeAction,
+				ActionType: "exit",
+				Model:      "fallback",
+			},
+		}:
+		case <-ctx.Done():
+		case <-done:
+		}
+	}()
 
-func (s *fallbackEventStream) Close() error {
-	s.closed = true
-	return nil
+	return &fallbackEventStream{streamChan: streamChan, done: done}, nil
 }
 
 func (a *FallbackAdapter) matchResponse(message string) string {

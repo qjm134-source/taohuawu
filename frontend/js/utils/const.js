@@ -48,6 +48,7 @@ const MESSAGE_TYPES = {
     NPC_REPLY: 'NPC_REPLY',
     ERROR: 'ERROR',
     PONG: 'PONG',
+    STREAM_EVENT: 'STREAM_EVENT',
 };
 
 // 表情符号

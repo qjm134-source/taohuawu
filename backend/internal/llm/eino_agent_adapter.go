@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"io"
 	"math/rand"
@@ -349,6 +350,26 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 	return finalMsg, &usage, nil
 }
 
+type adkEventStream struct {
+	streamChan <-chan *StreamResult
+	done       chan struct{}
+}
+
+func (s *adkEventStream) Recv() (*StreamEvent, error) {
+	result, ok := <-s.streamChan
+	if !ok {
+		return nil, io.EOF
+	}
+	if result.Err != nil {
+		return nil, result.Err
+	}
+	return result.Event, nil
+}
+
+func (s *adkEventStream) Close() {
+	close(s.done)
+}
+
 func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (EventStream, error) {
 	if a.agent == nil || a.runner == nil {
 		return nil, errors.New("no ADK agent available")
@@ -375,184 +396,195 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 
 	iter := a.runner.Run(ctx, messages, runOpts...)
 
-	return &adkEventStream{
-		adapter:   a,
-		iter:      iter,
-		ctx:       ctx,
-		startTime: time.Now(),
-	}, nil
-}
+	streamChan := make(chan *StreamResult, 100)
+	done := make(chan struct{})
 
-type adkEventStream struct {
-	adapter *EinoAgentAdapter
-	iter    interface {
-		Next() (*eino_adk.AgentEvent, bool)
-	}
-	ctx         context.Context
-	msgStream   *eino_schema.StreamReader[*eino_schema.Message]
-	modelName   string
-	startTime   time.Time
-	usage       *ChatUsage
-	mu          sync.Mutex
-	closed      bool
-	eventBuffer []*StreamEvent
-}
+	go func() {
+		defer close(streamChan)
 
-func (s *adkEventStream) Recv() (*StreamEvent, error) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil, io.EOF
-	}
+		startTime := time.Now()
+		var modelName string
+		var usage *ChatUsage
 
-	if len(s.eventBuffer) > 0 {
-		event := s.eventBuffer[0]
-		s.eventBuffer = s.eventBuffer[1:]
-		s.mu.Unlock()
-		return event, nil
-	}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			default:
+			}
 
-	if s.msgStream != nil {
-		msgStream := s.msgStream
-		s.mu.Unlock()
-		return s.recvFromMsgStream(msgStream)
-	}
-	s.mu.Unlock()
+			event, ok := iter.Next()
+			if !ok {
+				var toolsUsed []string
+				if h, ok := handler.(*einoAgentHandler); ok {
+					toolsUsed = h.GetToolsUsed()
+				}
 
-	for {
-		event, ok := s.iter.Next()
-		if !ok {
-			s.mu.Lock()
-			s.closed = true
-			s.recordStats(false)
-			s.mu.Unlock()
-			return &StreamEvent{
-				Type:       StreamEventTypeAction,
-				ActionType: "exit",
-				Model:      s.modelName,
-				Usage:      s.usage,
-			}, nil
-		}
+				select {
+				case streamChan <- &StreamResult{
+					Event: &StreamEvent{
+						Type:       StreamEventTypeAction,
+						ActionType: "exit",
+						Model:      modelName,
+						Usage:      usage,
+						ToolsUsed:  toolsUsed,
+					},
+				}:
+				case <-ctx.Done():
+				case <-done:
+				}
+				if startTime != (time.Time{}) && modelName != "" {
+					latency := time.Since(startTime)
+					a.recordStats(modelName, latency, false, usage)
+				}
+				return
+			}
 
-		if event.Err != nil {
-			s.adapter.logger.Error("[adkEventStream] Event error", "error", event.Err)
-			continue
-		}
-
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			msgVariant := event.Output.MessageOutput
-
-			if msgVariant.Role == eino_schema.Tool {
+			if event.Err != nil {
+				a.logger.Error("[StreamChat] Event error", "error", event.Err)
 				continue
 			}
 
-			if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
-				s.mu.Lock()
-				s.msgStream = msgVariant.MessageStream
-				s.mu.Unlock()
-				s.adapter.logger.Info("[adkEventStream] Got MessageStream")
-				return s.recvFromMsgStream(msgVariant.MessageStream)
-			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				msgVariant := event.Output.MessageOutput
 
-			if m, err := msgVariant.GetMessage(); err == nil && m != nil {
-				if len(m.ToolCalls) > 0 {
+				if msgVariant.Role == eino_schema.Tool {
 					continue
 				}
 
-				if m.Role == eino_schema.Assistant && m.Content != "" {
-					s.mu.Lock()
-					if s.modelName == "" {
-						s.modelName = s.adapter.getCurrentModelName(m)
+				if msgVariant.Message != nil && msgVariant.Message.Role == eino_schema.Assistant && msgVariant.Message.Content != "" && !msgVariant.IsStreaming {
+					if modelName == "" {
+						modelName = a.getCurrentModelName(msgVariant.Message)
 					}
-					s.usage = &ChatUsage{}
-					*s.usage = s.adapter.extractUsage(m)
-					modelName := s.modelName
-					usage := s.usage
-					s.mu.Unlock()
 
-					return &StreamEvent{
-						Type:         StreamEventTypeChunk,
-						Content:      m.Content,
-						FinishReason: m.ResponseMeta.FinishReason,
-						Model:        modelName,
-						Usage:        usage,
-					}, nil
+					a.logger.Debug("[StreamChat] Sending non-streaming assistant message", "content_len", len(msgVariant.Message.Content))
+					select {
+					case streamChan <- &StreamResult{
+						Event: &StreamEvent{
+							Type:    StreamEventTypeChunk,
+							Content: msgVariant.Message.Content,
+							Model:   modelName,
+						},
+					}:
+						a.logger.Debug("[StreamChat] Non-streaming message sent")
+					case <-ctx.Done():
+						return
+					case <-done:
+						return
+					}
+					continue
+				}
+
+				if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
+					a.logger.Debug("[StreamChat] Got streaming message, starting to read chunks")
+					stream := msgVariant.MessageStream
+
+					for {
+						select {
+						case <-ctx.Done():
+							stream.Close()
+							return
+						case <-done:
+							stream.Close()
+							return
+						default:
+						}
+
+						chunk, err := stream.Recv()
+						a.logger.Debug("[StreamChat] Read chunk from msgStream", "err", err, "chunk", chunk)
+
+						if err == io.EOF {
+							stream.Close()
+
+							var finishReason string
+							if chunk != nil && chunk.ResponseMeta != nil {
+								finishReason = chunk.ResponseMeta.FinishReason
+							}
+
+							select {
+							case streamChan <- &StreamResult{
+								Event: &StreamEvent{
+									Type:         StreamEventTypeChunk,
+									Content:      "",
+									FinishReason: finishReason,
+									Model:        modelName,
+									Usage:        usage,
+								},
+							}:
+							case <-ctx.Done():
+							case <-done:
+							}
+							break
+						}
+
+						if err != nil {
+							stream.Close()
+							select {
+							case streamChan <- &StreamResult{Err: err}:
+							case <-ctx.Done():
+							case <-done:
+							}
+							return
+						}
+
+						if modelName == "" {
+							modelName = a.getCurrentModelName(chunk)
+						}
+						usage = &ChatUsage{}
+						*usage = a.extractUsage(chunk)
+
+						var finishReason string
+						if chunk.ResponseMeta != nil {
+							finishReason = chunk.ResponseMeta.FinishReason
+						}
+
+						var toolCalls []ToolCall
+						if len(chunk.ToolCalls) > 0 {
+							toolCalls = make([]ToolCall, 0, len(chunk.ToolCalls))
+							for _, tc := range chunk.ToolCalls {
+								var params map[string]interface{}
+								if tc.Function.Arguments != "" {
+									if err := json.Unmarshal([]byte(tc.Function.Arguments), &params); err != nil {
+										params = map[string]interface{}{"arguments": tc.Function.Arguments}
+									}
+								}
+								toolCalls = append(toolCalls, ToolCall{
+									ID:       tc.ID,
+									ToolName: tc.Function.Name,
+									Params:   params,
+								})
+							}
+						}
+
+						a.logger.Debug("[StreamChat] Sending chunk to streamChan", "content_len", len(chunk.Content))
+						select {
+						case streamChan <- &StreamResult{
+							Event: &StreamEvent{
+								Type:         StreamEventTypeChunk,
+								Content:      chunk.Content,
+								FinishReason: finishReason,
+								Model:        modelName,
+								Usage:        usage,
+								ToolCalls:    toolCalls,
+							},
+						}:
+							a.logger.Debug("[StreamChat] Chunk sent to streamChan")
+						case <-ctx.Done():
+							stream.Close()
+							return
+						case <-done:
+							stream.Close()
+							return
+						}
+					}
 				}
 			}
 		}
-	}
-}
+	}()
 
-func (s *adkEventStream) recvFromMsgStream(msgStream *eino_schema.StreamReader[*eino_schema.Message]) (*StreamEvent, error) {
-	chunk, err := msgStream.Recv()
-	if err == io.EOF {
-		msgStream.Close()
-		s.mu.Lock()
-		s.msgStream = nil
-		s.mu.Unlock()
-		var finishReason string
-		if chunk != nil && chunk.ResponseMeta != nil {
-			finishReason = chunk.ResponseMeta.FinishReason
-		}
-		return &StreamEvent{
-			Type:         StreamEventTypeChunk,
-			Content:      "",
-			FinishReason: finishReason,
-			Model:        s.modelName,
-			Usage:        s.usage,
-		}, nil
-	}
-	if err != nil {
-		msgStream.Close()
-		s.mu.Lock()
-		s.msgStream = nil
-		s.mu.Unlock()
-		return nil, err
-	}
-
-	s.mu.Lock()
-	if s.modelName == "" {
-		s.modelName = s.adapter.getCurrentModelName(chunk)
-	}
-	s.usage = &ChatUsage{}
-	*s.usage = s.adapter.extractUsage(chunk)
-	s.mu.Unlock()
-
-	var finishReason string
-	if chunk.ResponseMeta != nil {
-		finishReason = chunk.ResponseMeta.FinishReason
-	}
-
-	return &StreamEvent{
-		Type:         StreamEventTypeChunk,
-		Content:      chunk.Content,
-		FinishReason: finishReason,
-		Model:        s.modelName,
-		Usage:        s.usage,
-	}, nil
-}
-
-func (s *adkEventStream) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	if s.msgStream != nil {
-		s.msgStream.Close()
-		s.msgStream = nil
-	}
-	s.recordStats(true)
-	return nil
-}
-
-func (s *adkEventStream) recordStats(isError bool) {
-	if s.startTime != (time.Time{}) && s.modelName != "" {
-		latency := time.Since(s.startTime)
-		s.adapter.recordStats(s.modelName, latency, isError, s.usage)
-	}
+	return &adkEventStream{streamChan: streamChan, done: done}, nil
 }
 
 func (a *EinoAgentAdapter) getCurrentModelName(msg *eino_schema.Message) string {

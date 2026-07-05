@@ -63,7 +63,6 @@ class WaterTownScene extends Phaser.Scene {
         this.wsClient.onConnect = () => {
             this.isConnected = true;
             this.connectionStatus.setText('已连接').setBackgroundColor('#008000');
-            console.log('WebSocket connected');
 
             // 发送连接消息
             this.playerId = this.wsClient.generatePlayerId();
@@ -73,11 +72,9 @@ class WaterTownScene extends Phaser.Scene {
         this.wsClient.onDisconnect = () => {
             this.isConnected = false;
             this.connectionStatus.setText('连接断开').setBackgroundColor('#FF0000');
-            console.log('WebSocket disconnected');
         };
 
         this.wsClient.onError = (error) => {
-            console.error('WebSocket error:', error);
             this.connectionStatus.setText('连接错误').setBackgroundColor('#FF0000');
         };
 
@@ -107,14 +104,16 @@ class WaterTownScene extends Phaser.Scene {
                 // 心跳响应，无需处理
                 break;
 
+            case MESSAGE_TYPES.STREAM_EVENT:
+                this.handleStreamEvent(message);
+                break;
+
             default:
-                console.warn('Unknown message type:', message.type);
         }
     }
 
     handleWelcome(message) {
         const payload = message.payload;
-        console.log('Welcome:', payload);
 
         // 显示欢迎消息
         this.dialogBox.show(payload.guideName, payload.message, 'happy');
@@ -131,7 +130,6 @@ class WaterTownScene extends Phaser.Scene {
 
     handleNPCReply(message) {
         const payload = message.payload;
-        console.log('NPC Reply:', payload);
 
         // 显示回复
         this.dialogBox.show(payload.guideName, payload.message, payload.emotion);
@@ -143,9 +141,20 @@ class WaterTownScene extends Phaser.Scene {
         this.inputBox.focus();
     }
 
+    handleStreamEvent(message) {
+        const payload = message.payload;
+
+        if (payload.content && payload.content !== '') {
+            this.dialogBox.append(payload.content);
+        }
+
+        if (payload.finishReason && payload.finishReason !== '') {
+            this.inputBox.focus();
+        }
+    }
+
     handleError(message) {
         const payload = message.payload;
-        console.error('Error:', payload);
 
         // 显示错误消息
         this.dialogBox.show('系统', payload.message, 'confused');
@@ -161,8 +170,6 @@ class WaterTownScene extends Phaser.Scene {
             this.dialogBox.show('系统', '正在连接中，请稍候', 'confused');
             return;
         }
-
-        console.log('Input:', text);
 
         // 发送聊天消息
         this.wsClient.sendChatMessage(text, this.playerId);

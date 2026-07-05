@@ -13,8 +13,6 @@
             speed: 80,
             startDelay: 500,
             onComplete: () => {
-                // 打字完成后光标继续闪烁
-                console.log('[App] Welcome typewriter complete');
             },
         }
     );
@@ -48,17 +46,14 @@
         clearMessageTimeout();
 
         isWaitingForReply = true;
-        console.log('[App] Message timeout started:', MESSAGE_TIMEOUT.duration + 'ms');
 
         // 警告计时器
         messageWarningTimer = setTimeout(() => {
-            console.log('[App] Message timeout warning: still waiting for response...');
             UI.showTip('NPC 正在思考中，请稍候...', 'warning');
         }, MESSAGE_TIMEOUT.warningTime);
 
         // 超时计时器
         messageTimeoutTimer = setTimeout(() => {
-            console.log('[App] Message timeout: no response received');
             isWaitingForReply = false;
             UI.showTip('抱歉，NPC 响应超时，请稍后再试', 'error');
 
@@ -87,8 +82,6 @@
      * 处理服务器消息
      */
     WSClient.onMessage = (message) => {
-        console.log('[App] Received:', message.type);
-
         switch (message.type) {
             case WSClient.MSG_TYPE.WELCOME:
                 handleWelcome(message);
@@ -106,8 +99,11 @@
                 handleError(message);
                 break;
 
+            case WSClient.MSG_TYPE.STREAM_EVENT:
+                handleStreamEvent(message);
+                break;
+
             default:
-                console.log('[App] Unknown message type:', message.type);
         }
     };
 
@@ -115,7 +111,6 @@
      * 连接成功
      */
     WSClient.onConnect = () => {
-        console.log('[App] WebSocket connected');
         UI.setConnectionStatus('connected');
         UI.setInputEnabled(true);
     };
@@ -124,7 +119,6 @@
      * 连接断开
      */
     WSClient.onDisconnect = () => {
-        console.log('[App] WebSocket disconnected');
         UI.setConnectionStatus('disconnected');
         UI.setInputEnabled(false);
     };
@@ -133,7 +127,6 @@
      * 连接错误
      */
     WSClient.onError = (error) => {
-        console.error('[App] WebSocket error:', error);
         UI.setConnectionStatus('disconnected');
     };
 
@@ -147,8 +140,6 @@
             const payload = message.payload;
             const welcomeMsg = payload.message || '欢迎来到江南水乡！';
 
-            console.log('[App] Welcome:', welcomeMsg);
-
             // 打字机显示欢迎词
             UI.showWelcome(welcomeMsg, (text) => {
                 welcomeTypewriter.start(text);
@@ -161,7 +152,6 @@
                 }, welcomeMsg.length * 80 + 1000); // 等打字机结束后显示
             }
         } catch (err) {
-            console.error('[App] Failed to handle welcome:', err);
         }
     }
 
@@ -172,8 +162,6 @@
         try {
             const payload = message.payload;
             const reply = payload.message || '';
-
-            console.log('[App] NPC reply:', reply);
 
             // 清除超时计时器
             clearMessageTimeout();
@@ -186,7 +174,6 @@
                 UI.updateDebugPanel(payload.stats);
             }
         } catch (err) {
-            console.error('[App] Failed to handle NPC reply:', err);
         }
     }
 
@@ -198,9 +185,6 @@
             const payload = message.payload;
             const chunk = payload.chunk || '';
             const isFinal = payload.isFinal || false;
-
-            console.log('[App] NPC reply chunk:', chunk, 'isFinal:', isFinal);
-            console.log('[App] Payload:', payload);
 
             // 累加片段
             streamingReply += chunk;
@@ -217,13 +201,6 @@
                 UI.completeStreaming();
 
                 // 更新调试面板
-                console.log('[App] Final payload:', JSON.stringify(payload));
-                console.log('[App] Final payload model:', payload.model);
-                console.log('[App] Final payload latencyMs:', payload.latencyMs);
-                console.log('[App] Final payload inputTokens:', payload.inputTokens);
-                console.log('[App] Final payload outputTokens:', payload.outputTokens);
-                console.log('[App] Final payload totalTokens:', payload.totalTokens);
-                console.log('[App] Final payload cost:', payload.cost);
                 const stats = {
                     model: payload.model || 'unknown',
                     inputTokens: payload.inputTokens || 0,
@@ -233,7 +210,6 @@
                     latencyMs: payload.latencyMs || 0,
                     cacheHit: false,
                 };
-                console.log('[App] Stats to update:', JSON.stringify(stats));
                 UI.updateDebugPanel(stats);
 
                 // 保存到历史记录
@@ -248,8 +224,6 @@
                 streamingStats = null;
             }
         } catch (err) {
-            console.error('[App] Failed to handle NPC reply chunk:', err);
-            // 重置缓存以防出错
             streamingReply = '';
             streamingStats = null;
         }
@@ -263,12 +237,55 @@
             const payload = message.payload;
             const errorMsg = payload.message || '发生了未知错误';
 
-            console.error('[App] Server error:', errorMsg);
-
             // 在气泡中显示错误
             UI.updateBubble('抱歉，' + errorMsg);
         } catch (err) {
-            console.error('[App] Failed to handle error:', err);
+        }
+    }
+
+    /**
+     * 处理流式事件（来自 LLM 流式响应）
+     */
+    function handleStreamEvent(message) {
+        try {
+            const payload = message.payload;
+            const content = payload.content || '';
+            const finishReason = payload.finishReason || '';
+
+            if (content && content !== '') {
+                if (streamingReply === '') {
+                    streamingReply = content;
+                } else {
+                    streamingReply += content;
+                }
+                UI.updateBubble(streamingReply, false, false);
+                clearMessageTimeout();
+            }
+
+            if (finishReason && finishReason !== '') {
+                const stats = {
+                    model: payload.model || 'unknown',
+                    inputTokens: payload.inputTokens || 0,
+                    outputTokens: payload.outputTokens || 0,
+                    totalTokens: payload.totalTokens || 0,
+                    cost: payload.cost || 0,
+                    latencyMs: payload.latencyMs || 0,
+                    cacheHit: false,
+                };
+                UI.updateDebugPanel(stats);
+
+                const userMsg = window._lastUserMessage;
+                if (userMsg) {
+                    UI.addToHistory(userMsg, streamingReply);
+                    window._lastUserMessage = null;
+                }
+
+                streamingReply = '';
+                streamingStats = null;
+            }
+        } catch (err) {
+            streamingReply = '';
+            streamingStats = null;
         }
     }
 
@@ -285,6 +302,8 @@
             UI.updateBubble('连接已断开，正在尝试重连...');
             return;
         }
+
+        resetStreamingCache();
 
         // 显示思考状态
         UI.updateBubble(null, true);
@@ -413,8 +432,6 @@
     // ========== 启动 ==========
 
     function boot() {
-        console.log('[App] Booting...');
-
         // 绑定事件
         bindEvents();
 
@@ -427,8 +444,6 @@
 
         // 初始显示气泡
         UI.updateBubble('正在连接水乡...', true);
-
-        console.log('[App] Boot complete');
     }
 
     // DOM 加载完成后启动

@@ -64,11 +64,17 @@ type StreamEvent struct {
 	Model        string          `json:"model,omitempty"`
 	Usage        *ChatUsage      `json:"usage,omitempty"`
 	FinishReason string          `json:"finish_reason,omitempty"`
+	ToolsUsed    []string        `json:"tools_used,omitempty"`
+}
+
+type StreamResult struct {
+	Event *StreamEvent
+	Err   error
 }
 
 type EventStream interface {
 	Recv() (*StreamEvent, error)
-	Close() error
+	Close()
 }
 
 type Adapter interface {

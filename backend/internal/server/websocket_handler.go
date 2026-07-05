@@ -270,10 +270,14 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 
 	var fullReply strings.Builder
 
-	// 流式发送响应（透明推送所有事件）
+	// 流式发送响应（只推送有内容或工具调用的事件）
 	for event := range eventChan {
 		if event.Type == llm.StreamEventTypeChunk && event.Content != "" {
 			fullReply.WriteString(event.Content)
+		}
+
+		if event.Content == "" && len(event.ToolCalls) == 0 && event.FinishReason == "" {
+			continue
 		}
 
 		toolCalls := make([]websocket.ToolCall, 0, len(event.ToolCalls))

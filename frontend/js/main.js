@@ -35,5 +35,4 @@ window.addEventListener('load', () => {
 
     // 启动游戏
     const game = new Game();
-    console.log('Water Town Guide Game started');
 });

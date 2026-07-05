@@ -118,6 +118,12 @@ class Typewriter {
         return this.displayedText;
     }
 
+    append(text) {
+        this.text += text;
+        this.displayedText += text;
+        this.textObject.setText(this.displayedText);
+    }
+
     isTyping() {
         return this.isPlaying && !this.isPaused;
     }

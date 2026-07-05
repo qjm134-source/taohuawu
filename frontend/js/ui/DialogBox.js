@@ -136,6 +136,18 @@ class DialogBox extends Phaser.GameObjects.Container {
         }
     }
 
+    append(text) {
+        if (!this.isVisible) {
+            this.show('小荷', text, 'happy');
+            return;
+        }
+
+        this.currentText += text;
+        if (this.typewriter) {
+            this.typewriter.append(text);
+        }
+    }
+
     updateEmotion(emotion) {
         this.emojiLabel.setText(EMOJIS[emotion] || EMOJIS.neutral);
     }

@@ -38,8 +38,6 @@ const WSClient = (() => {
         pingInterval: 30000,
     };
 
-    console.log('[WS] WebSocket URL:', wsUrl);
-
     // 消息类型常量
     const MSG_TYPE = {
         CONNECTION: 'CONNECTION',
@@ -50,6 +48,7 @@ const WSClient = (() => {
         NPC_REPLY_CHUNK: 'NPC_REPLY_CHUNK', // 流式响应片段
         ERROR: 'ERROR',
         PONG: 'PONG',
+        STREAM_EVENT: 'STREAM_EVENT',
     };
 
     // 内部状态
@@ -123,7 +122,6 @@ const WSClient = (() => {
             socket = new WebSocket(CONFIG.url);
 
             socket.onopen = () => {
-                console.log('[WS] Connected');
                 isConnected = true;
                 reconnectAttempts = 0;
                 startPing();
@@ -148,24 +146,20 @@ const WSClient = (() => {
                 if (message.type === MSG_TYPE.WELCOME && message.payload && message.payload.playerId) {
                     playerId = message.payload.playerId;
                     localStorage.setItem('ws_player_id', playerId);
-                    console.log('[WS] Updated playerId to backend ID:', playerId);
                 }
 
                 if (onMessageCallback) {
                     onMessageCallback(message);
                 }
                 } catch (err) {
-                    console.error('[WS] Failed to parse message:', err);
                 }
             };
 
             socket.onerror = (error) => {
-                console.error('[WS] Error:', error);
                 if (onErrorCallback) onErrorCallback(error);
             };
 
             socket.onclose = (event) => {
-                console.log('[WS] Disconnected:', event.code, event.reason);
                 isConnected = false;
                 stopPing();
                 scheduleReconnect();
@@ -173,7 +167,6 @@ const WSClient = (() => {
                 if (onDisconnectCallback) onDisconnectCallback();
             };
         } catch (err) {
-            console.error('[WS] Failed to connect:', err);
             scheduleReconnect();
         }
     }
@@ -205,7 +198,6 @@ const WSClient = (() => {
             socket.send(JSON.stringify(message));
             return true;
         } catch (err) {
-            console.error('[WS] Failed to send:', err);
             messageQueue.push(message);
             return false;
         }
@@ -297,7 +289,6 @@ const WSClient = (() => {
             CONFIG.maxReconnectInterval
         );
         reconnectAttempts++;
-        console.log(`[WS] Reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
 
         reconnectTimer = setTimeout(() => {
             connect();

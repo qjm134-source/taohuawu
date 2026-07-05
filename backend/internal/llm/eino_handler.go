@@ -17,11 +17,16 @@ import (
 type callCounterKey struct{}
 
 type einoAgentHandler struct {
-	logger logging.Logger
+	logger    logging.Logger
+	toolsUsed []string
 }
 
 func newEinoAgentHandler(logger logging.Logger) eino_callbacks.Handler {
 	return &einoAgentHandler{logger: logger}
+}
+
+func (h *einoAgentHandler) GetToolsUsed() []string {
+	return h.toolsUsed
 }
 
 func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.RunInfo, input eino_callbacks.CallbackInput) context.Context {
@@ -72,6 +77,8 @@ func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.Run
 			"tool_name", info.Name,
 			"input", h.formatToolInput(input),
 		)
+
+		h.toolsUsed = append(h.toolsUsed, info.Name)
 	}
 
 	return ctx
@@ -162,6 +169,8 @@ func (h *einoAgentHandler) OnStartWithStreamInput(ctx context.Context, info *ein
 		h.logger.Info("[Audit] Tool stream started",
 			"tool_name", info.Name,
 		)
+
+		h.toolsUsed = append(h.toolsUsed, info.Name)
 	}
 
 	return ctx
