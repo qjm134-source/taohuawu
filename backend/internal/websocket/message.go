@@ -115,6 +115,11 @@ type StreamEventPayload struct {
 	ActionType   string     `json:"action_type,omitempty"`
 	Model        string     `json:"model,omitempty"`
 	FinishReason string     `json:"finish_reason,omitempty"`
+	InputTokens  int        `json:"input_tokens,omitempty"`
+	OutputTokens int        `json:"output_tokens,omitempty"`
+	TotalTokens  int        `json:"total_tokens,omitempty"`
+	Cost         float64    `json:"cost,omitempty"`
+	LatencyMs    int64      `json:"latency_ms,omitempty"`
 }
 
 // NewMessage 创建消息

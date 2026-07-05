@@ -123,9 +123,10 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 	}
 
 	// 查找或创建玩家
+	isNewPlayer := false
 	player, err := h.playerRepo.GetByDeviceID(payload.DeviceID, msg.TenantID)
 	if err != nil {
-		// 创建新玩家
+		isNewPlayer = true
 		player = &database.Player{
 			ID:             uuid.New().String(),
 			TenantID:       msg.TenantID,
@@ -141,7 +142,6 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 		}
 		h.logger.Info("Player created", "playerId", player.ID)
 	} else {
-		// 更新最后访问时间
 		_ = h.playerRepo.UpdateLastVisit(player.ID)
 	}
 
@@ -159,14 +159,11 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 	reply, err := h.runtime.HandleWelcome(context.Background(), session)
 	if err != nil {
 		h.logger.Error("Failed to handle welcome", "error", err)
-		// 即使失败也发送欢迎消息
 		reply = "欢迎来到江南水乡！我是导游小荷，很高兴为你服务。"
 	}
 
-	// 标记已访问
 	h.runtime.MarkVisited(session.ID)
 
-	// 构建欢迎消息
 	welcomeMsg, err := websocket.NewMessage(
 		websocket.MessageTypeWelcome,
 		msg.RequestID,
@@ -174,9 +171,9 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 		websocket.WelcomePayload{
 			GuideName:    agent.GuideName,
 			Message:      reply,
-			IsFirstVisit: session.IsFirstVisit,
+			IsFirstVisit: isNewPlayer,
 			Tips:         []string{"点击输入框与小荷对话", "可以问我关于游戏的问题"},
-			PlayerID:     player.ID, // 返回后端生成的玩家ID
+			PlayerID:     player.ID,
 		},
 	)
 	if err != nil {
@@ -230,21 +227,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 				_ = client.SendMessage(errMsg)
 				return
 			}
-
-			// 发送欢迎消息给新玩家
-			welcomeMsg, _ := websocket.NewMessage(
-				websocket.MessageTypeWelcome,
-				msg.RequestID,
-				msg.TenantID,
-				websocket.WelcomePayload{
-					GuideName:    agent.GuideName,
-					Message:      "欢迎来到江南水乡！我是导游小荷，很高兴为你服务。",
-					IsFirstVisit: true,
-					Tips:         []string{"点击输入框与小荷对话", "可以问我关于游戏的问题"},
-					PlayerID:     player.ID,
-				},
-			)
-			_ = client.SendMessage(welcomeMsg)
+			h.logger.Info("Player created from chat message", "playerId", player.ID)
 		}
 	}
 
@@ -309,6 +292,25 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 	// 等待统计信息
 	stats := <-statsChan
 	h.logger.Info("Chat stream completed", "reply_length", fullReply.Len(), "model", stats.Model, "tokens", stats.TotalTokens)
+
+	// 发送包含统计信息的完成事件
+	completeMsg, _ := websocket.NewMessage(
+		websocket.MessageTypeStreamEvent,
+		msg.RequestID,
+		msg.TenantID,
+		websocket.StreamEventPayload{
+			Type:         string(llm.StreamEventTypeChunk),
+			Content:      "",
+			FinishReason: "stop",
+			Model:        stats.Model,
+			InputTokens:  stats.InputTokens,
+			OutputTokens: stats.OutputTokens,
+			TotalTokens:  stats.TotalTokens,
+			Cost:         stats.Cost,
+			LatencyMs:    stats.LatencyMs,
+		},
+	)
+	_ = client.SendMessage(completeMsg)
 
 	// 增加对话计数
 	_ = h.playerRepo.IncrementDialogues(player.ID)

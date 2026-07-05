@@ -36,6 +36,7 @@
     let streamingReply = '';
     let streamingStats = null;
     let isWaitingForReply = false;
+    let hasShownWelcome = false;
 
     /**
      * 启动消息超时计时器
@@ -140,16 +141,17 @@
             const payload = message.payload;
             const welcomeMsg = payload.message || '欢迎来到江南水乡！';
 
-            // 打字机显示欢迎词
-            UI.showWelcome(welcomeMsg, (text) => {
-                welcomeTypewriter.start(text);
-            });
+            if (!hasShownWelcome) {
+                hasShownWelcome = true;
+                UI.showWelcome(welcomeMsg, (text) => {
+                    welcomeTypewriter.start(text);
+                });
+            }
 
-            // 如果消息中包含 tips，也可以在气泡中显示
             if (payload.tips && payload.tips.length > 0) {
                 setTimeout(() => {
                     UI.updateBubble(payload.tips[0]);
-                }, welcomeMsg.length * 80 + 1000); // 等打字机结束后显示
+                }, welcomeMsg.length * 80 + 1000);
             }
         } catch (err) {
         }
@@ -263,17 +265,6 @@
             }
 
             if (finishReason && finishReason !== '') {
-                const stats = {
-                    model: payload.model || 'unknown',
-                    inputTokens: payload.inputTokens || 0,
-                    outputTokens: payload.outputTokens || 0,
-                    totalTokens: payload.totalTokens || 0,
-                    cost: payload.cost || 0,
-                    latencyMs: payload.latencyMs || 0,
-                    cacheHit: false,
-                };
-                UI.updateDebugPanel(stats);
-
                 const userMsg = window._lastUserMessage;
                 if (userMsg) {
                     UI.addToHistory(userMsg, streamingReply);
@@ -282,6 +273,19 @@
 
                 streamingReply = '';
                 streamingStats = null;
+            }
+
+            if (payload.totalTokens > 0 || payload.cost > 0) {
+                const stats = {
+                    model: payload.model || 'unknown',
+                    inputTokens: payload.inputTokens || 0,
+                    outputTokens: payload.outputTokens || 0,
+                    totalTokens: payload.totalTokens || 0,
+                    cost: payload.cost || 0,
+                    latencyMs: payload.latency_ms || payload.latencyMs || 0,
+                    cacheHit: false,
+                };
+                UI.updateDebugPanel(stats);
             }
         } catch (err) {
             streamingReply = '';
