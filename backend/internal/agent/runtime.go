@@ -52,11 +52,6 @@ type Runtime struct {
 	// inflightWelcome 防止同一个 player 并发触发 HandleWelcome，
 	// value 是 chan struct{}，第一个请求 close channel，后续请求等待。
 	inflightWelcome sync.Map // playerID → chan struct{}
-
-	// cacheStats 缓存统计
-	cacheHits   int64
-	cacheMisses int64
-	cacheMu     sync.Mutex
 }
 
 // Config Agent 配置
@@ -829,26 +824,12 @@ func (r *Runtime) recordLLMMetrics(model, status string, durationSec float64, in
 	observability.CostTotal.WithLabelValues(model).Add(costAmount)
 }
 
-// recordCacheHit 记录缓存命中
+// recordCacheHit 记录缓存命中（仅用于日志，指标通过 CacheHitsTotal Counter 记录）
 func (r *Runtime) recordCacheHit() {
-	r.cacheMu.Lock()
-	r.cacheHits++
-	total := r.cacheHits + r.cacheMisses
-	if total > 0 {
-		observability.CacheHitRatio.Set(float64(r.cacheHits) / float64(total))
-	}
-	r.cacheMu.Unlock()
 }
 
-// recordCacheMiss 记录缓存未命中
+// recordCacheMiss 记录缓存未命中（仅用于日志，指标通过 CacheMissesTotal Counter 记录）
 func (r *Runtime) recordCacheMiss() {
-	r.cacheMu.Lock()
-	r.cacheMisses++
-	total := r.cacheHits + r.cacheMisses
-	if total > 0 {
-		observability.CacheHitRatio.Set(float64(r.cacheHits) / float64(total))
-	}
-	r.cacheMu.Unlock()
 }
 
 // GetSession 获取会话

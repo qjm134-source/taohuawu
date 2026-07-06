@@ -86,10 +86,10 @@ observability:
   trace_exporter: otlp                  # Docker 环境发送到 Jaeger
   prometheus: true                     # Docker 环境启用 Prometheus
   langfuse:
-    enabled: false
-    host: https://cloud.langfuse.com
-    public_key: ${LANGFUSE_PUBLIC_KEY}
-    secret_key: ${LANGFUSE_SECRET_KEY}
+    enabled: true
+    host: http://langfuse-server:3000
+    public_key: ${LANGFUSE_PUBLIC_KEY:langfuse-public-key}
+    secret_key: ${LANGFUSE_SECRET_KEY:langfuse-secret-key}
 
 weather:
   provider: openmeteo                   # 天气服务提供商: qweather(和风) / openmeteo

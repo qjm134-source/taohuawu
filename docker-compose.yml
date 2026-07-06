@@ -60,6 +60,8 @@ services:
         condition: service_healthy
       jaeger:
         condition: service_started
+      langfuse-server:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
@@ -123,6 +125,38 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  langfuse-db:
+    image: postgres:16
+    container_name: watertown-langfuse-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - langfuse_db:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  langfuse-server:
+    image: ghcr.io/langfuse/langfuse:latest
+    container_name: watertown-langfuse
+    ports:
+      - "3002:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-db:5432/postgres
+      NEXTAUTH_SECRET: watertown-langfuse-secret
+      SALT: watertown-langfuse-salt
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   prometheus_data:
   grafana_data:
+  langfuse_db:

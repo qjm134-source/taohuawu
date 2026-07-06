@@ -17,9 +17,11 @@ var (
 
 	LLMRequestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "llm_request_duration_seconds",
-			Help:    "LLM request duration in seconds",
-			Buckets: prometheus.DefBuckets,
+			Name:                            "llm_request_duration_seconds",
+			Help:                            "LLM request duration in seconds",
+			Buckets:                         []float64{},
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMinResetDuration: 5 * 60 * 1e9,
 		},
 		[]string{"model"},
 	)
@@ -83,13 +85,6 @@ var (
 		[]string{"cache_type"},
 	)
 
-	CacheHitRatio = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "cache_hit_ratio",
-			Help: "Cache hit ratio",
-		},
-	)
-
 	// Agent 指标
 	AgentRequestsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -101,9 +96,11 @@ var (
 
 	AgentRequestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "agent_request_duration_seconds",
-			Help:    "Agent request duration in seconds",
-			Buckets: prometheus.DefBuckets,
+			Name:                            "agent_request_duration_seconds",
+			Help:                            "Agent request duration in seconds",
+			Buckets:                         []float64{},
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMinResetDuration: 5 * 60 * 1e9,
 		},
 		[]string{"action"},
 	)
