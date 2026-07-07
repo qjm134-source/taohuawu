@@ -236,6 +236,28 @@ Langfuse 数据存储在 **Langfuse 云端或自建服务**，而不是本地：
 | **Langfuse Cloud** | 云端托管 | [cloud.langfuse.com](https://cloud.langfuse.com) | 不想自运维、快速接入 |
 | **Langfuse 自建** | 本地 PostgreSQL | `http://localhost:3000` | 有运维能力的团队 |
 
+根据你部署的版本不同，所需的存储组件也有所区别：
+
+📦 **Langfuse v2 版本**
+
+这是较简单的版本，核心依赖是 PostgreSQL。
+
+- **PostgreSQL**：作为主数据库，用于存储所有状态和事务性数据。
+- **要求**：PostgreSQL 版本需 >= 12。
+
+🚀 **Langfuse v3 版本**
+
+这是当前的主流版本，为满足大规模可观测性数据的性能需求，采用了更复杂的分布式架构，需要以下全部组件：
+
+- **PostgreSQL**：存储用户、组织、项目、API 密钥等核心事务数据。
+- **ClickHouse**：一个高性能的 OLAP 数据库，专门用于存储和分析 Trace、观测数据等大规模遥测数据。
+- **Redis/Valkey**：用作缓存和消息队列。
+- **S3/对象存储**：用于持久化存储原始事件、大附件（如图片、音频）等。
+
+需要注意的是，如果你使用的是 Langfuse 官方提供的 Langfuse Cloud（云服务），则无需关心底层数据库的部署和运维。
+
+总结来说，只要你是自托管 Langfuse，就必须配置数据库。简单测试可用 v2（只需 PostgreSQL），生产环境建议用 v3（需要完整的 PostgreSQL + ClickHouse + Redis + S3 组合）
+
 ### 4.3 启用 Langfuse
 
 **方式一：Langfuse Cloud（推荐）**
@@ -582,6 +604,9 @@ observability:
 同一个 Trace 的所有 Span 共享 `TraceID`，可以通过 `TraceID` 把父子 Span 关联起来。
 
 ### 6.4 Jaeger（生产级可视化链路）
+
+作用：接收、存储、可视化分析调用链 Trace 数据
+默认内存存储，不持久化。生产建议ES存储。
 
 需要将 `trace_exporter` 改为 `otlp`，并保持 `endpoint` 指向 Jaeger 的 OTLP HTTP 端口。
 
