@@ -86,7 +86,7 @@ services:
     restart: unless-stopped
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.52.0
     container_name: watertown-prometheus
     ports:
       - "9090:9090"
@@ -141,12 +141,13 @@ services:
       retries: 5
 
   langfuse-server:
-    image: ghcr.io/langfuse/langfuse:v2.52.0
+    image: ghcr.io/langfuse/langfuse:2.60.0
     container_name: watertown-langfuse
     ports:
       - "3002:3000"
     environment:
       DATABASE_URL: postgresql://postgres:postgres@langfuse-db:5432/postgres
+      NEXTAUTH_URL: http://localhost:3002
       NEXTAUTH_SECRET: watertown-langfuse-secret
       SALT: watertown-langfuse-salt
     volumes:

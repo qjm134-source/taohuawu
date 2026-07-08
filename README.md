@@ -369,7 +369,7 @@ Agent.HandleChatStream (主 Span)
 # 设置 CLAUDE_API_KEY（或其他模型的 API Key，同时在 `configs/config-docker.yaml` 中添加对应的模型配置）
 export CLAUDE_API_KEY="your-claude-api-key"
 
-# 启动全部服务（MySQL + 后端 + 前端 + Prometheus + Jaeger）
+# 启动全部服务（postgres + 后端 + 前端 + Prometheus + Jaeger+ Grafana + LangFuse）
 docker-compose up --build
 
 # 访问游戏
@@ -380,6 +380,12 @@ open http://localhost:9090
 
 # jaeger-ui 访问地址
 open http://localhost:16686
+
+# Grafana 仪表盘（用户名：admin，密码：admin123）
+open http://localhost:3001
+
+# Langfuse 追踪（首次访问点击 Sign up 注册账户）
+open http://localhost:3002
 ```
 
 ### 2. 后端单独启动

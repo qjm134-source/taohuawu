@@ -501,7 +501,7 @@ observability:
 
 ## 7. 快速查看指标与链路
 
-### 6.1 裸看 `/metrics`
+### 7.1 裸看 `/metrics`
 
 ```bash
 # 启动服务后访问（需启用 prometheus: true）
@@ -521,7 +521,7 @@ cache_hits_total{cache_type="exact"} 150
 cache_hits_total{cache_type="semantic"} 25
 ```
 
-### 6.2 Prometheus + Grafana（推荐生产方案）
+### 7.2 Prometheus + Grafana（推荐生产方案）
 
 项目根目录已提供 `prometheus.yml` 和 `docker-compose.yml` 集成。Prometheus 自动每 15 秒从 `backend:8080/metrics` 拉取一次指标，数据持久化到 Docker Volume `prometheus_data`，默认保留 15 天。
 
@@ -567,7 +567,7 @@ docker-compose up -d
 
 登录 Grafana 后，仪表盘会自动出现在 **Dashboards** 页面，无需手动配置。
 
-### 6.3 开发模式：直接看 Trace 日志（无需额外组件）
+### 7.3 开发模式：直接看 Trace 日志（无需额外组件）
 
 如果只想在开发时快速查看 Trace，**不需要启动任何外部组件**，配置 `trace_exporter: stdout` 即可。
 
@@ -603,7 +603,7 @@ observability:
 
 同一个 Trace 的所有 Span 共享 `TraceID`，可以通过 `TraceID` 把父子 Span 关联起来。
 
-### 6.4 Jaeger（生产级可视化链路）
+### 7.4 Jaeger（生产级可视化链路）
 
 作用：接收、存储、可视化分析调用链 Trace 数据
 默认内存存储，不持久化。生产建议ES存储。
@@ -623,6 +623,67 @@ docker run -d --name jaeger \
 3. 打开 `http://localhost:16686`，搜索 Service `watertown-guide`，即可查看 Trace 瀑布图。
 
 ---
+
+## 7.5 Langfuse 专项追踪
+
+Langfuse 是一个专门用于 LLM 应用的可观测性平台，提供追踪、成本分析、性能监控等功能。
+
+### 7.5.1 配置步骤
+
+**1. 在 Langfuse UI 中创建项目**
+
+访问 `http://localhost:3002`，登录后：
+
+1. 点击左上角 **Projects** → **+ Create project**
+2. 输入项目名称（如 `watertown-guide`）
+3. 创建项目
+
+**2. 获取 API Key**
+
+在项目页面中：
+1. 点击左侧菜单的 **Settings** → **API Keys**
+2. 复制 `Public Key` 和 `Secret Key`
+
+**3. 更新项目配置**
+
+编辑 `.env` 文件，添加：
+
+```bash
+# Langfuse API Keys
+LANGFUSE_PUBLIC_KEY=your_public_key_here
+LANGFUSE_SECRET_KEY=your_secret_key_here
+```
+
+**4. 重启服务**
+
+```bash
+docker-compose up -d backend
+```
+
+### 7.5.2 验证数据
+
+发送一个聊天请求后，在 Langfuse UI 中可以看到：
+
+| 页面 | 内容 |
+|------|------|
+| **Traces** | 所有用户请求的追踪记录 |
+| **Generations** | LLM 调用详情（模型、输入输出、token 使用） |
+| **Cost** | 费用统计 |
+| **Performance** | 延迟分析 |
+
+### 7.5.3 当前配置
+
+项目已在 `config-docker.yaml` 中启用了 Langfuse：
+
+```yaml
+langfuse:
+  enabled: true
+  host: http://langfuse-server:3000
+  public_key: ${LANGFUSE_PUBLIC_KEY:langfuse-public-key}
+  secret_key: ${LANGFUSE_SECRET_KEY:langfuse-secret-key}
+```
+
+只需替换 `${LANGFUSE_PUBLIC_KEY}` 和 `${LANGFUSE_SECRET_KEY}` 为真实的 API key 即可。
 
 ## 8. 常用 PromQL 查询
 
