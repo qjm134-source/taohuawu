@@ -20,7 +20,9 @@ func RecoverWithLogFunc(component string) func() {
 	}
 }
 
-func RecoverWithCustomLogger(component string, logger interface{ Errorf(format string, args ...interface{}) }) {
+func RecoverWithCustomLogger(component string, logger interface {
+	Errorf(format string, args ...interface{})
+}) {
 	if r := recover(); r != nil {
 		buf := make([]byte, 4096)
 		n := runtime.Stack(buf, false)
@@ -28,7 +30,9 @@ func RecoverWithCustomLogger(component string, logger interface{ Errorf(format s
 	}
 }
 
-func RecoverWithCustomLoggerFunc(component string, logger interface{ Errorf(format string, args ...interface{}) }) func() {
+func RecoverWithCustomLoggerFunc(component string, logger interface {
+	Errorf(format string, args ...interface{})
+}) func() {
 	return func() {
 		RecoverWithCustomLogger(component, logger)
 	}
@@ -41,7 +45,9 @@ func SafeGo(component string, fn func()) {
 	}()
 }
 
-func SafeGoWithLogger(component string, logger interface{ Errorf(format string, args ...interface{}) }, fn func()) {
+func SafeGoWithLogger(component string, logger interface {
+	Errorf(format string, args ...interface{})
+}, fn func()) {
 	go func() {
 		defer RecoverWithCustomLogger(component, logger)
 		fn()

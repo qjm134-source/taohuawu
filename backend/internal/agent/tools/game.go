@@ -20,8 +20,8 @@ type GetPlayerInfoOutput struct {
 	FirstVisit string `json:"first_visit"`
 }
 
-func NewGetPlayerInfoTool() eino_tool.InvokableTool {
-	tool, err := eino_tool_utils.InferTool[GetPlayerInfoInput, GetPlayerInfoOutput](
+func NewGetPlayerInfoTool() (eino_tool.InvokableTool, error) {
+	return eino_tool_utils.InferTool[GetPlayerInfoInput, GetPlayerInfoOutput](
 		"get_player_info",
 		"获取玩家的基本信息，包括昵称、访问次数等",
 		func(ctx context.Context, input GetPlayerInfoInput) (GetPlayerInfoOutput, error) {
@@ -36,10 +36,6 @@ func NewGetPlayerInfoTool() eino_tool.InvokableTool {
 			}, nil
 		},
 	)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create get_player_info tool: %v", err))
-	}
-	return tool
 }
 
 type GetGameGuideInput struct{}
@@ -68,17 +64,13 @@ func (t *getGameGuideToolImpl) invoke(ctx context.Context, input GetGameGuideInp
 	}, nil
 }
 
-func NewGetGameGuideTool(kb *knowledge.KnowledgeBase) eino_tool.InvokableTool {
+func NewGetGameGuideTool(kb *knowledge.KnowledgeBase) (eino_tool.InvokableTool, error) {
 	impl := &getGameGuideToolImpl{KB: kb}
-	tool, err := eino_tool_utils.InferTool[GetGameGuideInput, GetGameGuideOutput](
+	return eino_tool_utils.InferTool[GetGameGuideInput, GetGameGuideOutput](
 		"get_game_guide",
 		"获取游戏基础指南和操作说明",
 		impl.invoke,
 	)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create get_game_guide tool: %v", err))
-	}
-	return tool
 }
 
 type GetQuestInfoInput struct{}
@@ -107,17 +99,13 @@ func (t *getQuestInfoToolImpl) invoke(ctx context.Context, input GetQuestInfoInp
 	}, nil
 }
 
-func NewGetQuestInfoTool(kb *knowledge.KnowledgeBase) eino_tool.InvokableTool {
+func NewGetQuestInfoTool(kb *knowledge.KnowledgeBase) (eino_tool.InvokableTool, error) {
 	impl := &getQuestInfoToolImpl{KB: kb}
-	tool, err := eino_tool_utils.InferTool[GetQuestInfoInput, GetQuestInfoOutput](
+	return eino_tool_utils.InferTool[GetQuestInfoInput, GetQuestInfoOutput](
 		"get_quest_info",
 		"获取任务系统相关信息",
 		impl.invoke,
 	)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create get_quest_info tool: %v", err))
-	}
-	return tool
 }
 
 type GetScenarioInfoInput struct{}
@@ -153,15 +141,11 @@ func (t *getScenarioInfoToolImpl) invoke(ctx context.Context, input GetScenarioI
 	}, nil
 }
 
-func NewGetScenarioInfoTool(kb *knowledge.KnowledgeBase) eino_tool.InvokableTool {
+func NewGetScenarioInfoTool(kb *knowledge.KnowledgeBase) (eino_tool.InvokableTool, error) {
 	impl := &getScenarioInfoToolImpl{KB: kb}
-	tool, err := eino_tool_utils.InferTool[GetScenarioInfoInput, GetScenarioInfoOutput](
+	return eino_tool_utils.InferTool[GetScenarioInfoInput, GetScenarioInfoOutput](
 		"get_scenario_info",
 		"获取当前场景的描述和信息",
 		impl.invoke,
 	)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create get_scenario_info tool: %v", err))
-	}
-	return tool
 }

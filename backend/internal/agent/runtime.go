@@ -147,70 +147,85 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 	langfuseTrace := observability.StartLLMTrace("welcome", session.PlayerID, session.TenantID)
 
 	prompt := BuildWelcomePrompt(session.Nickname)
+	messages := r.buildWelcomeMessages(prompt)
 
-	messages := []*eino_schema.Message{
+	msg, usage, err := r.callLLMForWelcome(ctx, messages)
+	if err != nil {
+		return r.handleWelcomeError(ctx, langfuseTrace, startTime, cacheKey, session, err)
+	}
+
+	return r.processWelcomeResponse(ctx, langfuseTrace, startTime, cacheKey, session, msg, usage)
+}
+
+func (r *Runtime) buildWelcomeMessages(prompt string) []*eino_schema.Message {
+	return []*eino_schema.Message{
 		{Role: eino_schema.System, Content: SystemPrompt},
 		{Role: eino_schema.User, Content: prompt},
 	}
+}
 
-	var msg *eino_schema.Message
-	var usage *llm.ChatUsage
-	var err error
-
+func (r *Runtime) callLLMForWelcome(ctx context.Context, messages []*eino_schema.Message) (*eino_schema.Message, *llm.ChatUsage, error) {
 	if r.llmAdapter.IsHealthy() {
 		llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
-		msg, usage, err = r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
+		msg, usage, err := r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 		llmCancel()
 
 		if err != nil {
 			r.logger.Error("[HandleWelcome] Primary LLM failed", "error", err)
 			r.logger.Info("[HandleWelcome] Trying fallback adapter")
-			msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
+			return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 		}
-	} else {
-		r.logger.Warn("[HandleWelcome] Primary LLM unhealthy, using fallback")
-		msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
+		return msg, usage, nil
 	}
 
-	if err != nil {
-		r.logger.Error("[HandleWelcome] All LLM failed", "error", err)
-		observability.AgentRequestsTotal.WithLabelValues("welcome", "error").Inc()
-		langfuseTrace.End()
+	r.logger.Warn("[HandleWelcome] Primary LLM unhealthy, using fallback")
+	return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
+}
 
-		if r.config.FallbackResponse.Enabled && r.config.FallbackResponse.WelcomeMessage != "" {
-			r.logger.Info("[HandleWelcome] Using fallback response", "message", r.config.FallbackResponse.WelcomeMessage)
-			reply := r.config.FallbackResponse.WelcomeMessage
-			session.AddMessage("assistant", reply, "neutral", nil)
-			r.optimizer.SetCache(cacheKey, reply)
-			observability.AgentRequestDuration.WithLabelValues("welcome").Observe(time.Since(startTime).Seconds())
-			return reply, nil
-		}
+func (r *Runtime) handleWelcomeError(ctx context.Context, langfuseTrace *observability.LLMTrace, startTime time.Time,
+	cacheKey string, session *Session, err error) (string, error) {
 
-		return "", fmt.Errorf("failed to get response: %w", err)
+	r.logger.Error("[HandleWelcome] All LLM failed", "error", err)
+	observability.AgentRequestsTotal.WithLabelValues("welcome", "error").Inc()
+	langfuseTrace.End()
+
+	if r.config.FallbackResponse.Enabled && r.config.FallbackResponse.WelcomeMessage != "" {
+		reply := r.config.FallbackResponse.WelcomeMessage
+		r.logger.Info("[HandleWelcome] Using fallback response", "message", reply)
+		session.AddMessage("assistant", reply, "neutral", nil)
+		r.optimizer.SetCache(cacheKey, reply)
+		observability.AgentRequestDuration.WithLabelValues("welcome").Observe(time.Since(startTime).Seconds())
+		return reply, nil
 	}
+
+	return "", fmt.Errorf("failed to get response: %w", err)
+}
+
+func (r *Runtime) processWelcomeResponse(ctx context.Context, langfuseTrace *observability.LLMTrace, startTime time.Time,
+	cacheKey string, session *Session, msg *eino_schema.Message, usage *llm.ChatUsage) (string, error) {
 
 	reply := msg.Content
 	session.AddMessage("assistant", reply, "neutral", nil)
 
+	r.recordWelcomeMetrics(startTime, usage)
+
+	langfuseTrace.End()
+	r.optimizer.SetCache(cacheKey, reply)
+
+	return reply, nil
+}
+
+func (r *Runtime) recordWelcomeMetrics(startTime time.Time, usage *llm.ChatUsage) {
 	model := usage.Model
 	if model == "" {
 		model = "unknown"
 	}
 	llmCost := cost.CalculateCost(model, usage.PromptTokens, usage.CompletionTokens)
 
-	observability.LLMRequestsTotal.WithLabelValues(model, "success").Inc()
-	observability.LLMRequestDuration.WithLabelValues(model).Observe(time.Since(startTime).Seconds())
-	observability.LLMRequestTokens.WithLabelValues(model).Add(float64(usage.PromptTokens))
-	observability.LLMCompletionTokens.WithLabelValues(model).Add(float64(usage.CompletionTokens))
-	observability.CostTotal.WithLabelValues(model).Add(llmCost)
+	r.recordLLMMetrics(model, "success", time.Since(startTime).Seconds(),
+		usage.PromptTokens, usage.CompletionTokens, llmCost)
 	observability.AgentRequestsTotal.WithLabelValues("welcome", "success").Inc()
 	observability.AgentRequestDuration.WithLabelValues("welcome").Observe(time.Since(startTime).Seconds())
-
-	langfuseTrace.End()
-
-	r.optimizer.SetCache(cacheKey, reply)
-
-	return reply, nil
 }
 
 // HandleChat 处理聊天（非流式）
@@ -229,76 +244,68 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	)
 	defer observability.EndSpanWithDuration(ctx, span)
 
-	// Langfuse trace
 	langfuseTrace := observability.StartLLMTrace("chat", session.PlayerID, session.TenantID)
 
-	// 初始化统计信息
-	stats := &LLMStats{}
+	emotionStr := r.detectEmotion(ctx, message)
 
-	// 检测情绪
-	em := r.emotionDetector.Detect(message)
-	emotionStr := string(em)
-
-	// 检查精确缓存
 	cacheKey := session.ID + "_" + message
+	if cached, hit := r.checkExactCache(ctx, span, cacheKey); hit {
+		return r.handleCacheHitSync(ctx, langfuseTrace, cached, emotionStr)
+	}
+
+	if cached, hit := r.checkSimilarityCache(ctx, span, message); hit {
+		return r.handleCacheHitSync(ctx, langfuseTrace, cached, emotionStr)
+	}
+
+	return r.callLLMAndProcess(ctx, span, langfuseTrace, session, message, emotionStr, cacheKey)
+}
+
+func (r *Runtime) checkExactCache(ctx context.Context, span trace.Span, cacheKey string) (string, bool) {
 	_, cacheSpan := observability.StartChildSpan(ctx, "Cache.ExactCheck")
+	defer observability.EndChildSpan(ctx, cacheSpan)
+
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
-		observability.EndChildSpan(ctx, cacheSpan)
-		r.logger.Info("[HandleChat] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		r.logger.Info("[HandleChat] Cache hit", "cache_key", cacheKey, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		observability.CacheHitsTotal.WithLabelValues("exact").Inc()
 		r.recordCacheHit()
-		session.AddMessage("assistant", cached, emotionStr, nil)
-		stats.CacheHit = true
-		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
-		langfuseTrace.End()
-		return cached, emotionStr, stats, nil
+		return cached, true
 	}
-	observability.EndChildSpan(ctx, cacheSpan)
+
 	observability.CacheMissesTotal.WithLabelValues("exact").Inc()
 	r.recordCacheMiss()
+	return "", false
+}
 
-	// 检查语义缓存（相似问题匹配）
+func (r *Runtime) checkSimilarityCache(ctx context.Context, span trace.Span, message string) (string, bool) {
 	_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
+	defer observability.EndChildSpan(ctx, similaritySpan)
+
 	if cached, hit := r.optimizer.CheckSimilarity(ctx, message, 0.85); hit {
-		observability.EndChildSpan(ctx, similaritySpan)
-		r.logger.Info("[HandleChat] Semantic cache hit", "sessionId", session.ID, "cached_length", len(cached))
+		r.logger.Info("[HandleChat] Semantic cache hit", "message_len", len(message), "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
 		r.recordCacheHit()
-		session.AddMessage("assistant", cached, emotionStr, nil)
-		stats.CacheHit = true
-		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
-		langfuseTrace.End()
-		return cached, emotionStr, stats, nil
+		return cached, true
 	}
-	observability.EndChildSpan(ctx, similaritySpan)
+
 	observability.CacheMissesTotal.WithLabelValues("similarity").Inc()
 	r.recordCacheMiss()
+	return "", false
+}
 
-	// 构建上下文消息（含摘要压缩）
+func (r *Runtime) handleCacheHitSync(ctx context.Context, langfuseTrace *observability.LLMTrace, cached, emotionStr string) (string, string, *LLMStats, error) {
+	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+	langfuseTrace.End()
+	return cached, emotionStr, &LLMStats{CacheHit: true}, nil
+}
+
+func (r *Runtime) callLLMAndProcess(ctx context.Context, span trace.Span, langfuseTrace *observability.LLMTrace,
+	session *Session, message, emotionStr, cacheKey string) (string, string, *LLMStats, error) {
+
 	messages := r.buildContextMessages(session, message, emotionStr)
 
-	var msg *eino_schema.Message
-	var usage *llm.ChatUsage
-	var err error
-	startTime := time.Now()
-
-	if r.llmAdapter.IsHealthy() {
-		llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
-		msg, usage, err = r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-		llmCancel()
-
-		if err != nil {
-			r.logger.Error("[HandleChat] Primary LLM failed", "error", err)
-			r.logger.Info("[HandleChat] Trying fallback adapter")
-			msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-		}
-	} else {
-		r.logger.Warn("[HandleChat] Primary LLM unhealthy, using fallback")
-		msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-	}
-
+	msg, usage, err := r.callLLM(ctx, messages)
 	if err != nil {
 		r.logger.Error("[HandleChat] All LLM calls failed", "error", err)
 		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
@@ -307,15 +314,46 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 		return "", "", nil, fmt.Errorf("failed to get response: %w", err)
 	}
 
+	return r.processLLMResponse(ctx, span, langfuseTrace, session, message, emotionStr, cacheKey, msg, usage)
+}
+
+func (r *Runtime) callLLM(ctx context.Context, messages []*eino_schema.Message) (*eino_schema.Message, *llm.ChatUsage, error) {
+	startTime := time.Now()
+
+	if r.llmAdapter.IsHealthy() {
+		llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
+		msg, usage, err := r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+		llmCancel()
+
+		if err != nil {
+			r.logger.Error("[HandleChat] Primary LLM failed", "error", err)
+			r.logger.Info("[HandleChat] Trying fallback adapter")
+			return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+		}
+		_ = startTime
+		return msg, usage, nil
+	}
+
+	r.logger.Warn("[HandleChat] Primary LLM unhealthy, using fallback")
+	return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+}
+
+func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span, langfuseTrace *observability.LLMTrace,
+	session *Session, message, emotionStr, cacheKey string, msg *eino_schema.Message, usage *llm.ChatUsage) (string, string, *LLMStats, error) {
+
+	startTime := time.Now()
+
 	reply := strings.TrimSpace(msg.Content)
 
-	stats.Model = usage.Model
-	stats.LatencyMs = time.Since(startTime).Milliseconds()
-	stats.InputTokens = usage.PromptTokens
-	stats.OutputTokens = usage.CompletionTokens
-	stats.TotalTokens = usage.TotalTokens
-	stats.Cost = cost.CalculateCost(usage.Model, usage.PromptTokens, usage.CompletionTokens)
-	stats.CacheHit = false
+	stats := &LLMStats{
+		Model:        usage.Model,
+		LatencyMs:    time.Since(startTime).Milliseconds(),
+		InputTokens:  usage.PromptTokens,
+		OutputTokens: usage.CompletionTokens,
+		TotalTokens:  usage.TotalTokens,
+		Cost:         cost.CalculateCost(usage.Model, usage.PromptTokens, usage.CompletionTokens),
+		CacheHit:     false,
+	}
 
 	r.recordLLMMetrics(usage.Model, "success", time.Since(startTime).Seconds(),
 		usage.PromptTokens, usage.CompletionTokens, stats.Cost)
@@ -358,307 +396,348 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 		),
 	)
 
-	// Langfuse trace
 	langfuseTrace := observability.StartLLMTrace("chat-stream", session.PlayerID, session.TenantID)
 
-	// 1. 情绪检测子Span
-	_, emotionSpan := observability.StartChildSpan(ctx, "Emotion.Detect")
-	em := r.emotionDetector.Detect(message)
-	emotionStr := string(em)
-	observability.EndChildSpan(ctx, emotionSpan)
+	emotionStr := r.detectEmotion(ctx, message)
 
-	// 2. 缓存查询子Span
 	cacheKey := session.ID + "_" + message
-	_, cacheSpan := observability.StartChildSpan(ctx, "Cache.Check")
-	cached, hit := r.optimizer.GetCache(cacheKey)
-	observability.EndChildSpan(ctx, cacheSpan)
-
-	if hit && cached != "" {
-		r.logger.Info("[HandleChatStream] Cache hit", "sessionId", session.ID, "cached_length", len(cached))
-		span.SetAttributes(attribute.Bool("cache_hit", true))
-		observability.AddEvent(ctx, "cache_hit", attribute.String("type", "check"))
-		observability.CacheHitsTotal.WithLabelValues("check").Inc()
-		r.recordCacheHit()
-		observability.EndSpanWithDuration(ctx, span)
-		langfuseTrace.End()
-		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
-
-		eventChan := make(chan *llm.StreamEvent, 2)
-		eventChan <- &llm.StreamEvent{
-			Type:    llm.StreamEventTypeChunk,
-			Content: cached,
-		}
-		eventChan <- &llm.StreamEvent{
-			Type:       llm.StreamEventTypeAction,
-			ActionType: "exit",
-		}
-		close(eventChan)
-
-		statsChan := make(chan *LLMStats, 1)
-		statsChan <- &LLMStats{CacheHit: true}
-		close(statsChan)
-
-		return eventChan, statsChan, nil
+	if cached, hit := r.checkCache(ctx, cacheKey); hit && cached != "" {
+		return r.handleCacheHit(ctx, span, langfuseTrace, cached)
 	}
 
-	observability.CacheMissesTotal.WithLabelValues("check").Inc()
-	r.recordCacheMiss()
-
-	// 3. 构建上下文消息子Span
-	_, contextSpan := observability.StartChildSpan(ctx, "Context.Build")
-	messages := r.buildContextMessages(session, message, emotionStr)
-	observability.EndChildSpan(ctx, contextSpan)
-
-	// 4. LLM 健康检查子Span
-	_, healthSpan := observability.StartChildSpan(ctx, "LLM.HealthCheck")
-	isHealthy := r.llmAdapter.IsHealthy()
-	observability.EndChildSpan(ctx, healthSpan)
-
-	var stream llm.EventStream
-	var err error
+	messages := r.buildContextMessagesWithSpan(ctx, session, message, emotionStr)
 
 	llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
+	stream, err := r.callLLMStream(llmCtx, messages)
+	if err != nil {
+		return r.handleLLMError(ctx, span, llmSpan, langfuseTrace, err)
+	}
 
-	eventChan := make(chan *llm.StreamEvent, 100)
+	return r.processStreamAsync(ctx, span, llmSpan, langfuseTrace,
+		stream, session, message, emotionStr, cacheKey, startTime)
+}
+
+func (r *Runtime) detectEmotion(ctx context.Context, message string) string {
+	_, span := observability.StartChildSpan(ctx, "Emotion.Detect")
+	defer observability.EndChildSpan(ctx, span)
+	em := r.emotionDetector.Detect(message)
+	return string(em)
+}
+
+func (r *Runtime) checkCache(ctx context.Context, cacheKey string) (string, bool) {
+	_, span := observability.StartChildSpan(ctx, "Cache.Check")
+	defer observability.EndChildSpan(ctx, span)
+	return r.optimizer.GetCache(cacheKey)
+}
+
+func (r *Runtime) handleCacheHit(ctx context.Context, span trace.Span, langfuseTrace *observability.LLMTrace, cached string) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
+	span.SetAttributes(attribute.Bool("cache_hit", true))
+	observability.AddEvent(ctx, "cache_hit", attribute.String("type", "check"))
+	observability.CacheHitsTotal.WithLabelValues("check").Inc()
+	r.recordCacheHit()
+	observability.EndSpanWithDuration(ctx, span)
+	langfuseTrace.End()
+	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+
+	eventChan := make(chan *llm.StreamEvent, 2)
+	eventChan <- &llm.StreamEvent{
+		Type:    llm.StreamEventTypeChunk,
+		Content: cached,
+	}
+	eventChan <- &llm.StreamEvent{
+		Type:       llm.StreamEventTypeAction,
+		ActionType: "exit",
+	}
+	close(eventChan)
+
+	statsChan := make(chan *LLMStats, 1)
+	statsChan <- &LLMStats{CacheHit: true}
+	close(statsChan)
+
+	return eventChan, statsChan, nil
+}
+
+func (r *Runtime) buildContextMessagesWithSpan(ctx context.Context, session *Session, message, emotionStr string) []*eino_schema.Message {
+	_, span := observability.StartChildSpan(ctx, "Context.Build")
+	defer observability.EndChildSpan(ctx, span)
+	observability.CacheMissesTotal.WithLabelValues("check").Inc()
+	r.recordCacheMiss()
+	return r.buildContextMessages(session, message, emotionStr)
+}
+
+func (r *Runtime) callLLMStream(ctx context.Context, messages []*eino_schema.Message) (llm.EventStream, error) {
+	isHealthy := r.llmAdapter.IsHealthy()
 
 	if isHealthy {
-		stream, err = r.llmAdapter.StreamChat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-
+		stream, err := r.llmAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		if err != nil {
 			r.logger.Error("[HandleChatStream] Primary LLM stream failed", "error", err)
 			r.logger.Info("[HandleChatStream] Trying fallback adapter stream")
-			stream, err = r.fallbackAdapter.StreamChat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+			return r.fallbackAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		}
-	} else {
-		r.logger.Warn("[HandleChatStream] Primary LLM unhealthy, using fallback")
-		stream, err = r.fallbackAdapter.StreamChat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+		return stream, nil
 	}
 
-	if err != nil {
-		r.logger.Error("[HandleChatStream] All LLM stream calls failed", "error", err)
-		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
-		observability.RecordError(span, err)
-		observability.EndSpanWithDuration(ctx, span)
-		observability.EndChildSpan(llmCtx, llmSpan)
-		langfuseTrace.End()
-		return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
-	}
+	r.logger.Warn("[HandleChatStream] Primary LLM unhealthy, using fallback")
+	return r.fallbackAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+}
 
+func (r *Runtime) handleLLMError(ctx context.Context, span, llmSpan trace.Span, langfuseTrace *observability.LLMTrace, err error) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
+	r.logger.Error("[HandleChatStream] All LLM stream calls failed", "error", err)
+	observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
+	observability.RecordError(span, err)
+	observability.EndSpanWithDuration(ctx, span)
+	observability.EndChildSpan(ctx, llmSpan)
+	langfuseTrace.End()
+	return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
+}
+
+func (r *Runtime) processStreamAsync(ctx context.Context, span, llmSpan trace.Span, langfuseTrace *observability.LLMTrace,
+	stream llm.EventStream, session *Session, message, emotionStr, cacheKey string, startTime time.Time) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
+
+	eventChan := make(chan *llm.StreamEvent, 100)
 	statsChan := make(chan *LLMStats, 1)
 
 	go func() {
 		defer utils.RecoverWithCustomLogger("HandleChatStream", r.logger)
 		defer close(eventChan)
-		defer observability.EndChildSpan(llmCtx, llmSpan)
+		defer observability.EndChildSpan(ctx, llmSpan)
 		defer stream.Close()
+		defer observability.EndSpanWithDuration(ctx, span)
+		defer langfuseTrace.End()
 
-		var fullReply strings.Builder
-		stats := &LLMStats{
-			CacheHit: false,
-		}
-
-		chunkCount := 0
-		var finishReason string
-		var ttftMs int64 = 0
-		var streamSpan trace.Span
-
-		for {
-			event, err := stream.Recv()
-
-			if errors.Is(err, io.EOF) {
-				break
-			}
-
-			if err != nil {
-				r.logger.Error("[HandleChatStream] Stream recv error", "error", err)
-				_, errorSpan := observability.StartChildSpan(llmCtx, "LLM.StreamError")
-				errorSpan.RecordError(err)
-				errorSpan.End()
-				break
-			}
-
-			if event == nil {
-				continue
-			}
-
-			r.logger.Debug("[HandleChatStream] Got event from adapter", "type", event.Type, "content_len", len(event.Content))
-
-			if event.Type == llm.StreamEventTypeChunk {
-				if chunkCount == 0 {
-					_, streamSpan = observability.StartChildSpan(llmCtx, "LLM.TokenStreaming")
-				}
-				chunkCount++
-
-				if event.Content != "" {
-					fullReply.WriteString(event.Content)
-				}
-
-				if event.Model != "" && stats.Model == "" {
-					stats.Model = event.Model
-				}
-
-				if event.Usage != nil && event.Usage.TotalTokens > 0 {
-					stats.InputTokens = event.Usage.PromptTokens
-					stats.OutputTokens = event.Usage.CompletionTokens
-					stats.TotalTokens = event.Usage.TotalTokens
-				}
-
-				if event.FinishReason != "" {
-					finishReason = event.FinishReason
-				}
-
-				if len(event.ToolCalls) > 0 && len(stats.ToolsUsed) == 0 {
-					var toolNames []string
-					for _, tc := range event.ToolCalls {
-						toolNames = append(toolNames, tc.ToolName)
-					}
-					stats.ToolsUsed = toolNames
-				}
-
-				select {
-				case eventChan <- event:
-				case <-ctx.Done():
-					return
-				}
-			} else if event.Type == llm.StreamEventTypeAction && event.ActionType == "exit" {
-				if event.Model != "" && stats.Model == "" {
-					stats.Model = event.Model
-				}
-				if event.Usage != nil && event.Usage.TotalTokens > 0 {
-					stats.InputTokens = event.Usage.PromptTokens
-					stats.OutputTokens = event.Usage.CompletionTokens
-					stats.TotalTokens = event.Usage.TotalTokens
-				}
-			}
-		}
-
-		if finishReason == "" && fullReply.Len() > 0 {
-			finishReason = "stop"
-		}
-
-		if finishReason != "" {
-			select {
-			case eventChan <- &llm.StreamEvent{
-				Type:         llm.StreamEventTypeChunk,
-				Content:      "",
-				FinishReason: finishReason,
-				Model:        stats.Model,
-			}:
-			case <-ctx.Done():
-			}
-		}
-
-		observability.EndChildSpan(llmCtx, streamSpan)
-
-		_, postSpan := observability.StartChildSpan(llmCtx, "LLM.StatsAndMetrics")
-
-		stats.LatencyMs = time.Since(startTime).Milliseconds()
-		stats.Cost = cost.CalculateCost(stats.Model, stats.InputTokens, stats.OutputTokens)
-
-		model := stats.Model
-		if model == "" {
-			model = "unknown"
-		}
-
-		r.recordLLMMetrics(model, "success", time.Since(startTime).Seconds(),
-			stats.InputTokens, stats.OutputTokens, stats.Cost)
-		observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
-		observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(startTime).Seconds())
-
-		llmSpan.SetAttributes(
-			attribute.String("model", model),
-			attribute.Int("input_tokens", stats.InputTokens),
-			attribute.Int("output_tokens", stats.OutputTokens),
-			attribute.Int("total_tokens", stats.TotalTokens),
-			attribute.Float64("cost", stats.Cost),
-			attribute.Int64("ttft_ms", ttftMs),
-			attribute.Int("chunk_count", chunkCount),
-			attribute.String("finish_reason", finishReason),
-		)
-
-		if model != "unknown" {
-			span.SetAttributes(
-				attribute.String("llm.model", model),
-				attribute.Int("llm.input_tokens", stats.InputTokens),
-				attribute.Int("llm.output_tokens", stats.OutputTokens),
-				attribute.Int("llm.total_tokens", stats.TotalTokens),
-				attribute.Float64("llm.cost", stats.Cost),
-			)
-		}
-
-		postSpan.End()
-
-		_, sessionSpan := observability.StartChildSpan(llmCtx, "LLM.SessionUpdate")
-		session.AddMessage("user", message, emotionStr, nil)
-		if fullReply.Len() > 0 {
-			session.AddMessage("assistant", fullReply.String(), emotionStr, nil)
-		}
-		sessionSpan.SetAttributes(
-			attribute.Int("user_msg_len", len(message)),
-			attribute.Int("assistant_msg_len", fullReply.Len()))
-		sessionSpan.End()
-
-		if fullReply.Len() > 0 {
-			_, cacheSpan := observability.StartChildSpan(llmCtx, "LLM.CacheWrite")
-			r.optimizer.SetCache(cacheKey, fullReply.String())
-			cacheSpan.SetAttributes(
-				attribute.String("key", cacheKey),
-				attribute.Int("value_len", fullReply.Len()))
-			cacheSpan.End()
-		}
-
-		observability.EndChildSpan(llmCtx, llmSpan)
-
-		observability.EndSpanWithDuration(ctx, span)
-
-		langfuseTrace.End()
-
-		statsChan <- stats
-		close(statsChan)
-
-		r.logger.Info("[HandleChatStream] Complete", "reply_length", fullReply.Len(), "latency", stats.LatencyMs)
+		r.processStreamEvents(ctx, stream, eventChan, statsChan,
+			session, message, emotionStr, cacheKey, startTime, span, llmSpan)
 	}()
 
 	return eventChan, statsChan, nil
 }
 
+func (r *Runtime) processStreamEvents(ctx context.Context, stream llm.EventStream,
+	eventChan chan<- *llm.StreamEvent, statsChan chan<- *LLMStats,
+	session *Session, message, emotionStr, cacheKey string, startTime time.Time, span, llmSpan trace.Span) {
+
+	var fullReply strings.Builder
+	stats := &LLMStats{CacheHit: false}
+
+	chunkCount := 0
+	var finishReason string
+	var streamSpan trace.Span
+
+	for {
+		event, err := stream.Recv()
+
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			r.logger.Error("[HandleChatStream] Stream recv error", "error", err)
+			_, errorSpan := observability.StartChildSpan(ctx, "LLM.StreamError")
+			errorSpan.RecordError(err)
+			observability.EndChildSpan(ctx, errorSpan)
+			break
+		}
+
+		if event == nil {
+			continue
+		}
+
+		r.logger.Debug("[HandleChatStream] Got event from adapter", "type", event.Type, "content_len", len(event.Content))
+
+		if event.Type == llm.StreamEventTypeChunk {
+			if chunkCount == 0 {
+				_, streamSpan = observability.StartChildSpan(ctx, "LLM.TokenStreaming")
+				defer observability.EndChildSpan(ctx, streamSpan)
+			}
+			chunkCount++
+
+			if reason := r.updateStatsFromChunk(event, &fullReply, stats); reason != "" {
+				finishReason = reason
+			}
+
+			select {
+			case eventChan <- event:
+			case <-ctx.Done():
+				return
+			}
+		} else if event.Type == llm.StreamEventTypeAction && event.ActionType == "exit" {
+			r.updateStatsFromExitEvent(event, stats)
+		}
+	}
+
+	r.sendFinishEvent(eventChan, ctx, finishReason, fullReply.Len() > 0, stats.Model)
+	r.updateLLMStatsAndMetrics(ctx, llmSpan, span, stats, startTime, chunkCount, finishReason)
+	r.updateSession(ctx, session, message, emotionStr, fullReply.String())
+	r.writeCache(ctx, cacheKey, fullReply.String())
+
+	statsChan <- stats
+	close(statsChan)
+
+	r.logger.Info("[HandleChatStream] Complete", "reply_length", fullReply.Len(), "latency", stats.LatencyMs)
+}
+
+func (r *Runtime) updateStatsFromChunk(event *llm.StreamEvent, fullReply *strings.Builder, stats *LLMStats) string {
+	if event.Content != "" {
+		fullReply.WriteString(event.Content)
+	}
+
+	if event.Model != "" && stats.Model == "" {
+		stats.Model = event.Model
+	}
+
+	if event.Usage != nil && event.Usage.TotalTokens > 0 {
+		stats.InputTokens = event.Usage.PromptTokens
+		stats.OutputTokens = event.Usage.CompletionTokens
+		stats.TotalTokens = event.Usage.TotalTokens
+	}
+
+	if len(event.ToolCalls) > 0 && len(stats.ToolsUsed) == 0 {
+		var toolNames []string
+		for _, tc := range event.ToolCalls {
+			toolNames = append(toolNames, tc.ToolName)
+		}
+		stats.ToolsUsed = toolNames
+	}
+
+	return event.FinishReason
+}
+
+func (r *Runtime) updateStatsFromExitEvent(event *llm.StreamEvent, stats *LLMStats) {
+	if event.Model != "" && stats.Model == "" {
+		stats.Model = event.Model
+	}
+
+	if event.Usage != nil && event.Usage.TotalTokens > 0 {
+		stats.InputTokens = event.Usage.PromptTokens
+		stats.OutputTokens = event.Usage.CompletionTokens
+		stats.TotalTokens = event.Usage.TotalTokens
+	}
+}
+
+func (r *Runtime) sendFinishEvent(eventChan chan<- *llm.StreamEvent, ctx context.Context, finishReason string, hasReply bool, model string) {
+	if finishReason == "" && hasReply {
+		finishReason = "stop"
+	}
+
+	if finishReason != "" {
+		select {
+		case eventChan <- &llm.StreamEvent{
+			Type:         llm.StreamEventTypeChunk,
+			Content:      "",
+			FinishReason: finishReason,
+			Model:        model,
+		}:
+		case <-ctx.Done():
+		}
+	}
+}
+
+func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span trace.Span,
+	stats *LLMStats, startTime time.Time, chunkCount int, finishReason string) {
+
+	_, postSpan := observability.StartChildSpan(llmCtx, "LLM.StatsAndMetrics")
+	defer postSpan.End()
+
+	stats.LatencyMs = time.Since(startTime).Milliseconds()
+	stats.Cost = cost.CalculateCost(stats.Model, stats.InputTokens, stats.OutputTokens)
+
+	model := stats.Model
+	if model == "" {
+		model = "unknown"
+	}
+
+	r.recordLLMMetrics(model, "success", time.Since(startTime).Seconds(),
+		stats.InputTokens, stats.OutputTokens, stats.Cost)
+	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
+	observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(startTime).Seconds())
+
+	llmSpan.SetAttributes(
+		attribute.String("model", model),
+		attribute.Int("input_tokens", stats.InputTokens),
+		attribute.Int("output_tokens", stats.OutputTokens),
+		attribute.Int("total_tokens", stats.TotalTokens),
+		attribute.Float64("cost", stats.Cost),
+		attribute.Int64("ttft_ms", 0),
+		attribute.Int("chunk_count", chunkCount),
+		attribute.String("finish_reason", finishReason),
+	)
+
+	if model != "unknown" {
+		span.SetAttributes(
+			attribute.String("llm.model", model),
+			attribute.Int("llm.input_tokens", stats.InputTokens),
+			attribute.Int("llm.output_tokens", stats.OutputTokens),
+			attribute.Int("llm.total_tokens", stats.TotalTokens),
+			attribute.Float64("llm.cost", stats.Cost),
+		)
+	}
+}
+
+func (r *Runtime) updateSession(llmCtx context.Context, session *Session, message, emotionStr, reply string) {
+	_, span := observability.StartChildSpan(llmCtx, "LLM.SessionUpdate")
+	defer span.End()
+
+	session.AddMessage("user", message, emotionStr, nil)
+	if reply != "" {
+		session.AddMessage("assistant", reply, emotionStr, nil)
+	}
+	span.SetAttributes(
+		attribute.Int("user_msg_len", len(message)),
+		attribute.Int("assistant_msg_len", len(reply)))
+}
+
+func (r *Runtime) writeCache(llmCtx context.Context, cacheKey, value string) {
+	if value == "" {
+		return
+	}
+	_, span := observability.StartChildSpan(llmCtx, "LLM.CacheWrite")
+	defer span.End()
+
+	r.optimizer.SetCache(cacheKey, value)
+	span.SetAttributes(
+		attribute.String("key", cacheKey),
+		attribute.Int("value_len", len(value)))
+}
+
 // handleNonStreamChat 处理非流式调用，并模拟流式响应
 func (r *Runtime) handleNonStreamChat(ctx context.Context, messages []*eino_schema.Message, contentChan chan string, fullReply *strings.Builder, stats *LLMStats) {
-	var msg *eino_schema.Message
-	var usage *llm.ChatUsage
-	var err error
+	msg, usage, err := r.callLLMNonStreaming(ctx, messages)
+	if err != nil || msg == nil {
+		return
+	}
 
+	r.updateStatsFromUsage(stats, usage)
+	r.streamContentToChan(contentChan, fullReply, msg.Content, stats)
+}
+
+func (r *Runtime) callLLMNonStreaming(ctx context.Context, messages []*eino_schema.Message) (*eino_schema.Message, *llm.ChatUsage, error) {
 	if r.llmAdapter.IsHealthy() {
 		r.logger.Info("[HandleChatStream] Calling primary LLM (non-streaming)")
-		msg, usage, err = r.llmAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+		msg, usage, err := r.llmAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		if err != nil {
 			r.logger.Error("[HandleChatStream] Primary LLM failed", "error", err)
 			r.logger.Info("[HandleChatStream] Trying fallback adapter (non-streaming)")
-			msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+			return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		}
-	} else {
-		r.logger.Info("[HandleChatStream] Using fallback adapter (non-streaming)")
-		msg, usage, err = r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+		return msg, usage, nil
 	}
 
-	if err != nil {
-		r.logger.Error("[HandleChatStream] Non-streaming chat failed", "error", err)
+	r.logger.Info("[HandleChatStream] Using fallback adapter (non-streaming)")
+	return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
+}
+
+func (r *Runtime) updateStatsFromUsage(stats *LLMStats, usage *llm.ChatUsage) {
+	if usage == nil {
 		return
 	}
+	stats.Model = usage.Model
+	stats.InputTokens = usage.PromptTokens
+	stats.OutputTokens = usage.CompletionTokens
+	stats.TotalTokens = usage.TotalTokens
+}
 
-	if msg == nil {
-		return
-	}
-
-	content := msg.Content
-
-	if usage != nil {
-		stats.Model = usage.Model
-		stats.InputTokens = usage.PromptTokens
-		stats.OutputTokens = usage.CompletionTokens
-		stats.TotalTokens = usage.TotalTokens
-	}
-
+func (r *Runtime) streamContentToChan(contentChan chan string, fullReply *strings.Builder, content string, stats *LLMStats) {
 	r.logger.Info("[HandleChatStream] Non-streaming response received", "content_len", len(content), "model", stats.Model, "inputTokens", stats.InputTokens, "outputTokens", stats.OutputTokens)
 
 	if content != "" {

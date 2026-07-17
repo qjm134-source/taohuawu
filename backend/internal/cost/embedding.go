@@ -127,9 +127,9 @@ func (c *OpenAIEmbeddingClient) Similarity(a, b []float32) float64 {
 type LocalEmbeddingClient struct {
 	modelName  string
 	dimensions int
-	baseURL    string   // 本地服务地址，如 http://localhost:11434 (Ollama)
-	serverType string   // "ollama" | "tei" | "openai-compat"
-	enabled    bool     // 是否已配置真实后端
+	baseURL    string // 本地服务地址，如 http://localhost:11434 (Ollama)
+	serverType string // "ollama" | "tei" | "openai-compat"
+	enabled    bool   // 是否已配置真实后端
 	client     *http.Client
 }
 

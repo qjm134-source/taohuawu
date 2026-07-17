@@ -309,10 +309,16 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 	// 创建工具注册表
 	var toolRegistry *tools.ToolRegistry
 	if knowledgeBase != nil {
-		toolRegistry = tools.NewToolRegistry(knowledgeBase, weatherService, s.logger)
+		toolRegistry, err = tools.NewToolRegistry(knowledgeBase, weatherService, s.logger)
+		if err != nil {
+			return fmt.Errorf("create tool registry: %w", err)
+		}
 	} else {
 		s.logger.Warn("KnowledgeBase is nil, creating empty tool registry")
-		toolRegistry = tools.NewToolRegistry(nil, weatherService, s.logger)
+		toolRegistry, err = tools.NewToolRegistry(nil, weatherService, s.logger)
+		if err != nil {
+			return fmt.Errorf("create tool registry: %w", err)
+		}
 	}
 
 	// 创建 EinoAgentAdapter（多模型路由器）

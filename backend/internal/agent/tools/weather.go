@@ -72,18 +72,14 @@ func (t *getWeatherToolImpl) normalizeCity(city string) string {
 	return city
 }
 
-func NewGetWeatherTool(weatherService weather.Service, logger logging.Logger) eino_tool.InvokableTool {
+func NewGetWeatherTool(weatherService weather.Service, logger logging.Logger) (eino_tool.InvokableTool, error) {
 	impl := &getWeatherToolImpl{
 		weatherService: weatherService,
 		logger:         logger,
 	}
-	tool, err := eino_tool_utils.InferTool[GetWeatherInput, GetWeatherOutput](
+	return eino_tool_utils.InferTool[GetWeatherInput, GetWeatherOutput](
 		"get_weather",
 		"查询指定城市的实时天气，包括温度、天气状况和风力。当玩家询问天气时调用。如果玩家未指定城市或询问水乡/当地天气，默认查询杭州。",
 		impl.invoke,
 	)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create get_weather tool: %v", err))
-	}
-	return tool
 }
