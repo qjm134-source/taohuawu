@@ -145,16 +145,17 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 	startTime := time.Now()
 
 	langfuseTrace := observability.StartLLMTrace("welcome", session.PlayerID, session.TenantID)
+	ctx = observability.SetLLMTraceToContext(ctx, langfuseTrace)
 
 	prompt := BuildWelcomePrompt(session.Nickname)
 	messages := r.buildWelcomeMessages(prompt)
 
 	msg, usage, err := r.callLLMForWelcome(ctx, messages)
 	if err != nil {
-		return r.handleWelcomeError(ctx, langfuseTrace, startTime, cacheKey, session, err)
+		return r.handleWelcomeError(ctx, startTime, cacheKey, session, err)
 	}
 
-	return r.processWelcomeResponse(ctx, langfuseTrace, startTime, cacheKey, session, msg, usage)
+	return r.processWelcomeResponse(ctx, startTime, cacheKey, session, msg, usage)
 }
 
 func (r *Runtime) buildWelcomeMessages(prompt string) []*eino_schema.Message {
@@ -182,12 +183,14 @@ func (r *Runtime) callLLMForWelcome(ctx context.Context, messages []*eino_schema
 	return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 }
 
-func (r *Runtime) handleWelcomeError(ctx context.Context, langfuseTrace *observability.LLMTrace, startTime time.Time,
+func (r *Runtime) handleWelcomeError(ctx context.Context, startTime time.Time,
 	cacheKey string, session *Session, err error) (string, error) {
 
 	r.logger.Error("[HandleWelcome] All LLM failed", "error", err)
 	observability.AgentRequestsTotal.WithLabelValues("welcome", "error").Inc()
-	langfuseTrace.End()
+	if trace := observability.GetLLMTraceFromContext(ctx); trace != nil {
+		trace.End()
+	}
 
 	if r.config.FallbackResponse.Enabled && r.config.FallbackResponse.WelcomeMessage != "" {
 		reply := r.config.FallbackResponse.WelcomeMessage
@@ -201,7 +204,7 @@ func (r *Runtime) handleWelcomeError(ctx context.Context, langfuseTrace *observa
 	return "", fmt.Errorf("failed to get response: %w", err)
 }
 
-func (r *Runtime) processWelcomeResponse(ctx context.Context, langfuseTrace *observability.LLMTrace, startTime time.Time,
+func (r *Runtime) processWelcomeResponse(ctx context.Context, startTime time.Time,
 	cacheKey string, session *Session, msg *eino_schema.Message, usage *llm.ChatUsage) (string, error) {
 
 	reply := msg.Content
@@ -209,7 +212,9 @@ func (r *Runtime) processWelcomeResponse(ctx context.Context, langfuseTrace *obs
 
 	r.recordWelcomeMetrics(startTime, usage)
 
-	langfuseTrace.End()
+	if trace := observability.GetLLMTraceFromContext(ctx); trace != nil {
+		trace.End()
+	}
 	r.optimizer.SetCache(cacheKey, reply)
 
 	return reply, nil
@@ -245,19 +250,20 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	defer observability.EndSpanWithDuration(ctx, span)
 
 	langfuseTrace := observability.StartLLMTrace("chat", session.PlayerID, session.TenantID)
+	ctx = observability.SetLLMTraceToContext(ctx, langfuseTrace)
 
 	emotionStr := r.detectEmotion(ctx, message)
 
 	cacheKey := session.ID + "_" + message
 	if cached, hit := r.checkExactCache(ctx, span, cacheKey); hit {
-		return r.handleCacheHitSync(ctx, langfuseTrace, cached, emotionStr)
+		return r.handleCacheHitSync(ctx, cached, emotionStr)
 	}
 
 	if cached, hit := r.checkSimilarityCache(ctx, span, message); hit {
-		return r.handleCacheHitSync(ctx, langfuseTrace, cached, emotionStr)
+		return r.handleCacheHitSync(ctx, cached, emotionStr)
 	}
 
-	return r.callLLMAndProcess(ctx, span, langfuseTrace, session, message, emotionStr, cacheKey)
+	return r.callLLMAndProcess(ctx, span, session, message, emotionStr, cacheKey)
 }
 
 func (r *Runtime) checkExactCache(ctx context.Context, span trace.Span, cacheKey string) (string, bool) {
@@ -294,13 +300,15 @@ func (r *Runtime) checkSimilarityCache(ctx context.Context, span trace.Span, mes
 	return "", false
 }
 
-func (r *Runtime) handleCacheHitSync(ctx context.Context, langfuseTrace *observability.LLMTrace, cached, emotionStr string) (string, string, *LLMStats, error) {
+func (r *Runtime) handleCacheHitSync(ctx context.Context, cached, emotionStr string) (string, string, *LLMStats, error) {
 	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
-	langfuseTrace.End()
+	if trace := observability.GetLLMTraceFromContext(ctx); trace != nil {
+		trace.End()
+	}
 	return cached, emotionStr, &LLMStats{CacheHit: true}, nil
 }
 
-func (r *Runtime) callLLMAndProcess(ctx context.Context, span trace.Span, langfuseTrace *observability.LLMTrace,
+func (r *Runtime) callLLMAndProcess(ctx context.Context, span trace.Span,
 	session *Session, message, emotionStr, cacheKey string) (string, string, *LLMStats, error) {
 
 	messages := r.buildContextMessages(session, message, emotionStr)
@@ -310,11 +318,13 @@ func (r *Runtime) callLLMAndProcess(ctx context.Context, span trace.Span, langfu
 		r.logger.Error("[HandleChat] All LLM calls failed", "error", err)
 		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
 		observability.RecordError(span, err)
-		langfuseTrace.End()
+		if trace := observability.GetLLMTraceFromContext(ctx); trace != nil {
+			trace.End()
+		}
 		return "", "", nil, fmt.Errorf("failed to get response: %w", err)
 	}
 
-	return r.processLLMResponse(ctx, span, langfuseTrace, session, message, emotionStr, cacheKey, msg, usage)
+	return r.processLLMResponse(ctx, span, session, message, emotionStr, cacheKey, msg, usage)
 }
 
 func (r *Runtime) callLLM(ctx context.Context, messages []*eino_schema.Message) (*eino_schema.Message, *llm.ChatUsage, error) {
@@ -338,7 +348,7 @@ func (r *Runtime) callLLM(ctx context.Context, messages []*eino_schema.Message) 
 	return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 }
 
-func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span, langfuseTrace *observability.LLMTrace,
+func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span,
 	session *Session, message, emotionStr, cacheKey string, msg *eino_schema.Message, usage *llm.ChatUsage) (string, string, *LLMStats, error) {
 
 	startTime := time.Now()
@@ -377,7 +387,9 @@ func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span, langf
 
 	r.logger.Info("[HandleChat] Complete", "reply_length", len(reply), "model", stats.Model, "tokens", stats.TotalTokens, "cost", stats.Cost)
 
-	langfuseTrace.End()
+	if trace := observability.GetLLMTraceFromContext(ctx); trace != nil {
+		trace.End()
+	}
 
 	return reply, emotionStr, stats, nil
 }
@@ -397,12 +409,13 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	)
 
 	langfuseTrace := observability.StartLLMTrace("chat-stream", session.PlayerID, session.TenantID)
+	ctx = observability.SetLLMTraceToContext(ctx, langfuseTrace)
 
 	emotionStr := r.detectEmotion(ctx, message)
 
 	cacheKey := session.ID + "_" + message
 	if cached, hit := r.checkCache(ctx, cacheKey); hit && cached != "" {
-		return r.handleCacheHit(ctx, span, langfuseTrace, cached)
+		return r.handleCacheHit(ctx, span, cached)
 	}
 
 	messages := r.buildContextMessagesWithSpan(ctx, session, message, emotionStr)
@@ -410,10 +423,10 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
 	stream, err := r.callLLMStream(llmCtx, messages)
 	if err != nil {
-		return r.handleLLMError(ctx, span, llmSpan, langfuseTrace, err)
+		return r.handleLLMError(ctx, span, llmSpan, err)
 	}
 
-	return r.processStreamAsync(ctx, span, llmSpan, langfuseTrace,
+	return r.processStreamAsync(ctx, span, llmSpan,
 		stream, session, message, emotionStr, cacheKey, startTime)
 }
 
@@ -430,13 +443,15 @@ func (r *Runtime) checkCache(ctx context.Context, cacheKey string) (string, bool
 	return r.optimizer.GetCache(cacheKey)
 }
 
-func (r *Runtime) handleCacheHit(ctx context.Context, span trace.Span, langfuseTrace *observability.LLMTrace, cached string) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
+func (r *Runtime) handleCacheHit(ctx context.Context, span trace.Span, cached string) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
 	span.SetAttributes(attribute.Bool("cache_hit", true))
 	observability.AddEvent(ctx, "cache_hit", attribute.String("type", "check"))
 	observability.CacheHitsTotal.WithLabelValues("check").Inc()
 	r.recordCacheHit()
 	observability.EndSpanWithDuration(ctx, span)
-	langfuseTrace.End()
+	if trace := observability.GetLLMTraceFromContext(ctx); trace != nil {
+		trace.End()
+	}
 	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 
 	eventChan := make(chan *llm.StreamEvent, 2)
@@ -482,17 +497,19 @@ func (r *Runtime) callLLMStream(ctx context.Context, messages []*eino_schema.Mes
 	return r.fallbackAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 }
 
-func (r *Runtime) handleLLMError(ctx context.Context, span, llmSpan trace.Span, langfuseTrace *observability.LLMTrace, err error) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
+func (r *Runtime) handleLLMError(ctx context.Context, span, llmSpan trace.Span, err error) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
 	r.logger.Error("[HandleChatStream] All LLM stream calls failed", "error", err)
 	observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
 	observability.RecordError(span, err)
 	observability.EndSpanWithDuration(ctx, span)
 	observability.EndChildSpan(ctx, llmSpan)
-	langfuseTrace.End()
+	if trace := observability.GetLLMTraceFromContext(ctx); trace != nil {
+		trace.End()
+	}
 	return nil, nil, fmt.Errorf("failed to get stream response: %w", err)
 }
 
-func (r *Runtime) processStreamAsync(ctx context.Context, span, llmSpan trace.Span, langfuseTrace *observability.LLMTrace,
+func (r *Runtime) processStreamAsync(ctx context.Context, span, llmSpan trace.Span,
 	stream llm.EventStream, session *Session, message, emotionStr, cacheKey string, startTime time.Time) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
 
 	eventChan := make(chan *llm.StreamEvent, 100)
@@ -504,7 +521,9 @@ func (r *Runtime) processStreamAsync(ctx context.Context, span, llmSpan trace.Sp
 		defer observability.EndChildSpan(ctx, llmSpan)
 		defer stream.Close()
 		defer observability.EndSpanWithDuration(ctx, span)
-		defer langfuseTrace.End()
+		if trace := observability.GetLLMTraceFromContext(ctx); trace != nil {
+			defer trace.End()
+		}
 
 		r.processStreamEvents(ctx, stream, eventChan, statsChan,
 			session, message, emotionStr, cacheKey, startTime, span, llmSpan)

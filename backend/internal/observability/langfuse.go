@@ -10,6 +10,21 @@ import (
 	"github.com/oiime/langfuse-go"
 )
 
+type llmTraceKey struct{}
+
+// SetLLMTraceToContext 将 LLMTrace 存入 context
+func SetLLMTraceToContext(ctx context.Context, trace *LLMTrace) context.Context {
+	return context.WithValue(ctx, llmTraceKey{}, trace)
+}
+
+// GetLLMTraceFromContext 从 context 获取 LLMTrace
+func GetLLMTraceFromContext(ctx context.Context) *LLMTrace {
+	if trace, ok := ctx.Value(llmTraceKey{}).(*LLMTrace); ok {
+		return trace
+	}
+	return nil
+}
+
 // LangfuseClient 封装 Langfuse SDK 客户端。
 type LangfuseClient struct {
 	client  *langfuse.Client
@@ -76,6 +91,11 @@ func (c *LangfuseClient) Shutdown() {
 type LLMTrace struct {
 	trace   *langfuse.Trace
 	enabled bool
+}
+
+// Enabled 返回是否启用。
+func (t *LLMTrace) Enabled() bool {
+	return t != nil && t.enabled
 }
 
 // StartLLMTrace 开始一次 Langfuse Trace。

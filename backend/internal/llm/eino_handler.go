@@ -3,10 +3,12 @@ package llm
 import (
 	"context"
 	"fmt"
+	"time"
 
 	eino_callbacks "github.com/cloudwego/eino/callbacks"
 	eino_components "github.com/cloudwego/eino/components"
 	eino_compose "github.com/cloudwego/eino/compose"
+	eino_model "github.com/cloudwego/eino/components/model"
 	eino_schema "github.com/cloudwego/eino/schema"
 	"github.com/watertown/guide/internal/observability"
 	"github.com/watertown/guide/pkg/logging"
@@ -16,13 +18,22 @@ import (
 
 type callCounterKey struct{}
 
+type chatModelStartInfo struct {
+	startTime time.Time
+	input     eino_callbacks.CallbackInput
+}
+
 type einoAgentHandler struct {
-	logger    logging.Logger
-	toolsUsed []string
+	logger        logging.Logger
+	toolsUsed     []string
+	modelStarts   map[int]chatModelStartInfo
 }
 
 func newEinoAgentHandler(logger logging.Logger) eino_callbacks.Handler {
-	return &einoAgentHandler{logger: logger}
+	return &einoAgentHandler{
+		logger:      logger,
+		modelStarts: make(map[int]chatModelStartInfo),
+	}
 }
 
 func (h *einoAgentHandler) GetToolsUsed() []string {
@@ -48,6 +59,10 @@ func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.Run
 		} else {
 			purpose = "final_response"
 		}
+		h.modelStarts[callCounter] = chatModelStartInfo{
+			startTime: time.Now(),
+			input:     input,
+		}
 	} else if info.Component == eino_components.ComponentOfTool {
 		spanName = fmt.Sprintf("Eino.%s.%s.%d", info.Component, info.Name, callCounter)
 		purpose = "tool_execution"
@@ -71,7 +86,6 @@ func (h *einoAgentHandler) OnStart(ctx context.Context, info *eino_callbacks.Run
 		}
 	}
 
-	// 只记录工具调用的审计日志
 	if info.Component == eino_components.ComponentOfTool {
 		h.logger.Info("[Audit] Tool call started",
 			"tool_name", info.Name,
@@ -96,7 +110,6 @@ func (h *einoAgentHandler) OnEnd(ctx context.Context, info *eino_callbacks.RunIn
 		span.End()
 	}
 
-	// 只记录工具调用的审计日志
 	if info.Component == eino_components.ComponentOfTool {
 		h.logger.Info("[Audit] Tool call completed",
 			"tool_name", info.Name,
@@ -104,7 +117,93 @@ func (h *einoAgentHandler) OnEnd(ctx context.Context, info *eino_callbacks.RunIn
 		)
 	}
 
+	if info.Component == eino_components.ComponentOfChatModel {
+		h.recordLangfuseGeneration(ctx, info, output)
+	}
+
 	return ctx
+}
+
+func (h *einoAgentHandler) recordLangfuseGeneration(ctx context.Context, info *eino_callbacks.RunInfo, output eino_callbacks.CallbackOutput) {
+	trace := observability.GetLLMTraceFromContext(ctx)
+	if trace == nil || !trace.Enabled() {
+		return
+	}
+
+	var callCounter int
+	if val := ctx.Value(callCounterKey{}); val != nil {
+		callCounter = val.(int)
+	}
+
+	startInfo, ok := h.modelStarts[callCounter]
+	if !ok {
+		return
+	}
+	delete(h.modelStarts, callCounter)
+
+	latencyMs := time.Since(startInfo.startTime).Milliseconds()
+
+	modelCallbackOutput := eino_model.ConvCallbackOutput(output)
+	if modelCallbackOutput == nil {
+		return
+	}
+
+	modelName := info.Name
+	if modelCallbackOutput.Config != nil && modelCallbackOutput.Config.Model != "" {
+		modelName = modelCallbackOutput.Config.Model
+	}
+
+	inputMessages := h.extractInputMessages(startInfo.input)
+
+	outputContent := ""
+	if modelCallbackOutput.Message != nil {
+		outputContent = modelCallbackOutput.Message.Content
+	}
+
+	inputTokens := 0
+	outputTokens := 0
+	if modelCallbackOutput.TokenUsage != nil {
+		inputTokens = modelCallbackOutput.TokenUsage.PromptTokens
+		outputTokens = modelCallbackOutput.TokenUsage.CompletionTokens
+	}
+
+	purpose := "tool_decision"
+	if callCounter > 1 {
+		purpose = "final_response"
+	}
+
+	trace.RecordGeneration(
+		fmt.Sprintf("chat-model-%d-%s", callCounter, purpose),
+		modelName,
+		inputMessages,
+		outputContent,
+		inputTokens,
+		outputTokens,
+		0,
+		latencyMs,
+		nil,
+	)
+
+	h.logger.Info("[Langfuse] Auto-recorded generation",
+		"call_number", callCounter,
+		"model", modelName,
+		"input_tokens", inputTokens,
+		"output_tokens", outputTokens,
+		"latency_ms", latencyMs,
+	)
+}
+
+func (h *einoAgentHandler) extractInputMessages(input eino_callbacks.CallbackInput) interface{} {
+	modelInput := eino_model.ConvCallbackInput(input)
+	if modelInput == nil {
+		return input
+	}
+
+	if modelInput.Messages != nil {
+		return modelInput.Messages
+	}
+
+	return input
 }
 
 func (h *einoAgentHandler) OnError(ctx context.Context, info *eino_callbacks.RunInfo, err error) context.Context {
@@ -114,14 +213,61 @@ func (h *einoAgentHandler) OnError(ctx context.Context, info *eino_callbacks.Run
 		span.End()
 	}
 
-	// 记录错误日志
 	h.logger.Error("[Audit] Component error",
 		"component", info.Component,
 		"name", info.Name,
 		"error", err.Error(),
 	)
 
+	if info.Component == eino_components.ComponentOfChatModel {
+		h.recordLangfuseGenerationError(ctx, info, err)
+	}
+
 	return ctx
+}
+
+func (h *einoAgentHandler) recordLangfuseGenerationError(ctx context.Context, info *eino_callbacks.RunInfo, err error) {
+	trace := observability.GetLLMTraceFromContext(ctx)
+	if trace == nil || !trace.Enabled() {
+		return
+	}
+
+	var callCounter int
+	if val := ctx.Value(callCounterKey{}); val != nil {
+		callCounter = val.(int)
+	}
+
+	startInfo, ok := h.modelStarts[callCounter]
+	if !ok {
+		return
+	}
+	delete(h.modelStarts, callCounter)
+
+	latencyMs := time.Since(startInfo.startTime).Milliseconds()
+
+	purpose := "tool_decision"
+	if callCounter > 1 {
+		purpose = "final_response"
+	}
+
+	trace.RecordGeneration(
+		fmt.Sprintf("chat-model-%d-%s", callCounter, purpose),
+		info.Name,
+		startInfo.input,
+		"",
+		0,
+		0,
+		0,
+		latencyMs,
+		err,
+	)
+
+	h.logger.Info("[Langfuse] Auto-recorded generation error",
+		"call_number", callCounter,
+		"model", info.Name,
+		"latency_ms", latencyMs,
+		"error", err.Error(),
+	)
 }
 
 func (h *einoAgentHandler) OnStartWithStreamInput(ctx context.Context, info *eino_callbacks.RunInfo, input *eino_schema.StreamReader[eino_callbacks.CallbackInput]) context.Context {
@@ -140,6 +286,10 @@ func (h *einoAgentHandler) OnStartWithStreamInput(ctx context.Context, info *ein
 			purpose = "tool_decision"
 		} else {
 			purpose = "final_response"
+		}
+		h.modelStarts[callCounter] = chatModelStartInfo{
+			startTime: time.Now(),
+			input:     nil,
 		}
 	} else if info.Component == eino_components.ComponentOfTool {
 		spanName = fmt.Sprintf("Eino.%s.%s.%d", info.Component, info.Name, callCounter)
@@ -164,7 +314,6 @@ func (h *einoAgentHandler) OnStartWithStreamInput(ctx context.Context, info *ein
 		}
 	}
 
-	// 只记录工具调用的审计日志
 	if info.Component == eino_components.ComponentOfTool {
 		h.logger.Info("[Audit] Tool stream started",
 			"tool_name", info.Name,
@@ -182,14 +331,92 @@ func (h *einoAgentHandler) OnEndWithStreamOutput(ctx context.Context, info *eino
 		span.End()
 	}
 
-	// 只记录工具调用的审计日志
 	if info.Component == eino_components.ComponentOfTool {
 		h.logger.Info("[Audit] Tool stream completed",
 			"tool_name", info.Name,
 		)
 	}
 
+	if info.Component == eino_components.ComponentOfChatModel {
+		h.recordLangfuseGenerationFromStream(ctx, info, output)
+	}
+
 	return ctx
+}
+
+func (h *einoAgentHandler) recordLangfuseGenerationFromStream(ctx context.Context, info *eino_callbacks.RunInfo, output *eino_schema.StreamReader[eino_callbacks.CallbackOutput]) {
+	trace := observability.GetLLMTraceFromContext(ctx)
+	if trace == nil || !trace.Enabled() {
+		return
+	}
+
+	var callCounter int
+	if val := ctx.Value(callCounterKey{}); val != nil {
+		callCounter = val.(int)
+	}
+
+	startInfo, ok := h.modelStarts[callCounter]
+	if !ok {
+		return
+	}
+	delete(h.modelStarts, callCounter)
+
+	latencyMs := time.Since(startInfo.startTime).Milliseconds()
+
+	purpose := "tool_decision"
+	if callCounter > 1 {
+		purpose = "final_response"
+	}
+
+	var fullOutput string
+	var inputTokens, outputTokens int
+	var modelName string = info.Name
+
+	for {
+		out, err := output.Recv()
+		if err != nil {
+			break
+		}
+
+		modelOutput := eino_model.ConvCallbackOutput(out)
+		if modelOutput == nil {
+			continue
+		}
+
+		if modelOutput.Message != nil && modelOutput.Message.Content != "" {
+			fullOutput += modelOutput.Message.Content
+		}
+
+		if modelOutput.Config != nil && modelOutput.Config.Model != "" {
+			modelName = modelOutput.Config.Model
+		}
+
+		if modelOutput.TokenUsage != nil {
+			inputTokens = modelOutput.TokenUsage.PromptTokens
+			outputTokens = modelOutput.TokenUsage.CompletionTokens
+		}
+	}
+
+	trace.RecordGeneration(
+		fmt.Sprintf("chat-model-%d-%s-stream", callCounter, purpose),
+		modelName,
+		"stream-input",
+		fullOutput,
+		inputTokens,
+		outputTokens,
+		0,
+		latencyMs,
+		nil,
+	)
+
+	h.logger.Info("[Langfuse] Auto-recorded stream generation",
+		"call_number", callCounter,
+		"model", modelName,
+		"output_len", len(fullOutput),
+		"input_tokens", inputTokens,
+		"output_tokens", outputTokens,
+		"latency_ms", latencyMs,
+	)
 }
 
 // 辅助方法：预览输入（限制长度）
