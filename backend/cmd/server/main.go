@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	cbLangfuse "github.com/cloudwego/eino-ext/callbacks/langfuse"
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/watertown/guide/internal/config"
 	"github.com/watertown/guide/internal/database"
 	"github.com/watertown/guide/internal/knowledge"
@@ -85,13 +87,27 @@ func main() {
 	}
 
 	// 初始化 Langfuse（LLM 专项可观测，独立于 OTel/Prometheus）
-	langfuseClient := observability.InitLangfuse(observability.LangfuseConfig{
-		Enabled:   cfg.Observability.Langfuse.Enabled,
-		Host:      cfg.Observability.Langfuse.Host,
-		PublicKey: cfg.Observability.Langfuse.PublicKey,
-		SecretKey: cfg.Observability.Langfuse.SecretKey,
-	})
-	defer langfuseClient.Shutdown()
+	if cfg.Observability.Langfuse.Enabled && cfg.Observability.Langfuse.PublicKey != "" && cfg.Observability.Langfuse.SecretKey != "" {
+		host := cfg.Observability.Langfuse.Host
+		if host == "" {
+			host = "https://cloud.langfuse.com"
+		}
+		langfuseHandler, langfuseFlusher := cbLangfuse.NewLangfuseHandler(&cbLangfuse.Config{
+			Host:             host,
+			PublicKey:        cfg.Observability.Langfuse.PublicKey,
+			SecretKey:        cfg.Observability.Langfuse.SecretKey,
+			Threads:          5,
+			FlushAt:          50,
+			FlushInterval:    10 * time.Second,
+			MaxTaskQueueSize: 1000,
+			MaxRetry:         3,
+		})
+		defer langfuseFlusher()
+		callbacks.AppendGlobalHandlers(langfuseHandler)
+		fmt.Fprintf(os.Stderr, "[Langfuse] Enabled — sending LLM traces to %s\n", host)
+	} else {
+		fmt.Fprintln(os.Stderr, "[Langfuse] Disabled — LLM traces will NOT be sent to Langfuse")
+	}
 
 	// 初始化服务器
 	srv, err := server.New(cfg, db, kb, logger)
