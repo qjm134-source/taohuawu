@@ -40,9 +40,15 @@ const Typewriter = (() => {
             // 清除之前的定时器
             stop();
 
-            if (append && currentText) {
-                targetText = currentText + text;
-                charIndex = currentText.length;
+            if (append) {
+                if (currentText) {
+                    targetText = currentText + text;
+                    charIndex = currentText.length;
+                } else {
+                    targetText = text;
+                    charIndex = 0;
+                    currentText = '';
+                }
             } else {
                 targetText = text;
                 charIndex = 0;

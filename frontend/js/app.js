@@ -101,6 +101,7 @@
                 break;
 
             case WSClient.MSG_TYPE.STREAM_EVENT:
+                console.log('[WS] Received STREAM_EVENT:', JSON.stringify(message).substring(0, 200));
                 handleStreamEvent(message);
                 break;
 
@@ -252,15 +253,39 @@
         try {
             const payload = message.payload;
             const content = payload.content || '';
-            const finishReason = payload.finishReason || '';
+            const reasoningContent = payload.reasoningContent || payload.reasoning_content || '';
+            const isThinking = payload.isThinking || payload.is_thinking || false;
+            const finishReason = payload.finishReason || payload.finish_reason || '';
+            const toolCalls = payload.toolCalls || payload.tool_calls || [];
+            
+
+
+            if (reasoningContent && reasoningContent !== '') {
+                UI.updateBubbleThinking(reasoningContent);
+                clearMessageTimeout();
+            }
+
+            if (toolCalls && toolCalls.length > 0) {
+                const toolNames = toolCalls.map(tc => tc.toolName || tc.tool_name).join('、');
+                UI.updateBubbleThinking(`需要调用${toolNames}`);
+                clearMessageTimeout();
+            }
+
+            if (isThinking && !content && !reasoningContent && !toolCalls.length) {
+                UI.updateBubble(null, true);
+                clearMessageTimeout();
+            }
 
             if (content && content !== '') {
-                if (streamingReply === '') {
-                    streamingReply = content;
-                } else {
-                    streamingReply += content;
+                streamingReply += content;
+                const bubble = document.getElementById('speechBubble');
+                const bubbleContent = document.getElementById('bubbleContent');
+                if (bubble && bubbleContent) {
+                    bubble.classList.remove('visible');
+                    void bubble.offsetWidth;
+                    bubble.classList.add('visible');
+                    bubbleContent.textContent = streamingReply;
                 }
-                UI.updateBubble(streamingReply, false, false);
                 clearMessageTimeout();
             }
 
@@ -275,19 +300,26 @@
                 streamingStats = null;
             }
 
-            if (payload.totalTokens > 0 || payload.cost > 0) {
+            const inputTokens = payload.inputTokens || payload.input_tokens || 0;
+            const outputTokens = payload.outputTokens || payload.output_tokens || 0;
+            const totalTokens = payload.totalTokens || payload.total_tokens || 0;
+            const cost = payload.cost || 0;
+            const latencyMs = payload.latency_ms || payload.latencyMs || 0;
+
+            if (totalTokens > 0 || cost > 0) {
                 const stats = {
                     model: payload.model || 'unknown',
-                    inputTokens: payload.inputTokens || 0,
-                    outputTokens: payload.outputTokens || 0,
-                    totalTokens: payload.totalTokens || 0,
-                    cost: payload.cost || 0,
-                    latencyMs: payload.latency_ms || payload.latencyMs || 0,
+                    inputTokens: inputTokens,
+                    outputTokens: outputTokens,
+                    totalTokens: totalTokens,
+                    cost: cost,
+                    latencyMs: latencyMs,
                     cacheHit: false,
                 };
                 UI.updateDebugPanel(stats);
             }
         } catch (err) {
+            console.error('[StreamEvent] Error:', err);
             streamingReply = '';
             streamingStats = null;
         }
@@ -328,11 +360,11 @@
         streamingReply = '';
         streamingStats = null;
         clearMessageTimeout();
+        UI.completeStreaming();
     }
 
     const originalSendChatMessage = WSClient.sendChatMessage.bind(WSClient);
     WSClient.sendChatMessage = function(text) {
-        resetStreamingCache();
         const result = originalSendChatMessage(text);
         
         // 发送成功后启动超时计时器

@@ -95,6 +95,9 @@ const UI = (() => {
         if (!bubble || !content) return;
 
         if (isThinking) {
+            if (typewriter) {
+                typewriter.stop();
+            }
             content.innerHTML = '<span class="bubble-thinking">小荷正在思考...</span>';
             bubble.classList.add('visible');
         } else {
@@ -103,7 +106,13 @@ const UI = (() => {
             bubble.classList.add('visible');
 
             if (append && typewriter) {
-                typewriter.start(message, true);
+                const currentContent = content.textContent || '';
+                if (currentContent !== message) {
+                    const newContent = message.substring(currentContent.length);
+                    if (newContent) {
+                        typewriter.start(newContent, true);
+                    }
+                }
             } else {
                 if (typewriter) {
                     typewriter.stop();
@@ -114,11 +123,34 @@ const UI = (() => {
     }
 
     /**
+     * 更新导游气泡（显示思考过程）
+     * @param {string} reasoning - 思考内容
+     */
+    function updateBubbleThinking(reasoning) {
+        const bubble = elements.speechBubble;
+        const content = elements.bubbleContent;
+        console.log('[UI] updateBubbleThinking called:', reasoning, 'bubble:', !!bubble, 'content:', !!content);
+        if (!bubble || !content) return;
+
+        bubble.classList.add('visible');
+        content.innerHTML = `<span class="bubble-thinking">🤔 思考中：${escapeHtml(reasoning)}</span>`;
+        console.log('[UI] updateBubbleThinking completed, innerHTML:', content.innerHTML);
+    }
+
+    /**
      * 完成流式显示（停止打字机，显示完整内容）
      */
     function completeStreaming() {
         if (typewriter) {
             typewriter.skip();
+        }
+        const content = elements.bubbleContent;
+        if (content) {
+            content.innerHTML = '';
+        }
+        const bubble = elements.speechBubble;
+        if (bubble) {
+            bubble.classList.remove('visible');
         }
     }
 
@@ -186,6 +218,11 @@ const UI = (() => {
 
         // 更新侧边栏
         renderHistoryItem(item);
+
+        // 停止打字机（不清空气泡，让用户可以继续查看）
+        if (typewriter) {
+            typewriter.stop();
+        }
     }
 
     /**
@@ -383,6 +420,7 @@ const UI = (() => {
         setConnectionStatus,
         showWelcome,
         updateBubble,
+        updateBubbleThinking,
         hideBubble,
         completeStreaming,
         getInputAndClear,

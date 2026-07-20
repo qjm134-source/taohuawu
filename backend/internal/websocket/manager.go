@@ -16,10 +16,10 @@ import (
 const (
 	// 写等待超时
 	writeWait = 10 * time.Second
-	// 读取等待超时
-	pongWait = 35 * time.Second
-	// 心跳间隔
-	pingPeriod = 30 * time.Second
+	// 读取等待超时 - 增加到60秒，避免心跳超时
+	pongWait = 60 * time.Second
+	// 心跳间隔 - 减少到20秒，确保在超时前收到PONG
+	pingPeriod = 20 * time.Second
 	// 最大消息大小
 	maxMessageSize = 1024 * 1024 // 1MB
 )

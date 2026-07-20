@@ -253,13 +253,13 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 
 	var fullReply strings.Builder
 
-	// 流式发送响应（只推送有内容或工具调用的事件）
+	// 流式发送响应（推送有内容、思考过程或工具调用的事件）
 	for event := range eventChan {
 		if event.Type == llm.StreamEventTypeChunk && event.Content != "" {
 			fullReply.WriteString(event.Content)
 		}
 
-		if event.Content == "" && len(event.ToolCalls) == 0 && event.FinishReason == "" {
+		if event.Content == "" && event.ReasoningContent == "" && len(event.ToolCalls) == 0 && event.FinishReason == "" {
 			continue
 		}
 
@@ -272,21 +272,38 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 			})
 		}
 
-		eventMsg, _ := websocket.NewMessage(
+		h.logger.Info("[WebSocket] Sending stream event",
+			"type", event.Type,
+			"content_len", len(event.Content),
+			"reasoning_len", len(event.ReasoningContent),
+			"tool_calls", len(toolCalls),
+			"finish_reason", event.FinishReason,
+		)
+
+		eventMsg, err := websocket.NewMessage(
 			websocket.MessageTypeStreamEvent,
 			msg.RequestID,
 			msg.TenantID,
 			websocket.StreamEventPayload{
-				Type:         string(event.Type),
-				Content:      event.Content,
-				ToolCalls:    toolCalls,
-				ToolResult:   event.ToolResult,
-				ActionType:   event.ActionType,
-				Model:        event.Model,
-				FinishReason: event.FinishReason,
+				Type:               string(event.Type),
+				Content:            event.Content,
+				ReasoningContent:   event.ReasoningContent,
+				IsThinking:         event.IsThinking,
+				ToolCalls:          toolCalls,
+				ToolResult:         event.ToolResult,
+				ActionType:         event.ActionType,
+				Model:              event.Model,
+				FinishReason:       event.FinishReason,
 			},
 		)
-		_ = client.SendMessage(eventMsg)
+		if err != nil {
+			h.logger.Error("[WebSocket] Failed to create message", "error", err)
+			continue
+		}
+		if err := client.SendMessage(eventMsg); err != nil {
+			h.logger.Error("[WebSocket] Failed to send message", "error", err)
+			break
+		}
 	}
 
 	// 等待统计信息

@@ -201,7 +201,7 @@ func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino
 
 	config := &eino_adk.ChatModelAgentConfig{
 		Name:                "WaterTownGuide",
-		Instruction:         "",
+		Instruction:         "你是桃花坞的智能导游小荷。请根据用户的问题，使用可用的工具获取信息，然后生成友好、详细的回答。在收到工具执行结果后，请总结结果并给出最终回复。",
 		Model:               primaryModel.model,
 		ToolsConfig:         toolsConfig,
 		ModelFailoverConfig: failoverConfig,
@@ -421,6 +421,7 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 				if h, ok := handler.(*einoAgentHandler); ok {
 					toolsUsed = h.GetToolsUsed()
 				}
+				a.logger.Info("[StreamChat] Iterator closed, exiting", "tools_used", len(toolsUsed))
 
 				select {
 				case streamChan <- &StreamResult{
@@ -442,6 +443,8 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 				return
 			}
 
+			a.logger.Debug("[StreamChat] Got event from iterator", "has_output", event.Output != nil)
+
 			if event.Err != nil {
 				a.logger.Error("[StreamChat] Event error", "error", event.Err)
 				continue
@@ -451,34 +454,61 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 				msgVariant := event.Output.MessageOutput
 
 				if msgVariant.Role == eino_schema.Tool {
+					a.logger.Info("[StreamChat] Got tool message, skipping", "role", msgVariant.Role)
 					continue
 				}
 
-				if msgVariant.Message != nil && msgVariant.Message.Role == eino_schema.Assistant && msgVariant.Message.Content != "" && !msgVariant.IsStreaming {
+				if msgVariant.Message != nil && msgVariant.Message.Role == eino_schema.Assistant && !msgVariant.IsStreaming {
 					if modelName == "" {
 						modelName = a.getCurrentModelName(msgVariant.Message)
 					}
 
-					a.logger.Debug("[StreamChat] Sending non-streaming assistant message", "content_len", len(msgVariant.Message.Content))
-					select {
-					case streamChan <- &StreamResult{
-						Event: &StreamEvent{
-							Type:    StreamEventTypeChunk,
-							Content: msgVariant.Message.Content,
-							Model:   modelName,
-						},
-					}:
-						a.logger.Debug("[StreamChat] Non-streaming message sent")
-					case <-ctx.Done():
-						return
-					case <-done:
-						return
+					a.logger.Info("[StreamChat] Got non-streaming assistant message",
+						"content_len", len(msgVariant.Message.Content),
+						"reasoning_len", len(msgVariant.Message.ReasoningContent),
+						"tool_calls", len(msgVariant.Message.ToolCalls))
+
+					if msgVariant.Message.ReasoningContent != "" {
+						a.logger.Info("[StreamChat] Sending reasoning content", "reasoning_len", len(msgVariant.Message.ReasoningContent))
+						select {
+						case streamChan <- &StreamResult{
+							Event: &StreamEvent{
+								Type:             StreamEventTypeChunk,
+								ReasoningContent: msgVariant.Message.ReasoningContent,
+								IsThinking:       true,
+								Model:            modelName,
+							},
+						}:
+							a.logger.Info("[StreamChat] Reasoning content sent")
+						case <-ctx.Done():
+							return
+						case <-done:
+							return
+						}
+					}
+
+					if msgVariant.Message.Content != "" {
+						a.logger.Info("[StreamChat] Sending non-streaming assistant content", "content_len", len(msgVariant.Message.Content))
+						select {
+						case streamChan <- &StreamResult{
+							Event: &StreamEvent{
+								Type:    StreamEventTypeChunk,
+								Content: msgVariant.Message.Content,
+								Model:   modelName,
+							},
+						}:
+							a.logger.Info("[StreamChat] Non-streaming content sent")
+						case <-ctx.Done():
+							return
+						case <-done:
+							return
+						}
 					}
 					continue
 				}
 
 				if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
-					a.logger.Debug("[StreamChat] Got streaming message, starting to read chunks")
+					a.logger.Info("[StreamChat] Got streaming message, starting to read chunks")
 					stream := msgVariant.MessageStream
 
 					for {
@@ -493,7 +523,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 						}
 
 						chunk, err := stream.Recv()
-						a.logger.Debug("[StreamChat] Read chunk from msgStream", "err", err, "chunk", chunk)
 
 						if err == io.EOF {
 							stream.Close()
@@ -544,6 +573,9 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 						if len(chunk.ToolCalls) > 0 {
 							toolCalls = make([]ToolCall, 0, len(chunk.ToolCalls))
 							for _, tc := range chunk.ToolCalls {
+								if tc.Function.Name == "" {
+									continue
+								}
 								var params map[string]interface{}
 								if tc.Function.Arguments != "" {
 									if err := json.Unmarshal([]byte(tc.Function.Arguments), &params); err != nil {
@@ -558,25 +590,52 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 							}
 						}
 
-						a.logger.Debug("[StreamChat] Sending chunk to streamChan", "content_len", len(chunk.Content))
-						select {
-						case streamChan <- &StreamResult{
-							Event: &StreamEvent{
-								Type:         StreamEventTypeChunk,
-								Content:      chunk.Content,
-								FinishReason: finishReason,
-								Model:        modelName,
-								Usage:        usage,
-								ToolCalls:    toolCalls,
-							},
-						}:
-							a.logger.Debug("[StreamChat] Chunk sent to streamChan")
-						case <-ctx.Done():
-							stream.Close()
-							return
-						case <-done:
-							stream.Close()
-							return
+						isThinking := chunk.ReasoningContent != "" && chunk.Content == ""
+
+						if chunk.ReasoningContent != "" {
+							a.logger.Info("[StreamChat] Sending reasoning chunk", "reasoning_len", len(chunk.ReasoningContent))
+							select {
+							case streamChan <- &StreamResult{
+								Event: &StreamEvent{
+									Type:             StreamEventTypeChunk,
+									ReasoningContent: chunk.ReasoningContent,
+									IsThinking:       true,
+									Model:            modelName,
+								},
+							}:
+								a.logger.Info("[StreamChat] Reasoning chunk sent successfully")
+							case <-ctx.Done():
+								a.logger.Warn("[StreamChat] Context cancelled while sending reasoning")
+								stream.Close()
+								return
+							case <-done:
+								stream.Close()
+								return
+							}
+						}
+
+						if chunk.Content != "" {
+							a.logger.Debug("[StreamChat] Sending content chunk", "content_len", len(chunk.Content))
+							select {
+							case streamChan <- &StreamResult{
+								Event: &StreamEvent{
+									Type:         StreamEventTypeChunk,
+									Content:      chunk.Content,
+									FinishReason: finishReason,
+									Model:        modelName,
+									Usage:        usage,
+									ToolCalls:    toolCalls,
+									IsThinking:   isThinking,
+								},
+							}:
+								a.logger.Debug("[StreamChat] Content chunk sent")
+							case <-ctx.Done():
+								stream.Close()
+								return
+							case <-done:
+								stream.Close()
+								return
+							}
 						}
 					}
 				}

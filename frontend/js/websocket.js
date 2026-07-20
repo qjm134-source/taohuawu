@@ -35,7 +35,7 @@ const WSClient = (() => {
         url: wsUrl,
         reconnectInterval: 3000,
         maxReconnectInterval: 30000,
-        pingInterval: 30000,
+        pingInterval: 20000,
     };
 
     // 消息类型常量
@@ -138,6 +138,7 @@ const WSClient = (() => {
             socket.onmessage = (event) => {
                 try {
                     const message = JSON.parse(event.data);
+                    console.log('[WS] Raw received:', { type: message.type, payloadLen: JSON.stringify(message.payload || {}).length });
 
                     // 忽略 PONG 消息
                 if (message.type === MSG_TYPE.PONG) return;
