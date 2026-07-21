@@ -2,8 +2,6 @@
 # Go 编程规范与最佳实践
 
 > 基于 Google Go Style Guide、Effective Go 及社区最佳实践整理
-> 适用于面试项目代码规范化改造
-
 ---
 
 ## 一、核心原则（按优先级排序）
