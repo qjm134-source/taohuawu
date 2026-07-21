@@ -162,8 +162,36 @@ if errors.Is(err, ErrNotFound) { ... }
 - 尽可能指定 channel 方向（`<-chan`、`chan<-`）
 - 优先使用同步函数，由调用者决定是否需要并发
 - 发送已关闭的 channel 会导致 panic
+- **Channel 的 size 要么是 1，要么是无缓冲的**：避免任意大小的缓冲 channel，容易导致不可预测的行为
+- select 语句中必须包含 default 分支或设置超时（`time.After`），杜绝无限期挂起
 
-### 7.3 Context 使用
+```go
+// Bad
+ch := make(chan int, 100)  // 任意大小容易导致不可预测的行为
+
+// Good
+ch := make(chan int)     // 无缓冲
+ch := make(chan int, 1)  // 或 size=1，用于解耦生产者和消费者
+```
+
+### 7.3 Mutex 使用
+- **零值的 `sync.Mutex` 和 `sync.RWMutex` 是有效的**，不需要指向 Mutex 的指针
+- 对于导出类型，将 mutex 作为私有成员变量；对于非导出类型，可嵌入结构体
+- 强制使用 `defer mu.Unlock()` 模式防止死锁
+
+```go
+// Bad
+mu := new(sync.Mutex)
+mu.Lock()
+// ... 忘记解锁会导致死锁
+
+// Good
+var mu sync.Mutex  // 零值即可用
+mu.Lock()
+defer mu.Unlock()  // 确保一定会解锁
+```
+
+### 7.4 Context 使用
 - `context.Context` 作为函数第一个参数
 - 不要在 struct 中存储 context，作为参数传递
 - 不要创建自定义 context 类型
@@ -186,6 +214,19 @@ if errors.Is(err, ErrNotFound) { ... }
   - 有多个实现需要统一处理
   - 需要解耦包依赖（打破循环依赖）
   - 需要隐藏复杂实现细节
+
+### 8.3 指向接口的指针
+- 几乎不需要指向接口类型的指针，直接将接口作为值传递即可
+- 接口在底层包含两个字段：类型指针和数据指针，传递接口值时底层数据仍然可以是指针
+- 如果需要修改底层数据，使用指针类型的方法即可
+
+```go
+// Bad
+var reader *io.Reader
+
+// Good
+var reader io.Reader  // 接口本身就是指针语义，直接传值
+```
 
 ---
 
@@ -249,10 +290,135 @@ if errors.Is(err, ErrNotFound) { ... }
 - 使用依赖注入传递实例
 - 如需全局实例，提供 `New()` 构造函数，全局 API 作为薄包装
 
-### 11.4 泛型使用
+### 11.4 切片与 Map 的边界拷贝
+切片和 map 包含指向底层数据的指针，传递或存储引用时需特别注意防止外部修改内部状态。
+
+#### 接收切片和 Map
+```go
+// Bad
+func (d *Driver) SetTrips(trips []Trip) {
+    d.trips = trips  // 浅拷贝，外部修改会影响内部状态
+}
+
+// Good
+func (d *Driver) SetTrips(trips []Trip) {
+    d.trips = make([]Trip, len(trips))
+    copy(d.trips, trips)  // 深拷贝，隔离外部影响
+}
+```
+
+#### 返回切片和 Map
+```go
+// Bad
+type Stats struct {
+    counters map[string]int
+}
+
+func (s *Stats) Counters() map[string]int {
+    return s.counters  // 直接返回内部状态，调用者可修改
+}
+
+// Good
+func (s *Stats) Counters() map[string]int {
+    result := make(map[string]int, len(s.counters))
+    for k, v := range s.counters {
+        result[k] = v
+    }
+    return result  // 返回副本，保护内部状态
+}
+```
+
+### 11.5 空切片声明
+```go
+// Bad
+s := []int{}  // 分配了内存（虽然很小）
+
+// Good
+var s []int  // nil 切片，不分配内存
+// nil 切片可以安全地用于 range、len、append 等操作
+```
+
+### 11.6 泛型使用
 - 仅在真正需要时使用泛型
 - 不要仅为实现通用算法而使用泛型
 - 如果只有一种类型实例化，先写非泛型版本
+
+### 11.7 枚举常量从 1 开始
+- 使用 `iota` 定义枚举时，从 1 开始，将零值保留给"未设置"状态
+- 零值应代表无效或默认状态
+
+```go
+// Bad
+const (
+    Red = iota  // 0，可能与未设置状态混淆
+    Green
+    Blue
+)
+
+// Good
+const (
+    Red = iota + 1  // 从1开始
+    Green
+    Blue
+)
+
+// 零值保留给未设置
+const (
+    StatusUnknown Status = iota
+    StatusActive
+    StatusInactive
+)
+```
+
+### 11.8 时间处理
+- 使用 `time.Time` 表达瞬时时间（如创建时间、过期时间）
+- 使用 `time.Duration` 表达时间段（如超时时间、延迟时间）
+- 对外部系统（API、数据库）使用 `time.Time` 和 `time.Duration`，保持一致性
+- 避免使用 int64 毫秒时间戳作为时间表达
+
+```go
+// Bad
+func DoSomething(timeoutMs int64) error  // 使用毫秒数
+
+// Good
+func DoSomething(timeout time.Duration) error  // 使用 time.Duration
+```
+
+### 11.9 类型断言失败处理
+- 使用 comma-ok 模式处理类型断言，避免 panic
+- 不要直接使用断言，始终检查结果
+
+```go
+// Bad
+val := m["key"].(string)  // 类型不匹配会 panic
+
+// Good
+val, ok := m["key"].(string)
+if !ok {
+    return fmt.Errorf("expected string, got %T", m["key"])
+}
+```
+
+### 11.10 使用 defer 释放资源
+- 使用 `defer` 确保资源在函数退出时被释放
+- 适用于文件句柄、锁、网络连接等资源
+- defer 的执行顺序是后进先出（LIFO）
+
+```go
+func ReadFile(path string) ([]byte, error) {
+    f, err := os.Open(path)
+    if err != nil {
+        return nil, fmt.Errorf("opening file: %w", err)
+    }
+    defer f.Close()  // 确保文件关闭
+
+    data, err := io.ReadAll(f)
+    if err != nil {
+        return nil, fmt.Errorf("reading file: %w", err)
+    }
+    return data, nil
+}
+```
 
 ---
 
