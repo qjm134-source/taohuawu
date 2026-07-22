@@ -88,8 +88,8 @@ observability:
   langfuse:
     enabled: true
     host: http://langfuse-server:3000
-    public_key: ${LANGFUSE_PUBLIC_KEY:langfuse-public-key}
-    secret_key: ${LANGFUSE_SECRET_KEY:langfuse-secret-key}
+    public_key: pk-lf-f2fed996-da18-45c9-920d-9ae66f97806e
+    secret_key: sk-lf-f0d0d094-9727-4e97-98a9-48d265a9a4cb
 
 weather:
   provider: openmeteo                   # 天气服务提供商: qweather(和风) / openmeteo

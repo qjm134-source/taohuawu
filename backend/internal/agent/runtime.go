@@ -230,11 +230,14 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	ctx, cancel := utils.WithTimeoutFrom(ctx, r.config.Timeout)
 	defer cancel()
 
+	ctx = context.WithValue(ctx, "session_id", session.ID)
+
 	ctx, span := observability.StartSpanWithStartTime(ctx, "Agent.HandleChat",
 		trace.WithAttributes(
-			attribute.String("session_id", session.ID),
-			attribute.String("player_id", session.PlayerID),
-			attribute.String("tenant_id", session.TenantID),
+			observability.SessionID.String(session.ID),
+			observability.UserID.String(session.PlayerID),
+			observability.LangfuseTagTenant.String(session.TenantID),
+			observability.LangfuseTagFeature.String("chat"),
 		),
 	)
 	defer observability.EndSpanWithDuration(ctx, span)
@@ -377,11 +380,14 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 
 	r.logger.Info("[HandleChatStream] Start", "sessionId", session.ID, "message", message)
 
+	ctx = context.WithValue(ctx, "session_id", session.ID)
+
 	ctx, span := observability.StartSpanWithStartTime(ctx, "Agent.HandleChatStream",
 		trace.WithAttributes(
-			attribute.String("session_id", session.ID),
-			attribute.String("player_id", session.PlayerID),
-			attribute.String("tenant_id", session.TenantID),
+			observability.SessionID.String(session.ID),
+			observability.UserID.String(session.PlayerID),
+			observability.LangfuseTagTenant.String(session.TenantID),
+			observability.LangfuseTagFeature.String("chat"),
 		),
 	)
 
@@ -508,6 +514,9 @@ func (r *Runtime) processStreamEvents(ctx context.Context, stream llm.EventStrea
 	var finishReason string
 	var streamSpan trace.Span
 
+	span.SetAttributes(observability.GenAIPrompt.String(message))
+	span.SetAttributes(observability.LangfuseObservationInput.String(message))
+
 	for {
 		event, err := stream.Recv()
 
@@ -554,6 +563,9 @@ func (r *Runtime) processStreamEvents(ctx context.Context, stream llm.EventStrea
 	r.updateLLMStatsAndMetrics(ctx, llmSpan, span, stats, startTime, chunkCount, finishReason)
 	r.updateSession(ctx, session, message, emotionStr, fullReply.String())
 	r.writeCache(ctx, cacheKey, fullReply.String())
+
+	span.SetAttributes(observability.GenAICompletion.String(fullReply.String()))
+	span.SetAttributes(observability.LangfuseObservationOutput.String(fullReply.String()))
 
 	statsChan <- stats
 	close(statsChan)

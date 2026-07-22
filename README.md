@@ -378,7 +378,7 @@ open http://localhost:3000
 # Prometheus UI（PromQL 查询指标）
 open http://localhost:9090
 
-# jaeger-ui 访问地址
+# Jaeger UI（分布式追踪）
 open http://localhost:16686
 
 # Grafana 仪表盘（用户名：admin，密码：admin123）

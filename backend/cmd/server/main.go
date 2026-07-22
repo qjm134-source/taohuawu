@@ -8,8 +8,6 @@ import (
 	"syscall"
 	"time"
 
-	cbLangfuse "github.com/cloudwego/eino-ext/callbacks/langfuse"
-	"github.com/cloudwego/eino/callbacks"
 	"github.com/watertown/guide/internal/config"
 	"github.com/watertown/guide/internal/database"
 	"github.com/watertown/guide/internal/knowledge"
@@ -68,13 +66,24 @@ func main() {
 	}
 	logger.Info("Knowledge base loaded", "questions", len(kb.Categories))
 
-	// 初始化 OpenTelemetry
+	// 初始化 OpenTelemetry（包含 Langfuse OTLP 导出）
+	fmt.Fprintf(os.Stderr, "[Langfuse] Config: Enabled=%v PublicKey=%q SecretKey=%q\n",
+		cfg.Observability.Langfuse.Enabled,
+		cfg.Observability.Langfuse.PublicKey,
+		cfg.Observability.Langfuse.SecretKey)
+
 	tp, err := observability.InitTracing(observability.ObservabilityConfig{
 		Enabled:     cfg.Observability.Enabled,
 		ServiceName: cfg.Observability.ServiceName,
 		Endpoint:    cfg.Observability.Endpoint,
 		SampleRate:  cfg.Observability.SampleRate,
 		Exporter:    cfg.Observability.Exporter,
+		Langfuse: observability.LangfuseConfig{
+			Enabled:   cfg.Observability.Langfuse.Enabled,
+			Host:      cfg.Observability.Langfuse.Host,
+			PublicKey: cfg.Observability.Langfuse.PublicKey,
+			SecretKey: cfg.Observability.Langfuse.SecretKey,
+		},
 	})
 	if err != nil {
 		logger.Warn("Failed to initialize tracing", "error", err)
@@ -84,29 +93,6 @@ func main() {
 			defer cancel()
 			_ = tp.Shutdown(ctx)
 		}()
-	}
-
-	// 初始化 Langfuse（LLM 专项可观测，独立于 OTel/Prometheus）
-	if cfg.Observability.Langfuse.Enabled && cfg.Observability.Langfuse.PublicKey != "" && cfg.Observability.Langfuse.SecretKey != "" {
-		host := cfg.Observability.Langfuse.Host
-		if host == "" {
-			host = "https://cloud.langfuse.com"
-		}
-		langfuseHandler, langfuseFlusher := cbLangfuse.NewLangfuseHandler(&cbLangfuse.Config{
-			Host:             host,
-			PublicKey:        cfg.Observability.Langfuse.PublicKey,
-			SecretKey:        cfg.Observability.Langfuse.SecretKey,
-			Threads:          5,
-			FlushAt:          50,
-			FlushInterval:    10 * time.Second,
-			MaxTaskQueueSize: 1000,
-			MaxRetry:         3,
-		})
-		defer langfuseFlusher()
-		callbacks.AppendGlobalHandlers(langfuseHandler)
-		fmt.Fprintf(os.Stderr, "[Langfuse] Enabled — sending LLM traces to %s\n", host)
-	} else {
-		fmt.Fprintln(os.Stderr, "[Langfuse] Disabled — LLM traces will NOT be sent to Langfuse")
 	}
 
 	// 初始化服务器

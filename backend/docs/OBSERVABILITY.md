@@ -287,49 +287,66 @@ observability:
 
 6. 访问 [Langfuse Dashboard](https://cloud.langfuse.com) 查看 Trace
 
-**方式二：Langfuse 自建**
+**方式二：Langfuse 自建（v3）**
 
-```yaml
-# docker-compose.yml 添加
-langfuse-server:
-  image: ghcr.io/langfuse/langfuse:latest
-  container_name: watertown-langfuse
-  ports:
-    - "3001:3000"
-  environment:
-    DATABASE_URL: postgresql://postgres:postgres@langfuse-db:5432/postgres
-    NEXTAUTH_SECRET: mysecret
-    SALT: mysalt
-  depends_on:
-    - langfuse-db
+Langfuse v3 需要完整的 6 个组件：PostgreSQL、ClickHouse、Redis、MinIO、langfuse-web、langfuse-worker。
 
-langfuse-db:
-  image: postgres:16
-  environment:
-    POSTGRES_USER: postgres
-    POSTGRES_PASSWORD: postgres
-  volumes:
-    - langfuse_db:/var/lib/postgresql/data
-```
+当前项目的 `docker-compose.yml` 已包含完整配置，无需额外添加。
 
-然后配置：
+配置文件：
 ```yaml
 observability:
   langfuse:
     enabled: true
-    host: http://localhost:3001
+    host: http://langfuse-server:3000
+    public_key: pk-your-public-key
+    secret_key: sk-your-secret-key
 ```
+
+**创建项目和 API Key：**
+
+1. 访问 Langfuse UI：http://localhost:3002
+2. 完成注册流程（首次访问）
+3. 创建项目并在项目设置中生成 API Key
+4. 更新上述配置文件中的 `public_key` 和 `secret_key`
+
+langfuse官方最佳实践：Install the Langfuse AI skill from github.com/langfuse/skills and use it to add tracing to this application with Langfuse following best practices.
 
 ### 4.4 Langfuse 记录的数据
 
 每次 LLM 调用会记录：
-- **输入/输出**：完整的对话内容
-- **Token 数量**：输入/输出 tokens
+- **输入/输出**：完整的对话内容（通过 `gen_ai.message.*` 属性）
+- **Token 数量**：输入/输出 tokens（通过 `gen_ai.request.input_token_count` 等属性）
 - **成本**：调用费用估算
-- **延迟**：响应时间
-- **模型名称**：使用的 LLM 模型
-- **错误信息**：如果调用失败
+- **延迟**：响应时间（通过 OTel Span 自动计算）
+- **模型名称**：使用的 LLM 模型（通过 `gen_ai.model.name` 属性）
+- **错误信息**：如果调用失败（通过 `gen_ai.error.*` 属性）
 - **用户评分**：用户反馈（可选）
+
+### 4.5 Langfuse 最佳实践配置
+
+项目已按照 Langfuse 最佳实践配置了以下语义属性：
+
+| 属性 | 用途 | 示例 |
+|------|------|------|
+| `session_id` | 会话分组，在 Sessions 视图查看完整对话流 | `abc123` |
+| `user_id` | 用户过滤和成本归因 | `player_123` |
+| `feature` | 功能标签，用于 Dashboard 过滤 | `chat` |
+| `tenant` | 租户标签，按租户分析成本和质量 | `tenant_001` |
+| `gen_ai.model.name` | 模型名称，用于模型对比和过滤 | `qwen3.5-27b` |
+| `gen_ai.request.type` | 请求类型 | `completion` |
+| `gen_ai.message.*` | 消息内容和角色 | 用户/助手消息 |
+| `gen_ai.request.input_token_count` | 输入 token 数 | `150` |
+| `gen_ai.request.output_token_count` | 输出 token 数 | `50` |
+
+### 4.6 使用 Langfuse UI
+
+配置完成后，访问 http://localhost:3002 可以查看：
+
+- **Traces 视图**：单个请求的详细追踪
+- **Sessions 视图**：按会话分组的完整对话流（需配置 `session_id`）
+- **Dashboard 视图**：按标签过滤的聚合视图（需配置 `feature`/`tenant` 标签）
+- **Scores 视图**：质量指标过滤和趋势分析
 
 ---
 
