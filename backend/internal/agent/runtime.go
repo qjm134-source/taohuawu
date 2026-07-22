@@ -368,6 +368,7 @@ func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span,
 		observability.GenAIUsageInputTokens.Int(usage.PromptTokens),
 		observability.GenAIUsageOutputTokens.Int(usage.CompletionTokens),
 		observability.GenAIUsageTotalTokens.Int(usage.TotalTokens),
+		observability.GenAIUsageCost.Float64(stats.Cost),
 	)
 
 	session.AddMessage("user", message, emotionStr, nil)
@@ -673,6 +674,7 @@ func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span
 		observability.GenAIUsageInputTokens.Int(stats.InputTokens),
 		observability.GenAIUsageOutputTokens.Int(stats.OutputTokens),
 		observability.GenAIUsageTotalTokens.Int(stats.TotalTokens),
+		observability.GenAIUsageCost.Float64(stats.Cost),
 	)
 
 	if model != "unknown" {
@@ -690,6 +692,7 @@ func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span
 			observability.GenAIUsageInputTokens.Int(stats.InputTokens),
 			observability.GenAIUsageOutputTokens.Int(stats.OutputTokens),
 			observability.GenAIUsageTotalTokens.Int(stats.TotalTokens),
+			observability.GenAIUsageCost.Float64(stats.Cost),
 		)
 	}
 }

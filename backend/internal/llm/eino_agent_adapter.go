@@ -73,6 +73,37 @@ type modelStats struct {
 	errorCount   int
 }
 
+var llmPricing = map[string]struct {
+	Input  float64
+	Output float64
+}{
+	"deepseek-chat":     {Input: 0.0001, Output: 0.0002},
+	"deepseek-reasoner": {Input: 0.00055, Output: 0.00219},
+	"gpt-4o":            {Input: 0.0025, Output: 0.01},
+	"gpt-4o-mini":       {Input: 0.00015, Output: 0.0006},
+	"gpt-3.5-turbo":     {Input: 0.0005, Output: 0.0015},
+	"claude-3-5-sonnet": {Input: 0.003, Output: 0.015},
+	"claude-3-haiku":    {Input: 0.00025, Output: 0.00125},
+	"qwen-turbo":        {Input: 0.0002, Output: 0.0006},
+	"qwen-plus":         {Input: 0.0004, Output: 0.0012},
+	"qwen-max":          {Input: 0.002, Output: 0.006},
+	"qwen3.5-27b":       {Input: 0.001, Output: 0.003},
+	"doubao-pro-32k":    {Input: 0.0008, Output: 0.005},
+	"doubao-pro-128k":   {Input: 0.005, Output: 0.009},
+	"glm-4":             {Input: 0.01, Output: 0.01},
+	"glm-4-flash":       {Input: 0.0001, Output: 0.0001},
+}
+
+func calculateLLMCost(model string, inputTokens, outputTokens int) float64 {
+	pricing, ok := llmPricing[model]
+	if !ok {
+		pricing = llmPricing["gpt-3.5-turbo"]
+	}
+	inputCost := float64(inputTokens) / 1000 * pricing.Input
+	outputCost := float64(outputTokens) / 1000 * pricing.Output
+	return inputCost + outputCost
+}
+
 type EinoAgentAdapter struct {
 	mu               sync.RWMutex
 	agent            *eino_adk.ChatModelAgent
@@ -424,6 +455,7 @@ func (a *EinoAgentAdapter) buildOutputAttributes(msg *eino_schema.Message, usage
 		observability.GenAIUsageInputTokens.Int(usage.PromptTokens),
 		observability.GenAIUsageOutputTokens.Int(usage.CompletionTokens),
 		observability.GenAIUsageTotalTokens.Int(usage.TotalTokens),
+		observability.GenAIUsageCost.Float64(usage.Cost),
 	)
 
 	if msg.ResponseMeta != nil && msg.ResponseMeta.FinishReason != "" {
@@ -930,14 +962,18 @@ func (a *EinoAgentAdapter) endSecondModelSpan(span trace.Span, finalMsg *eino_sc
 }
 
 func (a *EinoAgentAdapter) extractUsage(msg *eino_schema.Message) ChatUsage {
+	model := a.getCurrentModelName(msg)
 	if msg == nil || msg.ResponseMeta == nil || msg.ResponseMeta.Usage == nil {
-		return ChatUsage{Model: a.getCurrentModelName(msg)}
+		return ChatUsage{Model: model}
 	}
+	promptTokens := int(msg.ResponseMeta.Usage.PromptTokens)
+	completionTokens := int(msg.ResponseMeta.Usage.CompletionTokens)
 	return ChatUsage{
-		PromptTokens:     int(msg.ResponseMeta.Usage.PromptTokens),
-		CompletionTokens: int(msg.ResponseMeta.Usage.CompletionTokens),
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
 		TotalTokens:      int(msg.ResponseMeta.Usage.TotalTokens),
-		Model:            a.getCurrentModelName(msg),
+		Model:            model,
+		Cost:             calculateLLMCost(model, promptTokens, completionTokens),
 	}
 }
 

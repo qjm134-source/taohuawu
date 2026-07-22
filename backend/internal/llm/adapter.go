@@ -26,6 +26,7 @@ type ChatUsage struct {
 	CompletionTokens int
 	TotalTokens      int
 	Model            string
+	Cost             float64
 }
 
 type StreamChunk struct {

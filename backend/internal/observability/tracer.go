@@ -45,6 +45,7 @@ const (
 	GenAIUsageInputTokens  = attribute.Key("gen_ai.usage.input_tokens")
 	GenAIUsageOutputTokens = attribute.Key("gen_ai.usage.output_tokens")
 	GenAIUsageTotalTokens  = attribute.Key("gen_ai.usage.total_tokens")
+	GenAIUsageCost         = attribute.Key("gen_ai.usage.cost")
 
 	// 消息相关属性
 	GenAIMessageRole        = attribute.Key("gen_ai.message.role")
