@@ -416,15 +416,11 @@ func (a *EinoAgentAdapter) buildOutputAttributes(msg *eino_schema.Message, usage
 		)
 	}
 
-	if usage.PromptTokens > 0 {
-		attrs = append(attrs, observability.GenAIRequestInputTokenCount.Int(usage.PromptTokens))
-	}
-	if usage.CompletionTokens > 0 {
-		attrs = append(attrs, observability.GenAIRequestOutputTokenCount.Int(usage.CompletionTokens))
-	}
-	if usage.TotalTokens > 0 {
-		attrs = append(attrs, observability.GenAIRequestTotalTokenCount.Int(usage.TotalTokens))
-	}
+	attrs = append(attrs,
+		observability.GenAIRequestInputTokenCount.Int(usage.PromptTokens),
+		observability.GenAIRequestOutputTokenCount.Int(usage.CompletionTokens),
+		observability.GenAIRequestTotalTokenCount.Int(usage.TotalTokens),
+	)
 
 	if msg.ResponseMeta != nil && msg.ResponseMeta.FinishReason != "" {
 		attrs = append(attrs, observability.GenAIResponseFinishReason.String(msg.ResponseMeta.FinishReason))
