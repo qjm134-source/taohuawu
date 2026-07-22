@@ -148,12 +148,9 @@ type debugExporter struct {
 }
 
 func (d *debugExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
-	fmt.Fprintf(os.Stderr, "[OTel] [%s] Exporting %d spans...\n", d.name, len(spans))
 	err := d.delegate.ExportSpans(ctx, spans)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[OTel] [%s] Export failed: %v\n", d.name, err)
-	} else {
-		fmt.Fprintf(os.Stderr, "[OTel] [%s] Export succeeded\n", d.name)
 	}
 	return err
 }
