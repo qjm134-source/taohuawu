@@ -40,6 +40,12 @@ const (
 	GenAIErrorType               = attribute.Key("gen_ai.error.type")
 	GenAIErrorMessage            = attribute.Key("gen_ai.error.message")
 
+	// gen_ai.usage.* 属性（Langfuse 专用，用于成本计算）
+	// Langfuse 需要这些属性来显示 token 计数和成本
+	GenAIUsageInputTokens  = attribute.Key("gen_ai.usage.input_tokens")
+	GenAIUsageOutputTokens = attribute.Key("gen_ai.usage.output_tokens")
+	GenAIUsageTotalTokens  = attribute.Key("gen_ai.usage.total_tokens")
+
 	// 消息相关属性
 	GenAIMessageRole        = attribute.Key("gen_ai.message.role")
 	GenAIMessageContent     = attribute.Key("gen_ai.message.content")

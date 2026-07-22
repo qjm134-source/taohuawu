@@ -364,6 +364,10 @@ func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span,
 		observability.GenAIRequestInputTokenCount.Int(usage.PromptTokens),
 		observability.GenAIRequestOutputTokenCount.Int(usage.CompletionTokens),
 		observability.GenAIRequestTotalTokenCount.Int(usage.TotalTokens),
+		// Langfuse 专用属性，用于成本计算
+		observability.GenAIUsageInputTokens.Int(usage.PromptTokens),
+		observability.GenAIUsageOutputTokens.Int(usage.CompletionTokens),
+		observability.GenAIUsageTotalTokens.Int(usage.TotalTokens),
 	)
 
 	session.AddMessage("user", message, emotionStr, nil)
@@ -665,6 +669,10 @@ func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span
 		observability.GenAIRequestInputTokenCount.Int(stats.InputTokens),
 		observability.GenAIRequestOutputTokenCount.Int(stats.OutputTokens),
 		observability.GenAIRequestTotalTokenCount.Int(stats.TotalTokens),
+		// Langfuse 专用属性，用于成本计算
+		observability.GenAIUsageInputTokens.Int(stats.InputTokens),
+		observability.GenAIUsageOutputTokens.Int(stats.OutputTokens),
+		observability.GenAIUsageTotalTokens.Int(stats.TotalTokens),
 	)
 
 	if model != "unknown" {
@@ -678,6 +686,10 @@ func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span
 			observability.GenAIRequestInputTokenCount.Int(stats.InputTokens),
 			observability.GenAIRequestOutputTokenCount.Int(stats.OutputTokens),
 			observability.GenAIRequestTotalTokenCount.Int(stats.TotalTokens),
+			// Langfuse 专用属性，用于成本计算
+			observability.GenAIUsageInputTokens.Int(stats.InputTokens),
+			observability.GenAIUsageOutputTokens.Int(stats.OutputTokens),
+			observability.GenAIUsageTotalTokens.Int(stats.TotalTokens),
 		)
 	}
 }

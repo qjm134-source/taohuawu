@@ -420,6 +420,10 @@ func (a *EinoAgentAdapter) buildOutputAttributes(msg *eino_schema.Message, usage
 		observability.GenAIRequestInputTokenCount.Int(usage.PromptTokens),
 		observability.GenAIRequestOutputTokenCount.Int(usage.CompletionTokens),
 		observability.GenAIRequestTotalTokenCount.Int(usage.TotalTokens),
+		// Langfuse 专用属性，用于成本计算
+		observability.GenAIUsageInputTokens.Int(usage.PromptTokens),
+		observability.GenAIUsageOutputTokens.Int(usage.CompletionTokens),
+		observability.GenAIUsageTotalTokens.Int(usage.TotalTokens),
 	)
 
 	if msg.ResponseMeta != nil && msg.ResponseMeta.FinishReason != "" {
