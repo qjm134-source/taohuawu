@@ -75,6 +75,12 @@ func TracingMiddleware(serviceName string) gin.HandlerFunc {
 	propagator := propagation.TraceContext{}
 
 	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if path == "/metrics" || path == "/health" {
+			c.Next()
+			return
+		}
+
 		// 从请求头中提取 Trace Context
 		ctx := propagator.Extract(c.Request.Context(), propagation.HeaderCarrier(c.Request.Header))
 
