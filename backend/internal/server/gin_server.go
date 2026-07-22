@@ -304,7 +304,6 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 	if err != nil {
 		s.logger.Warn("Failed to create weather service", "error", err)
 	}
-	s.logger.Info("Weather service created", "provider", s.config.Weather.Provider)
 
 	// 创建工具注册表
 	var toolRegistry *tools.ToolRegistry
@@ -323,7 +322,6 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 
 	// 创建 EinoAgentAdapter（多模型路由器）
 	llmAdapter := llm.NewEinoAgentAdapter(s.logger, s.config.LLM, toolRegistry.List())
-	s.logger.Info("EinoAgentAdapter created", "models", len(s.config.LLM.Models))
 
 	fallbackAdapter := llm.NewFallbackAdapter()
 
@@ -337,11 +335,7 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 				BaseURL:    s.config.Cost.Embedding.BaseURL,
 				ServerType: s.config.Cost.Embedding.ServerType,
 			})
-			s.logger.Info("Local Embedding enabled",
-				"model", s.config.Cost.Embedding.Model,
-				"server_type", s.config.Cost.Embedding.ServerType,
-				"base_url", s.config.Cost.Embedding.BaseURL,
-			)
+
 		} else {
 			// 远程模式：需要 API Key
 			if s.config.Cost.Embedding.APIKey != "" {
@@ -350,13 +344,13 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 					s.config.Cost.Embedding.BaseURL,
 					s.config.Cost.Embedding.Model,
 				)
-				s.logger.Info("Remote Embedding enabled", "model", s.config.Cost.Embedding.Model)
+
 			} else {
 				s.logger.Warn("Embedding API key not set, semantic caching will be unavailable")
 			}
 		}
 	} else {
-		s.logger.Info("Embedding disabled")
+
 	}
 
 	optimizer := cost.NewOptimizer(
@@ -384,7 +378,7 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 	if summaryModel != "" {
 		llmSummarizer := cost.NewLLMSummarizer(llmAdapter, summaryModel, s.config.Cost.SummaryTimeout.Duration, s.logger)
 		cost.SetSummarizer(llmSummarizer)
-		s.logger.Info("LLM Summarizer enabled", "model", summaryModel)
+
 	} else {
 		s.logger.Warn("No model available for summarizer, LLM summarization disabled")
 	}

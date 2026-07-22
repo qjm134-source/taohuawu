@@ -100,21 +100,14 @@ func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, 
 	)
 	defer observability.EndSpanWithDuration(ctx, span)
 
-	r.logger.Info("[HandleWelcome] Starting", "playerId", session.PlayerID)
-
 	cacheKey := "welcome_" + session.PlayerID
 
-	// 检查缓存
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
-		r.logger.Info("[HandleWelcome] Cache hit", "playerId", session.PlayerID)
 		return cached, nil
 	}
 
-	// 并发防护：同一 player 只允许一个 HandleWelcome 在飞
 	notifyChan := make(chan struct{})
 	if actual, loaded := r.inflightWelcome.LoadOrStore(session.PlayerID, notifyChan); loaded {
-		// 已有正在进行的请求，等待它完成
-		r.logger.Info("[HandleWelcome] Waiting for inflight request", "playerId", session.PlayerID)
 		select {
 		case <-actual.(chan struct{}):
 			// 上一个请求完成，从缓存读取
@@ -169,8 +162,6 @@ func (r *Runtime) callLLMForWelcome(ctx context.Context, messages []*eino_schema
 		llmCancel()
 
 		if err != nil {
-			r.logger.Error("[HandleWelcome] Primary LLM failed", "error", err)
-			r.logger.Info("[HandleWelcome] Trying fallback adapter")
 			return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 		}
 		return msg, usage, nil
@@ -188,7 +179,6 @@ func (r *Runtime) handleWelcomeError(ctx context.Context, startTime time.Time,
 
 	if r.config.FallbackResponse.Enabled && r.config.FallbackResponse.WelcomeMessage != "" {
 		reply := r.config.FallbackResponse.WelcomeMessage
-		r.logger.Info("[HandleWelcome] Using fallback response", "message", reply)
 		session.AddMessage("assistant", reply, "neutral", nil)
 		r.optimizer.SetCache(cacheKey, reply)
 		observability.AgentRequestDuration.WithLabelValues("welcome").Observe(time.Since(startTime).Seconds())
@@ -225,7 +215,6 @@ func (r *Runtime) recordWelcomeMetrics(startTime time.Time, usage *llm.ChatUsage
 
 // HandleChat 处理聊天（非流式）
 func (r *Runtime) HandleChat(ctx context.Context, session *Session, message string) (string, string, *LLMStats, error) {
-	r.logger.Info("[HandleChat] Start", "sessionId", session.ID, "message", message)
 
 	ctx, cancel := utils.WithTimeoutFrom(ctx, r.config.Timeout)
 	defer cancel()
@@ -261,7 +250,6 @@ func (r *Runtime) checkExactCache(ctx context.Context, span trace.Span, cacheKey
 	defer observability.EndChildSpan(ctx, cacheSpan)
 
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
-		r.logger.Info("[HandleChat] Cache hit", "cache_key", cacheKey, "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		observability.CacheHitsTotal.WithLabelValues("exact").Inc()
 		r.recordCacheHit()
@@ -278,7 +266,6 @@ func (r *Runtime) checkSimilarityCache(ctx context.Context, span trace.Span, mes
 	defer observability.EndChildSpan(ctx, similaritySpan)
 
 	if cached, hit := r.optimizer.CheckSimilarity(ctx, message, 0.85); hit {
-		r.logger.Info("[HandleChat] Semantic cache hit", "message_len", len(message), "cached_length", len(cached))
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
 		r.recordCacheHit()
@@ -320,8 +307,6 @@ func (r *Runtime) callLLM(ctx context.Context, messages []*eino_schema.Message) 
 		llmCancel()
 
 		if err != nil {
-			r.logger.Error("[HandleChat] Primary LLM failed", "error", err)
-			r.logger.Info("[HandleChat] Trying fallback adapter")
 			return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		}
 		_ = startTime
@@ -378,16 +363,12 @@ func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span,
 
 	r.optimizer.SetCache(cacheKey, reply)
 
-	r.logger.Info("[HandleChat] Complete", "reply_length", len(reply), "model", stats.Model, "tokens", stats.TotalTokens, "cost", stats.Cost)
-
 	return reply, emotionStr, stats, nil
 }
 
 // HandleChatStream 处理聊天（流式）
 func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, message string) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
 	startTime := time.Now()
-
-	r.logger.Info("[HandleChatStream] Start", "sessionId", session.ID, "message", message)
 
 	ctx = context.WithValue(ctx, "session_id", session.ID)
 
@@ -472,8 +453,6 @@ func (r *Runtime) callLLMStream(ctx context.Context, messages []*eino_schema.Mes
 	if isHealthy {
 		stream, err := r.llmAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		if err != nil {
-			r.logger.Error("[HandleChatStream] Primary LLM stream failed", "error", err)
-			r.logger.Info("[HandleChatStream] Trying fallback adapter stream")
 			return r.fallbackAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		}
 		return stream, nil
@@ -545,8 +524,6 @@ func (r *Runtime) processStreamEvents(ctx context.Context, stream llm.EventStrea
 			continue
 		}
 
-		r.logger.Debug("[HandleChatStream] Got event from adapter", "type", event.Type, "content_len", len(event.Content))
-
 		if event.Type == llm.StreamEventTypeChunk {
 			if chunkCount == 0 {
 				_, streamSpan = observability.StartChildSpan(ctx, "LLM.TokenStreaming")
@@ -579,7 +556,6 @@ func (r *Runtime) processStreamEvents(ctx context.Context, stream llm.EventStrea
 	statsChan <- stats
 	close(statsChan)
 
-	r.logger.Info("[HandleChatStream] Complete", "reply_length", fullReply.Len(), "latency", stats.LatencyMs)
 }
 
 func (r *Runtime) updateStatsFromChunk(event *llm.StreamEvent, fullReply *strings.Builder, stats *LLMStats) string {
@@ -736,17 +712,13 @@ func (r *Runtime) handleNonStreamChat(ctx context.Context, messages []*eino_sche
 
 func (r *Runtime) callLLMNonStreaming(ctx context.Context, messages []*eino_schema.Message) (*eino_schema.Message, *llm.ChatUsage, error) {
 	if r.llmAdapter.IsHealthy() {
-		r.logger.Info("[HandleChatStream] Calling primary LLM (non-streaming)")
 		msg, usage, err := r.llmAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		if err != nil {
-			r.logger.Error("[HandleChatStream] Primary LLM failed", "error", err)
-			r.logger.Info("[HandleChatStream] Trying fallback adapter (non-streaming)")
 			return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 		}
 		return msg, usage, nil
 	}
 
-	r.logger.Info("[HandleChatStream] Using fallback adapter (non-streaming)")
 	return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 }
 
@@ -761,8 +733,6 @@ func (r *Runtime) updateStatsFromUsage(stats *LLMStats, usage *llm.ChatUsage) {
 }
 
 func (r *Runtime) streamContentToChan(contentChan chan string, fullReply *strings.Builder, content string, stats *LLMStats) {
-	r.logger.Info("[HandleChatStream] Non-streaming response received", "content_len", len(content), "model", stats.Model, "inputTokens", stats.InputTokens, "outputTokens", stats.OutputTokens)
-
 	if content != "" {
 		for _, char := range content {
 			contentChan <- string(char)
@@ -857,12 +827,7 @@ func (r *Runtime) buildContextMessages(session *Session, currentMessage string, 
 				Role:    eino_schema.System,
 				Content: "[对话历史摘要] " + newSummary,
 			})
-			r.logger.Info("[buildContextMessages] Context compressed",
-				"old_count", len(oldMessages),
-				"summary_len", len(newSummary),
-				"recent_count", len(recentMessages))
 		} else {
-			r.logger.Warn("[buildContextMessages] Summarization failed, falling back to truncation", "error", err)
 			messages = append(messages, &eino_schema.Message{
 				Role:    eino_schema.System,
 				Content: fmt.Sprintf("[之前有%d条对话，以下是最近的对话内容]", len(oldMessages)),

@@ -138,10 +138,8 @@ const WSClient = (() => {
             socket.onmessage = (event) => {
                 try {
                     const message = JSON.parse(event.data);
-                    console.log('[WS] Raw received:', { type: message.type, payloadLen: JSON.stringify(message.payload || {}).length });
 
-                    // 忽略 PONG 消息
-                if (message.type === MSG_TYPE.PONG) return;
+                    if (message.type === MSG_TYPE.PONG) return;
 
                 // 如果是欢迎消息，更新玩家ID为后端生成的ID
                 if (message.type === MSG_TYPE.WELCOME && message.payload && message.payload.playerId) {
@@ -191,7 +189,6 @@ const WSClient = (() => {
     function send(message) {
         if (!isConnected || !socket || socket.readyState !== WebSocket.OPEN) {
             messageQueue.push(message);
-            console.log('[WS] Message queued (not connected)');
             return false;
         }
 

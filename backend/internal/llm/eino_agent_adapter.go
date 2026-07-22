@@ -123,11 +123,7 @@ type EinoAgentAdapter struct {
 }
 
 func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []eino_tool.InvokableTool) *EinoAgentAdapter {
-	logger.Info("[NewEinoAgentAdapter] Creating ADK adapter", "tool_count", len(tools))
-	for _, t := range tools {
-		info, _ := t.Info(context.Background())
-		logger.Info("[NewEinoAgentAdapter] Tool registered", "name", info.Name, "desc", info.Desc)
-	}
+	_ = tools
 
 	adapter := &EinoAgentAdapter{
 		logger:        logger,
@@ -164,7 +160,6 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 		adapter.fallback = append(adapter.fallback, name)
 		adapter.stats[name] = &modelStats{}
 
-		logger.Info("Eino model registered", "name", name, "model", mc.Name, "base_url", mc.BaseURL)
 	}
 
 	if len(adapter.models) > 0 {
@@ -193,15 +188,11 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 
 func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino_adk.ChatModelAgent, error) {
 	primaryModel := a.models[a.primaryIndex]
-	a.logger.Info("[buildADKAgent] Building ADK agent", "primary_model", primaryModel.name)
 
 	var toolsConfig eino_adk.ToolsConfig
 	if len(tools) > 0 {
-		a.logger.Info("[buildADKAgent] Registering tools for ADK agent", "tool_count", len(tools))
 		baseTools := make([]eino_tool.BaseTool, 0, len(tools))
 		for _, t := range tools {
-			info, _ := t.Info(context.Background())
-			a.logger.Info("[buildADKAgent] Adding tool", "name", info.Name)
 			baseTools = append(baseTools, t)
 		}
 		toolsConfig = eino_adk.ToolsConfig{
@@ -248,7 +239,6 @@ func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino
 		return nil, err
 	}
 
-	a.logger.Info("[buildADKAgent] ADK agent created successfully")
 	return agent, nil
 }
 
@@ -266,12 +256,11 @@ func (a *EinoAgentAdapter) getFailoverModel(ctx context.Context, failoverCtx *ei
 	}
 
 	entry := a.models[idx]
-	a.logger.Info("ADK failover: selecting next model", "attempt", attempt, "model", entry.name)
+
 	return entry.model, failoverCtx.InputMessages, nil
 }
 
 func (a *EinoAgentAdapter) buildRunner(agent *eino_adk.ChatModelAgent) *eino_adk.Runner {
-	a.logger.Info("[buildRunner] Creating Runner", "enable_streaming", true)
 	return eino_adk.NewRunner(context.Background(), eino_adk.RunnerConfig{
 		Agent:           agent,
 		EnableStreaming: true,
@@ -334,7 +323,6 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 		eino_adk.WithChatModelOptions(modelOpts),
 	}
 
-	a.logger.Info("[Chat] Starting ADK agent run", "message_count", len(messages))
 	startTime := time.Now()
 
 	inputAttrs := a.buildMessageAttributes(messages)
@@ -398,7 +386,6 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 	}
 
 	usage = a.extractUsage(finalMsg)
-	a.logger.Info("[Chat] ADK agent run success", "model", modelName, "latency", latency, "content_len", len(finalMsg.Content))
 
 	outputAttrs := a.buildOutputAttributes(finalMsg, usage)
 	span.SetAttributes(outputAttrs...)
@@ -504,8 +491,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 		eino_adk.WithChatModelOptions(modelOpts),
 	}
 
-	a.logger.Info("[StreamChat] Starting ADK agent run", "message_count", len(messages))
-
 	inputAttrs := a.buildMessageAttributes(messages)
 
 	if sessionID, ok := ctx.Value("session_id").(string); ok && sessionID != "" {
@@ -556,7 +541,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 
 			event, ok := iter.Next()
 			if !ok {
-				a.logger.Info("[StreamChat] Iterator closed, exiting")
 
 				if toolCallSpan != nil {
 					toolCallSpan.End()
@@ -599,17 +583,13 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 							observability.LangfuseObservationOutput.String("[tool_call] " + strings.Join(toolNames, ", ")),
 						}
 					}
-					a.logger.Info("[StreamChat] Setting output attributes", "attr_count", len(outputAttrs), "content_len", len(finalMsg.Content))
 					span.SetAttributes(outputAttrs...)
 				}
 
 				return
 			}
 
-			a.logger.Debug("[StreamChat] Got event from iterator", "has_output", event.Output != nil)
-
 			if event.Err != nil {
-				a.logger.Error("[StreamChat] Event error", "error", event.Err)
 				continue
 			}
 
@@ -617,7 +597,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 				msgVariant := event.Output.MessageOutput
 
 				if msgVariant.Role == eino_schema.Tool {
-					a.logger.Info("[StreamChat] Got tool message, skipping", "role", msgVariant.Role)
 					continue
 				}
 
@@ -628,11 +607,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 					finalMsg = msgVariant.Message
 					usage = &ChatUsage{}
 					*usage = a.extractUsage(msgVariant.Message)
-
-					a.logger.Info("[StreamChat] Got non-streaming assistant message",
-						"content_len", len(msgVariant.Message.Content),
-						"reasoning_len", len(msgVariant.Message.ReasoningContent),
-						"tool_calls", len(msgVariant.Message.ToolCalls))
 
 					if len(msgVariant.Message.ToolCalls) > 0 && toolCallSpan == nil {
 						var toolNames []string
@@ -646,7 +620,7 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 							attribute.String("tool.names", strings.Join(toolNames, ",")),
 							attribute.Int("tool.count", len(toolNames)),
 						)
-						a.logger.Info("[StreamChat] Created tool call span", "tools", toolNames)
+
 					}
 
 					if isFirstModelCall && len(msgVariant.Message.ToolCalls) > 0 {
@@ -654,7 +628,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 					}
 
 					if msgVariant.Message.ReasoningContent != "" {
-						a.logger.Info("[StreamChat] Sending reasoning content", "reasoning_len", len(msgVariant.Message.ReasoningContent))
 						select {
 						case streamChan <- &StreamResult{
 							Event: &StreamEvent{
@@ -664,7 +637,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 								Model:            modelName,
 							},
 						}:
-							a.logger.Info("[StreamChat] Reasoning content sent")
 						case <-ctx.Done():
 							return
 						case <-done:
@@ -679,14 +651,13 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 								observability.GenAIPrompt.String(inputText),
 								observability.LangfuseObservationInput.String(inputText),
 							)
-							a.logger.Info("[StreamChat] Created second model call span", "model", modelName)
+
 						}
 						if !isFirstModelCall {
 							secondModelOutput.WriteString(msgVariant.Message.Content)
 						}
 						secondModelFinalMsg = msgVariant.Message
 
-						a.logger.Info("[StreamChat] Sending non-streaming assistant content", "content_len", len(msgVariant.Message.Content))
 						select {
 						case streamChan <- &StreamResult{
 							Event: &StreamEvent{
@@ -695,7 +666,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 								Model:   modelName,
 							},
 						}:
-							a.logger.Info("[StreamChat] Non-streaming content sent")
 						case <-ctx.Done():
 							return
 						case <-done:
@@ -706,7 +676,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 				}
 
 				if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
-					a.logger.Info("[StreamChat] Got streaming message, starting to read chunks")
 					stream := msgVariant.MessageStream
 
 					for {
@@ -831,7 +800,7 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 									attribute.String("tool.names", strings.Join(toolNames, ",")),
 									attribute.Int("tool.count", len(toolNames)),
 								)
-								a.logger.Info("[StreamChat] Created tool call span", "tools", toolNames)
+
 							}
 						}
 
@@ -842,7 +811,6 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 						}
 
 						if chunk.ReasoningContent != "" {
-							a.logger.Info("[StreamChat] Sending reasoning chunk", "reasoning_len", len(chunk.ReasoningContent))
 							select {
 							case streamChan <- &StreamResult{
 								Event: &StreamEvent{
@@ -852,9 +820,7 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 									Model:            modelName,
 								},
 							}:
-								a.logger.Info("[StreamChat] Reasoning chunk sent successfully")
 							case <-ctx.Done():
-								a.logger.Warn("[StreamChat] Context cancelled while sending reasoning")
 								stream.Close()
 								if toolCallSpan != nil {
 									toolCallSpan.End()
@@ -882,14 +848,13 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 									observability.GenAIPrompt.String(inputText),
 									observability.LangfuseObservationInput.String(inputText),
 								)
-								a.logger.Info("[StreamChat] Created second model call span", "model", modelName)
+
 							}
 							if !isFirstModelCall {
 								secondModelOutput.WriteString(chunk.Content)
 							}
 							secondModelFinalMsg = chunk
 
-							a.logger.Debug("[StreamChat] Sending content chunk", "content_len", len(chunk.Content))
 							select {
 							case streamChan <- &StreamResult{
 								Event: &StreamEvent{
@@ -902,7 +867,7 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 									IsThinking:   isThinking,
 								},
 							}:
-								a.logger.Debug("[StreamChat] Content chunk sent")
+
 							case <-ctx.Done():
 								stream.Close()
 								if toolCallSpan != nil {

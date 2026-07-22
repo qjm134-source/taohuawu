@@ -140,7 +140,7 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 			h.logger.Error("Failed to create player", "error", err)
 			return
 		}
-		h.logger.Info("Player created", "playerId", player.ID)
+
 	} else {
 		_ = h.playerRepo.UpdateLastVisit(player.ID)
 	}
@@ -227,7 +227,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 				_ = client.SendMessage(errMsg)
 				return
 			}
-			h.logger.Info("Player created from chat message", "playerId", player.ID)
+
 		}
 	}
 
@@ -272,28 +272,20 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 			})
 		}
 
-		h.logger.Info("[WebSocket] Sending stream event",
-			"type", event.Type,
-			"content_len", len(event.Content),
-			"reasoning_len", len(event.ReasoningContent),
-			"tool_calls", len(toolCalls),
-			"finish_reason", event.FinishReason,
-		)
-
 		eventMsg, err := websocket.NewMessage(
 			websocket.MessageTypeStreamEvent,
 			msg.RequestID,
 			msg.TenantID,
 			websocket.StreamEventPayload{
-				Type:               string(event.Type),
-				Content:            event.Content,
-				ReasoningContent:   event.ReasoningContent,
-				IsThinking:         event.IsThinking,
-				ToolCalls:          toolCalls,
-				ToolResult:         event.ToolResult,
-				ActionType:         event.ActionType,
-				Model:              event.Model,
-				FinishReason:       event.FinishReason,
+				Type:             string(event.Type),
+				Content:          event.Content,
+				ReasoningContent: event.ReasoningContent,
+				IsThinking:       event.IsThinking,
+				ToolCalls:        toolCalls,
+				ToolResult:       event.ToolResult,
+				ActionType:       event.ActionType,
+				Model:            event.Model,
+				FinishReason:     event.FinishReason,
 			},
 		)
 		if err != nil {
@@ -308,7 +300,6 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 
 	// 等待统计信息
 	stats := <-statsChan
-	h.logger.Info("Chat stream completed", "reply_length", fullReply.Len(), "model", stats.Model, "tokens", stats.TotalTokens)
 
 	// 发送包含统计信息的完成事件
 	completeMsg, _ := websocket.NewMessage(
@@ -374,7 +365,7 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 			LatencyMs: int(stats.LatencyMs),
 			CreatedAt: time.Now(),
 		}
-		h.logger.Info("Preparing to save audit log", "auditId", auditLog.ID, "tenantId", auditLog.TenantID, "playerId", auditLog.PlayerID)
+
 		if err := h.auditRepo.Create(auditLog); err != nil {
 			h.logger.Error("Failed to create audit log", "error", err, "auditId", auditLog.ID)
 		}

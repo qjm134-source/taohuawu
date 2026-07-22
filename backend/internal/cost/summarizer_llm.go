@@ -62,7 +62,6 @@ func (s *LLMSummarizer) Summarize(ctx context.Context, text string) (string, err
 	}
 
 	summary := strings.TrimSpace(msg.Content)
-	s.logger.Debug("Summarized", "original_len", len(text), "summary_len", len(summary))
 	return summary, nil
 }
 
@@ -102,11 +101,6 @@ func (s *LLMSummarizer) IncrementalSummarize(ctx context.Context, existingSummar
 	}
 
 	summary := strings.TrimSpace(msg.Content)
-	s.logger.Debug("IncrementalSummary",
-		"existing_len", len(existingSummary),
-		"new_len", len(newContent),
-		"result_len", len(summary),
-	)
 	return summary, nil
 }
 

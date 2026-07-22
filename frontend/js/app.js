@@ -101,7 +101,6 @@
                 break;
 
             case WSClient.MSG_TYPE.STREAM_EVENT:
-                console.log('[WS] Received STREAM_EVENT:', JSON.stringify(message).substring(0, 200));
                 handleStreamEvent(message);
                 break;
 

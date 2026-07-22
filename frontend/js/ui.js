@@ -129,12 +129,10 @@ const UI = (() => {
     function updateBubbleThinking(reasoning) {
         const bubble = elements.speechBubble;
         const content = elements.bubbleContent;
-        console.log('[UI] updateBubbleThinking called:', reasoning, 'bubble:', !!bubble, 'content:', !!content);
         if (!bubble || !content) return;
 
         bubble.classList.add('visible');
         content.innerHTML = `<span class="bubble-thinking">🤔 思考中：${escapeHtml(reasoning)}</span>`;
-        console.log('[UI] updateBubbleThinking completed, innerHTML:', content.innerHTML);
     }
 
     /**
