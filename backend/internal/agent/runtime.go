@@ -360,6 +360,10 @@ func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span,
 		attribute.Int("llm.output_tokens", usage.CompletionTokens),
 		attribute.Int("llm.total_tokens", usage.TotalTokens),
 		attribute.Float64("llm.cost", stats.Cost),
+		observability.GenAIModelName.String(usage.Model),
+		observability.GenAIRequestInputTokenCount.Int(usage.PromptTokens),
+		observability.GenAIRequestOutputTokenCount.Int(usage.CompletionTokens),
+		observability.GenAIRequestTotalTokenCount.Int(usage.TotalTokens),
 	)
 
 	session.AddMessage("user", message, emotionStr, nil)
@@ -657,6 +661,10 @@ func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span
 		attribute.Int64("ttft_ms", 0),
 		attribute.Int("chunk_count", chunkCount),
 		attribute.String("finish_reason", finishReason),
+		observability.GenAIModelName.String(model),
+		observability.GenAIRequestInputTokenCount.Int(stats.InputTokens),
+		observability.GenAIRequestOutputTokenCount.Int(stats.OutputTokens),
+		observability.GenAIRequestTotalTokenCount.Int(stats.TotalTokens),
 	)
 
 	if model != "unknown" {
@@ -666,6 +674,10 @@ func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span
 			attribute.Int("llm.output_tokens", stats.OutputTokens),
 			attribute.Int("llm.total_tokens", stats.TotalTokens),
 			attribute.Float64("llm.cost", stats.Cost),
+			observability.GenAIModelName.String(model),
+			observability.GenAIRequestInputTokenCount.Int(stats.InputTokens),
+			observability.GenAIRequestOutputTokenCount.Int(stats.OutputTokens),
+			observability.GenAIRequestTotalTokenCount.Int(stats.TotalTokens),
 		)
 	}
 }
