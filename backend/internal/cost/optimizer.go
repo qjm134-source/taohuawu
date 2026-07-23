@@ -24,7 +24,7 @@ var modelPricing = map[string]struct {
 	"qwen-turbo":        {Input: 0.0002, Output: 0.0006}, // 阿里云
 	"qwen-plus":         {Input: 0.0004, Output: 0.0012},
 	"qwen-max":          {Input: 0.002, Output: 0.006},
-	"qwen3.5-27b":       {Input: 0.001, Output: 0.003}, // 阿里云 Qwen 3.5 27B
+	"qwen3.5-27b":       {Input: 0.001, Output: 0.003},  // 阿里云 Qwen 3.5 27B
 	"doubao-pro-32k":    {Input: 0.0008, Output: 0.005}, // 字节跳动
 	"doubao-pro-128k":   {Input: 0.005, Output: 0.009},
 	"glm-4":             {Input: 0.01, Output: 0.01}, // 智谱

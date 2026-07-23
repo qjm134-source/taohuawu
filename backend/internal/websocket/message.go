@@ -108,20 +108,20 @@ type ToolCall struct {
 
 // StreamEventPayload 流式事件负载（透明推送所有Agent事件）
 type StreamEventPayload struct {
-	Type               string     `json:"type"`
-	Content            string     `json:"content,omitempty"`
-	ReasoningContent   string     `json:"reasoning_content,omitempty"`
-	IsThinking         bool       `json:"is_thinking,omitempty"`
-	ToolCalls          []ToolCall `json:"tool_calls,omitempty"`
-	ToolResult         string     `json:"tool_result,omitempty"`
-	ActionType         string     `json:"action_type,omitempty"`
-	Model              string     `json:"model,omitempty"`
-	FinishReason       string     `json:"finish_reason,omitempty"`
-	InputTokens        int        `json:"input_tokens,omitempty"`
-	OutputTokens       int        `json:"output_tokens,omitempty"`
-	TotalTokens        int        `json:"total_tokens,omitempty"`
-	Cost               float64    `json:"cost,omitempty"`
-	LatencyMs          int64      `json:"latency_ms,omitempty"`
+	Type             string     `json:"type"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	IsThinking       bool       `json:"is_thinking,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolResult       string     `json:"tool_result,omitempty"`
+	ActionType       string     `json:"action_type,omitempty"`
+	Model            string     `json:"model,omitempty"`
+	FinishReason     string     `json:"finish_reason,omitempty"`
+	InputTokens      int        `json:"input_tokens,omitempty"`
+	OutputTokens     int        `json:"output_tokens,omitempty"`
+	TotalTokens      int        `json:"total_tokens,omitempty"`
+	Cost             float64    `json:"cost,omitempty"`
+	LatencyMs        int64      `json:"latency_ms,omitempty"`
 }
 
 // NewMessage 创建消息

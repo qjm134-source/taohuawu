@@ -57,17 +57,17 @@ type ToolCall struct {
 }
 
 type StreamEvent struct {
-	Type               StreamEventType `json:"type"`
-	Content            string          `json:"content,omitempty"`
-	ReasoningContent   string          `json:"reasoning_content,omitempty"`
-	ToolCalls          []ToolCall      `json:"tool_calls,omitempty"`
-	ToolResult         string          `json:"tool_result,omitempty"`
-	ActionType         string          `json:"action_type,omitempty"`
-	Model              string          `json:"model,omitempty"`
-	Usage              *ChatUsage      `json:"usage,omitempty"`
-	FinishReason       string          `json:"finish_reason,omitempty"`
-	ToolsUsed          []string        `json:"tools_used,omitempty"`
-	IsThinking         bool            `json:"is_thinking,omitempty"`
+	Type             StreamEventType `json:"type"`
+	Content          string          `json:"content,omitempty"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
+	ToolResult       string          `json:"tool_result,omitempty"`
+	ActionType       string          `json:"action_type,omitempty"`
+	Model            string          `json:"model,omitempty"`
+	Usage            *ChatUsage      `json:"usage,omitempty"`
+	FinishReason     string          `json:"finish_reason,omitempty"`
+	ToolsUsed        []string        `json:"tools_used,omitempty"`
+	IsThinking       bool            `json:"is_thinking,omitempty"`
 }
 
 type StreamResult struct {
