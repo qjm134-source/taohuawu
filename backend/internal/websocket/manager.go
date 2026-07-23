@@ -9,7 +9,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+
 	"github.com/watertown/guide/internal/observability"
+	"github.com/watertown/guide/pkg/logging"
 	"github.com/watertown/guide/pkg/utils"
 )
 
@@ -52,57 +54,91 @@ type Hub struct {
 	Register      chan *Client
 	Unregister    chan *Client
 	mu            sync.RWMutex
+	logger        logging.Logger
+
+	// stop 用于通知 Run 退出。
+	stop chan struct{}
+	// wg 等待 Run 退出。
+	wg sync.WaitGroup
 }
 
-// NewHub 创建 Hub
-func NewHub() *Hub {
+// NewHub 创建 Hub。
+func NewHub(logger logging.Logger) *Hub {
 	return &Hub{
 		clients:       make(map[string]*Client),
 		playerClients: make(map[string]string),
 		broadcast:     make(chan []byte),
 		Register:      make(chan *Client),
 		Unregister:    make(chan *Client),
+		logger:        logger,
+		stop:          make(chan struct{}),
 	}
 }
 
-// Run 运行 Hub
+// Run 运行 Hub，直到 Stop() 被调用。
 func (h *Hub) Run() {
+	h.wg.Add(1)
+	defer h.wg.Done()
+
 	for {
 		select {
 		case client := <-h.Register:
-			h.mu.Lock()
-			// 同一 player 去重：如果有旧连接，关闭旧连接
-			if client.PlayerID != "" {
-				if oldClientID, exists := h.playerClients[client.PlayerID]; exists {
-					if oldClient, ok := h.clients[oldClientID]; ok {
-						// 直接关闭旧连接，不通过 channel 避免死锁
-						h.removeClientLocked(oldClient)
-					}
-				}
-				h.playerClients[client.PlayerID] = client.ID
-			}
-			h.clients[client.ID] = client
-			h.mu.Unlock()
+			h.handleRegister(client)
 
 		case client := <-h.Unregister:
-			h.mu.Lock()
-			h.removeClientLocked(client)
-			h.mu.Unlock()
+			h.handleUnregister(client)
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
-			for _, client := range h.clients {
-				select {
-				case client.Send <- message:
-				default:
-					// 客户端缓冲区满，断开连接
-					go func() {
-						defer utils.RecoverWithLog("Hub.UnregisterClient")
-						h.UnregisterClient(client)
-					}()
-				}
+			h.handleBroadcast(message)
+
+		case <-h.stop:
+			return
+		}
+	}
+}
+
+// Stop 通知 Hub 退出并等待 Run 返回。
+func (h *Hub) Stop() {
+	close(h.stop)
+	h.wg.Wait()
+}
+
+func (h *Hub) handleRegister(client *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// 同一 player 去重：如果有旧连接，关闭旧连接
+	if client.PlayerID != "" {
+		if oldClientID, exists := h.playerClients[client.PlayerID]; exists {
+			if oldClient, ok := h.clients[oldClientID]; ok {
+				// 直接关闭旧连接，不通过 channel 避免死锁
+				h.removeClientLocked(oldClient)
 			}
-			h.mu.RUnlock()
+		}
+		h.playerClients[client.PlayerID] = client.ID
+	}
+	h.clients[client.ID] = client
+}
+
+func (h *Hub) handleUnregister(client *Client) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.removeClientLocked(client)
+}
+
+func (h *Hub) handleBroadcast(message []byte) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, client := range h.clients {
+		select {
+		case client.Send <- message:
+		default:
+			// 客户端缓冲区满，断开连接
+			go func(c *Client) {
+				defer utils.RecoverWithCustomLogger("Hub.UnregisterClient", h.logger)
+				h.UnregisterClient(c)
+			}(client)
 		}
 	}
 }
@@ -138,10 +174,10 @@ func (h *Hub) BroadcastToTenant(tenantID string, message []byte) {
 			case client.Send <- message:
 			default:
 				// 客户端缓冲区满，断开连接
-				go func() {
-					defer utils.RecoverWithLog("Hub.UnregisterClient")
-					h.UnregisterClient(client)
-				}()
+				go func(c *Client) {
+					defer utils.RecoverWithCustomLogger("Hub.UnregisterClient", h.logger)
+					h.UnregisterClient(c)
+				}(client)
 			}
 		}
 	}

@@ -4,19 +4,22 @@ import (
 	"context"
 	"sync"
 
+	"github.com/watertown/guide/pkg/logging"
 	"github.com/watertown/guide/pkg/utils"
 )
 
 // WorkerPool 工作池（按租户隔离）
 type WorkerPool struct {
-	pools map[string]chan struct{}
-	mu    sync.RWMutex
+	pools  map[string]chan struct{}
+	mu     sync.RWMutex
+	logger logging.Logger
 }
 
-// NewWorkerPool 创建工作池
-func NewWorkerPool() *WorkerPool {
+// NewWorkerPool 创建工作池。
+func NewWorkerPool(logger logging.Logger) *WorkerPool {
 	return &WorkerPool{
-		pools: make(map[string]chan struct{}),
+		pools:  make(map[string]chan struct{}),
+		logger: logger,
 	}
 }
 
@@ -40,7 +43,7 @@ func (p *WorkerPool) Acquire(tenantID string, size int) context.CancelFunc {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
-		defer utils.RecoverWithLog("WorkerPool")
+		defer utils.RecoverWithCustomLogger("WorkerPool", p.logger)
 		pool <- struct{}{}
 		<-ctx.Done()
 		<-pool

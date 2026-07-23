@@ -166,6 +166,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.agentRuntime.Stop()
 	}
 
+	// 优雅停止 WebSocket Hub
+	if s.agentHub != nil {
+		s.agentHub.Stop()
+	}
+
 	s.logger.Info("Server shutdown complete")
 	return nil
 }
@@ -315,7 +320,7 @@ func (s *Server) initKnowledgeBase(kb interface{}) (*knowledge.KnowledgeBase, er
 }
 
 func (s *Server) initWebSocketHub() *websocket.Hub {
-	hub := websocket.NewHub()
+	hub := websocket.NewHub(s.logger)
 	go func() {
 		defer utils.RecoverWithCustomLogger("Hub.Run", s.logger)
 		hub.Run()
