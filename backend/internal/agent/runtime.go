@@ -339,22 +339,13 @@ func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span,
 	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 	observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(startTime).Seconds())
 
-	span.SetAttributes(
-		attribute.String("llm.model", usage.Model),
-		attribute.Int("llm.input_tokens", usage.PromptTokens),
-		attribute.Int("llm.output_tokens", usage.CompletionTokens),
-		attribute.Int("llm.total_tokens", usage.TotalTokens),
-		attribute.Float64("llm.cost", stats.Cost),
-		observability.GenAIModelName.String(usage.Model),
-		observability.GenAIRequestInputTokenCount.Int(usage.PromptTokens),
-		observability.GenAIRequestOutputTokenCount.Int(usage.CompletionTokens),
-		observability.GenAIRequestTotalTokenCount.Int(usage.TotalTokens),
-		// Langfuse 专用属性，用于成本计算
-		observability.GenAIUsageInputTokens.Int(usage.PromptTokens),
-		observability.GenAIUsageOutputTokens.Int(usage.CompletionTokens),
-		observability.GenAIUsageTotalTokens.Int(usage.TotalTokens),
-		observability.GenAIUsageCost.Float64(stats.Cost),
-	)
+	span.SetAttributes(buildLLMSpanAttributes(
+		usage.Model,
+		usage.PromptTokens,
+		usage.CompletionTokens,
+		usage.TotalTokens,
+		stats.Cost,
+	)...)
 
 	session.AddMessage("user", message, emotionStr, nil)
 	if reply != "" {
@@ -642,34 +633,23 @@ func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span
 		attribute.Int64("ttft_ms", 0),
 		attribute.Int("chunk_count", chunkCount),
 		attribute.String("finish_reason", finishReason),
-		observability.GenAIModelName.String(model),
-		observability.GenAIRequestInputTokenCount.Int(stats.InputTokens),
-		observability.GenAIRequestOutputTokenCount.Int(stats.OutputTokens),
-		observability.GenAIRequestTotalTokenCount.Int(stats.TotalTokens),
-		// Langfuse 专用属性，用于成本计算
-		observability.GenAIUsageInputTokens.Int(stats.InputTokens),
-		observability.GenAIUsageOutputTokens.Int(stats.OutputTokens),
-		observability.GenAIUsageTotalTokens.Int(stats.TotalTokens),
-		observability.GenAIUsageCost.Float64(stats.Cost),
 	)
+	llmSpan.SetAttributes(buildLLMSpanAttributes(
+		model,
+		stats.InputTokens,
+		stats.OutputTokens,
+		stats.TotalTokens,
+		stats.Cost,
+	)...)
 
 	if model != "unknown" {
-		span.SetAttributes(
-			attribute.String("llm.model", model),
-			attribute.Int("llm.input_tokens", stats.InputTokens),
-			attribute.Int("llm.output_tokens", stats.OutputTokens),
-			attribute.Int("llm.total_tokens", stats.TotalTokens),
-			attribute.Float64("llm.cost", stats.Cost),
-			observability.GenAIModelName.String(model),
-			observability.GenAIRequestInputTokenCount.Int(stats.InputTokens),
-			observability.GenAIRequestOutputTokenCount.Int(stats.OutputTokens),
-			observability.GenAIRequestTotalTokenCount.Int(stats.TotalTokens),
-			// Langfuse 专用属性，用于成本计算
-			observability.GenAIUsageInputTokens.Int(stats.InputTokens),
-			observability.GenAIUsageOutputTokens.Int(stats.OutputTokens),
-			observability.GenAIUsageTotalTokens.Int(stats.TotalTokens),
-			observability.GenAIUsageCost.Float64(stats.Cost),
-		)
+		span.SetAttributes(buildLLMSpanAttributes(
+			model,
+			stats.InputTokens,
+			stats.OutputTokens,
+			stats.TotalTokens,
+			stats.Cost,
+		)...)
 	}
 }
 
@@ -877,6 +857,27 @@ func messagesToText(msgs []Message) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// buildLLMSpanAttributes 构建 LLM 调用相关的 OTel span 属性。
+// 统一封装 llm.* 前缀属性和 gen_ai.* 语义属性，避免在业务函数中重复大段设置。
+func buildLLMSpanAttributes(model string, inputTokens, outputTokens, totalTokens int, costAmount float64) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("llm.model", model),
+		attribute.Int("llm.input_tokens", inputTokens),
+		attribute.Int("llm.output_tokens", outputTokens),
+		attribute.Int("llm.total_tokens", totalTokens),
+		attribute.Float64("llm.cost", costAmount),
+		observability.GenAIModelName.String(model),
+		observability.GenAIRequestInputTokenCount.Int(inputTokens),
+		observability.GenAIRequestOutputTokenCount.Int(outputTokens),
+		observability.GenAIRequestTotalTokenCount.Int(totalTokens),
+		// Langfuse 专用属性，用于成本计算
+		observability.GenAIUsageInputTokens.Int(inputTokens),
+		observability.GenAIUsageOutputTokens.Int(outputTokens),
+		observability.GenAIUsageTotalTokens.Int(totalTokens),
+		observability.GenAIUsageCost.Float64(costAmount),
+	}
 }
 
 // recordLLMMetrics 记录 LLM 相关的 Prometheus 指标。
