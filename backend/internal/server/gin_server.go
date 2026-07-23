@@ -265,30 +265,61 @@ func (s *Server) SetWebSocketHandler(handler *WebSocketHandler) {
 	s.wsHandler = handler
 }
 
-// initAgentComponents 初始化 Agent 组件
+// initAgentComponents 初始化 Agent 相关组件。
+// 将各组件创建逻辑拆分为独立方法，降低单函数复杂度并提升可测试性。
 func (s *Server) initAgentComponents(kb interface{}) error {
-	// 安全的类型断言
-	var knowledgeBase *knowledge.KnowledgeBase
-	if kb != nil {
-		var ok bool
-		knowledgeBase, ok = kb.(*knowledge.KnowledgeBase)
-		if !ok {
-			return fmt.Errorf("kb is not *knowledge.KnowledgeBase")
-		}
+	knowledgeBase, err := s.initKnowledgeBase(kb)
+	if err != nil {
+		return err
 	}
 
-	// 创建 WebSocket Hub
-	s.agentHub = websocket.NewHub()
-	go func() {
-		defer utils.RecoverWithCustomLogger("Hub.Run", s.logger)
-		s.agentHub.Run()
-	}()
-
-	// 创建会话管理器
+	s.agentHub = s.initWebSocketHub()
 	s.sessionManager = agent.NewSessionManager()
 
-	// 创建天气服务
-	weatherService, err := weather.NewService(weather.Config{
+	weatherService, err := s.initWeatherService()
+	if err != nil {
+		s.logger.Warn("Failed to create weather service", "error", err)
+	}
+
+	toolRegistry, err := s.initToolRegistry(knowledgeBase, weatherService)
+	if err != nil {
+		return fmt.Errorf("init tool registry: %w", err)
+	}
+
+	llmAdapter, fallbackAdapter := s.initLLMAdapters(toolRegistry)
+	embeddingAPI := s.initEmbeddingAPI()
+	summarizer := s.initSummarizer(llmAdapter)
+	optimizer := s.initOptimizer(embeddingAPI, summarizer)
+
+	emotionDetector := emotion.NewRuleBasedDetector()
+	s.agentRuntime = s.initRuntime(llmAdapter, fallbackAdapter, toolRegistry, optimizer, emotionDetector)
+	s.wsHandler = s.initWebSocketHandler()
+
+	return nil
+}
+
+func (s *Server) initKnowledgeBase(kb interface{}) (*knowledge.KnowledgeBase, error) {
+	if kb == nil {
+		return nil, nil
+	}
+	knowledgeBase, ok := kb.(*knowledge.KnowledgeBase)
+	if !ok {
+		return nil, fmt.Errorf("kb is not *knowledge.KnowledgeBase")
+	}
+	return knowledgeBase, nil
+}
+
+func (s *Server) initWebSocketHub() *websocket.Hub {
+	hub := websocket.NewHub()
+	go func() {
+		defer utils.RecoverWithCustomLogger("Hub.Run", s.logger)
+		hub.Run()
+	}()
+	return hub
+}
+
+func (s *Server) initWeatherService() (weather.Service, error) {
+	return weather.NewService(weather.Config{
 		Provider: s.config.Weather.Provider,
 		QWeather: weather.QWeatherConfig{
 			APIKey:     s.config.Weather.QWeather.APIKey,
@@ -301,65 +332,54 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 			MaxRetries: s.config.Weather.OpenMeteo.MaxRetries,
 		},
 	}, s.logger)
-	if err != nil {
-		s.logger.Warn("Failed to create weather service", "error", err)
-	}
+}
 
-	// 创建工具注册表
-	var toolRegistry *tools.ToolRegistry
-	if knowledgeBase != nil {
-		toolRegistry, err = tools.NewToolRegistry(knowledgeBase, weatherService, s.logger)
-		if err != nil {
-			return fmt.Errorf("create tool registry: %w", err)
-		}
-	} else {
+func (s *Server) initToolRegistry(kb *knowledge.KnowledgeBase, weatherSvc weather.Service) (*tools.ToolRegistry, error) {
+	if kb == nil {
 		s.logger.Warn("KnowledgeBase is nil, creating empty tool registry")
-		toolRegistry, err = tools.NewToolRegistry(nil, weatherService, s.logger)
-		if err != nil {
-			return fmt.Errorf("create tool registry: %w", err)
-		}
+	}
+	return tools.NewToolRegistry(kb, weatherSvc, s.logger)
+}
+
+func (s *Server) initLLMAdapters(registry *tools.ToolRegistry) (llm.Adapter, llm.Adapter) {
+	primary := llm.NewEinoAgentAdapter(s.logger, s.config.LLM, registry.List())
+	fallback := llm.NewFallbackAdapter()
+	return primary, fallback
+}
+
+func (s *Server) initEmbeddingAPI() cost.EmbeddingAPI {
+	if !s.config.Cost.Embedding.Enabled {
+		return nil
 	}
 
-	// 创建 EinoAgentAdapter（多模型路由器）
-	llmAdapter := llm.NewEinoAgentAdapter(s.logger, s.config.LLM, toolRegistry.List())
-
-	fallbackAdapter := llm.NewFallbackAdapter()
-
-	// 创建成本优化器
-	var embeddingAPI cost.EmbeddingAPI
-	if s.config.Cost.Embedding.Enabled {
-		if s.config.Cost.Embedding.Type == "local" {
-			// 本地模式：支持 Ollama / TEI / OpenAI 兼容的本地 Embedding 服务
-			embeddingAPI = cost.NewLocalEmbeddingClientWithConfig(cost.LocalEmbeddingConfig{
-				ModelName:  s.config.Cost.Embedding.Model,
-				BaseURL:    s.config.Cost.Embedding.BaseURL,
-				ServerType: s.config.Cost.Embedding.ServerType,
-			})
-
-		} else {
-			// 远程模式：需要 API Key
-			if s.config.Cost.Embedding.APIKey != "" {
-				embeddingAPI = cost.NewOpenAIEmbeddingClient(
-					s.config.Cost.Embedding.APIKey,
-					s.config.Cost.Embedding.BaseURL,
-					s.config.Cost.Embedding.Model,
-				)
-
-			} else {
-				s.logger.Warn("Embedding API key not set, semantic caching will be unavailable")
-			}
-		}
-	} else {
-
+	if s.config.Cost.Embedding.Type == "local" {
+		return cost.NewLocalEmbeddingClientWithConfig(cost.LocalEmbeddingConfig{
+			ModelName:  s.config.Cost.Embedding.Model,
+			BaseURL:    s.config.Cost.Embedding.BaseURL,
+			ServerType: s.config.Cost.Embedding.ServerType,
+		})
 	}
 
-	// 初始化 LLM 摘要器
-	if s.config.Cost.SummaryTimeout.Duration == 0 {
-		s.config.Cost.SummaryTimeout.Duration = 15 * time.Second
+	if s.config.Cost.Embedding.APIKey == "" {
+		s.logger.Warn("Embedding API key not set, semantic caching will be unavailable")
+		return nil
 	}
+
+	return cost.NewOpenAIEmbeddingClient(
+		s.config.Cost.Embedding.APIKey,
+		s.config.Cost.Embedding.BaseURL,
+		s.config.Cost.Embedding.Model,
+	)
+}
+
+func (s *Server) initSummarizer(adapter llm.Adapter) cost.Summarizer {
+	summaryTimeout := s.config.Cost.SummaryTimeout.Duration
+	if summaryTimeout == 0 {
+		summaryTimeout = 15 * time.Second
+	}
+
 	summaryModel := s.config.Cost.SummaryModel
 	if summaryModel == "" {
-		// 使用第一个启用的模型
 		for _, mc := range s.config.LLM.Models {
 			if mc.Enabled {
 				summaryModel = mc.Name
@@ -368,45 +388,46 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 		}
 	}
 
-	var summarizer cost.Summarizer
-	if summaryModel != "" {
-		summarizer = cost.NewLLMSummarizer(llmAdapter, summaryModel, s.config.Cost.SummaryTimeout.Duration, s.logger)
-	} else {
+	if summaryModel == "" {
 		s.logger.Warn("No model available for summarizer, LLM summarization disabled")
+		return nil
 	}
 
-	optimizer := cost.NewOptimizer(
+	return cost.NewLLMSummarizer(adapter, summaryModel, summaryTimeout, s.logger)
+}
+
+func (s *Server) initOptimizer(embedding cost.EmbeddingAPI, summarizer cost.Summarizer) *cost.Optimizer {
+	return cost.NewOptimizer(
 		s.config.Cost.CacheTTL.Duration,
 		s.config.Cost.MaxHistoryMessages,
 		s.config.Cost.MaxHistoryTokens,
-		embeddingAPI,
+		embedding,
 		summarizer,
 		s.logger,
 	)
+}
 
-	// 创建情绪检测器
-	emotionDetector := emotion.NewRuleBasedDetector()
-
-	// 创建 Agent 运行时
-	s.agentRuntime = agent.NewRuntime(
-		llmAdapter,
-		fallbackAdapter,
-		toolRegistry,
+func (s *Server) initRuntime(adapter, fallback llm.Adapter, registry *tools.ToolRegistry, optimizer *cost.Optimizer, detector emotion.Detector) *agent.Runtime {
+	return agent.NewRuntime(
+		adapter,
+		fallback,
+		registry,
 		s.sessionManager,
 		optimizer,
-		emotionDetector,
+		detector,
 		agent.Config{
 			MaxRetries:       s.config.LLM.MaxRetries,
-			Timeout:          s.config.Server.ReadTimeout.Duration, // 使用服务器读取超时作为总超时
-			LLMTimeout:       s.config.LLM.Timeout.Duration,        // 使用配置文件中的 LLM 超时
+			Timeout:          s.config.Server.ReadTimeout.Duration,
+			LLMTimeout:       s.config.LLM.Timeout.Duration,
 			ToolTimeout:      s.config.LLM.Timeout.Duration,
 			FallbackResponse: s.config.LLM.FallbackResponse,
 		},
 		s.logger,
 	)
+}
 
-	// 创建 WebSocket 处理器
-	wsHandler := NewWebSocketHandler(
+func (s *Server) initWebSocketHandler() *WebSocketHandler {
+	return NewWebSocketHandler(
 		s.agentHub,
 		s.sessionManager,
 		s.agentRuntime,
@@ -415,9 +436,4 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 		s.auditRepo,
 		s.logger,
 	)
-
-	// 设置 WebSocket 处理器
-	s.SetWebSocketHandler(wsHandler)
-
-	return nil
 }
