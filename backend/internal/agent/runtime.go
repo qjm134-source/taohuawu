@@ -150,6 +150,13 @@ func NewRuntime(
 	}
 }
 
+// Stop 优雅停止运行时内部资源。
+func (r *Runtime) Stop() {
+	if r.optimizer != nil {
+		r.optimizer.Stop()
+	}
+}
+
 // HandleWelcome 处理欢迎
 // 同一 player 的并发请求会被合并：只有第一个真正调用 LLM，其余等待并共享缓存结果。
 func (r *Runtime) HandleWelcome(ctx context.Context, session *Session) (string, error) {

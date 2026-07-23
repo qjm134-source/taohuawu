@@ -112,6 +112,11 @@ func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embedding
 	}
 }
 
+// Stop 优雅停止 Optimizer 内部资源（如缓存清理 goroutine）。
+func (o *Optimizer) Stop() {
+	o.cache.Stop()
+}
+
 // GetSummarizer 返回优化器持有的摘要器，供外部估算 token 或摘要使用。
 func (o *Optimizer) GetSummarizer() Summarizer {
 	o.mu.RLock()

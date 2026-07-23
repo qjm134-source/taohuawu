@@ -9,6 +9,11 @@ import (
 	"github.com/watertown/guide/pkg/utils"
 )
 
+const (
+	// cacheCleanupInterval 是缓存过期条目定期清理的间隔。
+	cacheCleanupInterval = 5 * time.Minute
+)
+
 // LayeredCache 多层缓存实现
 type LayeredCache struct {
 	config        CacheConfig
@@ -20,9 +25,15 @@ type LayeredCache struct {
 	stats         CacheStats
 	ttl           time.Duration
 	logger        logging.Logger
+
+	// stopCleanup 用于通知 cleanup goroutine 退出。
+	stopCleanup chan struct{}
+	// cleanupWg 等待 cleanup goroutine 优雅退出。
+	cleanupWg sync.WaitGroup
 }
 
-// NewLayeredCache 创建多层缓存
+// NewLayeredCache 创建多层缓存，并启动后台清理任务。
+// 调用方应在服务关闭时调用 Stop() 以释放资源。
 func NewLayeredCache(config CacheConfig, embeddingAPI EmbeddingAPI, logger logging.Logger) *LayeredCache {
 	c := &LayeredCache{
 		config:        config,
@@ -32,15 +43,23 @@ func NewLayeredCache(config CacheConfig, embeddingAPI EmbeddingAPI, logger loggi
 		embeddingAPI:  embeddingAPI,
 		ttl:           config.TTL,
 		logger:        logger,
+		stopCleanup:   make(chan struct{}),
 	}
 
-	// 启动定期清理
+	c.cleanupWg.Add(1)
 	go func() {
+		defer c.cleanupWg.Done()
 		defer utils.RecoverWithCustomLogger("LayeredCache.cleanup", c.logger)
 		c.cleanup()
 	}()
 
 	return c
+}
+
+// Stop 优雅停止后台清理任务并等待其退出。
+func (c *LayeredCache) Stop() {
+	close(c.stopCleanup)
+	c.cleanupWg.Wait()
 }
 
 // Get 获取缓存（仅精确匹配）
@@ -87,14 +106,15 @@ func (c *LayeredCache) getExact(question string, model string) (string, bool) {
 	return entry.Answer, true
 }
 
-// Set 设置缓存
+// Set 设置缓存。
+// 若配置了 Embedding API，会在独立 goroutine 中构建语义索引，避免阻塞写入路径。
 func (c *LayeredCache) Set(ctx context.Context, question string, answer string, model string, tokensSaved int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	// 检查容量限制
 	if c.config.MaxEntries > 0 && len(c.exactCache) >= c.config.MaxEntries {
-		c.evictLRU()
+		c.evictOldest()
 	}
 
 	key := hashWithModel(question, model)
@@ -107,7 +127,8 @@ func (c *LayeredCache) Set(ctx context.Context, question string, answer string, 
 		Type:        CacheTypeExact,
 	}
 
-	// 如果有 Embedding API，同时构建语义索引
+	// 如果有 Embedding API，在独立 goroutine 中构建语义索引。
+	// buildSemanticIndex 本身是同步的，是否并发由调用方决定。
 	if c.embeddingAPI != nil {
 		go func() {
 			defer utils.RecoverWithCustomLogger("LayeredCache.buildSemanticIndex", c.logger)
@@ -116,10 +137,12 @@ func (c *LayeredCache) Set(ctx context.Context, question string, answer string, 
 	}
 }
 
-// buildSemanticIndex 构建语义索引（异步）
+// buildSemanticIndex 构建语义索引（同步实现）。
+// 调用方可根据需要决定是否另启 goroutine 执行。
 func (c *LayeredCache) buildSemanticIndex(ctx context.Context, question, answer, model string, tokensSaved int) {
 	embedding, err := c.embeddingAPI.GetEmbedding(ctx, question)
 	if err != nil {
+		c.logger.Warn("Failed to build semantic index", "question", question, "error", err)
 		return
 	}
 
@@ -224,8 +247,9 @@ func (c *LayeredCache) Clear(ctx context.Context) {
 	c.stats = CacheStats{}
 }
 
-// evictLRU LRU 淘汰（简单实现：删除最旧的）
-func (c *LayeredCache) evictLRU() {
+// evictOldest 淘汰最旧的缓存条目。
+// 当前实现按 CreatedAt 选择最早写入的条目，本质是 FIFO；命名为 evictOldest 以避免 LRU 误导。
+func (c *LayeredCache) evictOldest() {
 	var oldestKey string
 	var oldestTime time.Time
 
@@ -241,30 +265,35 @@ func (c *LayeredCache) evictLRU() {
 	}
 }
 
-// cleanup 定期清理过期缓存
+// cleanup 定期清理过期缓存，直到收到停止信号。
 func (c *LayeredCache) cleanup() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(cacheCleanupInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		c.mu.Lock()
-		now := time.Now()
+	for {
+		select {
+		case <-ticker.C:
+			c.mu.Lock()
+			now := time.Now()
 
-		// 清理精确缓存
-		for key, entry := range c.exactCache {
-			if now.Sub(entry.CreatedAt) > c.ttl {
-				delete(c.exactCache, key)
+			// 清理精确缓存
+			for key, entry := range c.exactCache {
+				if now.Sub(entry.CreatedAt) > c.ttl {
+					delete(c.exactCache, key)
+				}
 			}
-		}
 
-		// 清理语义缓存
-		for key, entry := range c.semanticCache {
-			if now.Sub(entry.CreatedAt) > c.ttl {
-				delete(c.semanticCache, key)
+			// 清理语义缓存
+			for key, entry := range c.semanticCache {
+				if now.Sub(entry.CreatedAt) > c.ttl {
+					delete(c.semanticCache, key)
+				}
 			}
-		}
 
-		c.mu.Unlock()
+			c.mu.Unlock()
+		case <-c.stopCleanup:
+			return
+		}
 	}
 }
 

@@ -161,6 +161,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return err
 	}
 
+	// 优雅停止 Agent 运行时资源（缓存清理 goroutine 等）
+	if s.agentRuntime != nil {
+		s.agentRuntime.Stop()
+	}
+
 	s.logger.Info("Server shutdown complete")
 	return nil
 }
