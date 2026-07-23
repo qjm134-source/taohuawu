@@ -39,6 +39,12 @@ const (
 	StrategyWeighted   Strategy = "weighted"
 )
 
+const (
+	streamResultBuffer = 100
+	unknownModelName   = "unknown"
+	maxADKIterations   = 20
+)
+
 var defaultHTTPClient = &http.Client{
 	Timeout: 60 * time.Second,
 	Transport: &http.Transport{
@@ -71,37 +77,6 @@ type modelStats struct {
 	totalLatency time.Duration
 	requestCount int
 	errorCount   int
-}
-
-var llmPricing = map[string]struct {
-	Input  float64
-	Output float64
-}{
-	"deepseek-chat":     {Input: 0.0001, Output: 0.0002},
-	"deepseek-reasoner": {Input: 0.00055, Output: 0.00219},
-	"gpt-4o":            {Input: 0.0025, Output: 0.01},
-	"gpt-4o-mini":       {Input: 0.00015, Output: 0.0006},
-	"gpt-3.5-turbo":     {Input: 0.0005, Output: 0.0015},
-	"claude-3-5-sonnet": {Input: 0.003, Output: 0.015},
-	"claude-3-haiku":    {Input: 0.00025, Output: 0.00125},
-	"qwen-turbo":        {Input: 0.0002, Output: 0.0006},
-	"qwen-plus":         {Input: 0.0004, Output: 0.0012},
-	"qwen-max":          {Input: 0.002, Output: 0.006},
-	"qwen3.5-27b":       {Input: 0.001, Output: 0.003},
-	"doubao-pro-32k":    {Input: 0.0008, Output: 0.005},
-	"doubao-pro-128k":   {Input: 0.005, Output: 0.009},
-	"glm-4":             {Input: 0.01, Output: 0.01},
-	"glm-4-flash":       {Input: 0.0001, Output: 0.0001},
-}
-
-func calculateLLMCost(model string, inputTokens, outputTokens int) float64 {
-	pricing, ok := llmPricing[model]
-	if !ok {
-		pricing = llmPricing["gpt-3.5-turbo"]
-	}
-	inputCost := float64(inputTokens) / 1000 * pricing.Input
-	outputCost := float64(outputTokens) / 1000 * pricing.Output
-	return inputCost + outputCost
 }
 
 type EinoAgentAdapter struct {
@@ -230,7 +205,7 @@ func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino
 		Model:               primaryModel.model,
 		ToolsConfig:         toolsConfig,
 		ModelFailoverConfig: failoverConfig,
-		MaxIterations:       20,
+		MaxIterations:       maxADKIterations,
 	}
 
 	agent, err := eino_adk.NewChatModelAgent(context.Background(), config)
@@ -309,58 +284,19 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 		return nil, nil, errors.New("no ADK agent available")
 	}
 
-	chatOpts := &ChatOptions{}
-	for _, o := range opts {
-		o(chatOpts)
-	}
-
-	modelOpts := []eino_model.Option{
-		eino_model.WithTemperature(chatOpts.Temperature),
-		eino_model.WithMaxTokens(chatOpts.MaxTokens),
-	}
-
-	runOpts := []eino_adk.AgentRunOption{
-		eino_adk.WithChatModelOptions(modelOpts),
-	}
-
-	startTime := time.Now()
-
-	inputAttrs := a.buildMessageAttributes(messages)
-
-	if sessionID, ok := SessionIDFromContext(ctx); ok && sessionID != "" {
-		inputAttrs = append(inputAttrs, observability.SessionID.String(sessionID))
-	}
+	chatOpts := a.parseChatOptions(opts)
+	runOpts := a.buildRunOptions(chatOpts)
+	inputAttrs := a.buildInputAttributes(ctx, messages)
 
 	ctx, span := observability.StartLLMSpan(ctx, a.primaryModelName, inputAttrs...)
 	defer span.End()
-
 	span.SetAttributes(
 		observability.GenAIRequestMaxTokens.Int(chatOpts.MaxTokens),
 		observability.GenAIRequestTemperature.Float64(float64(chatOpts.Temperature)),
 	)
 
-	iter := a.runner.Run(ctx, messages, runOpts...)
-
-	var finalMsg *eino_schema.Message
-	var lastErr error
-
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil {
-			lastErr = event.Err
-			a.logger.Error("[Chat] ADK event error", "error", event.Err)
-			continue
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			msgVariant := event.Output.MessageOutput
-			if m, err := msgVariant.GetMessage(); err == nil && m != nil {
-				finalMsg = m
-			}
-		}
-	}
+	startTime := time.Now()
+	finalMsg, lastErr := a.runADK(ctx, messages, runOpts)
 
 	latency := time.Since(startTime)
 	modelName := a.getCurrentModelName(finalMsg)
@@ -385,12 +321,63 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 		return nil, nil, errors.New("no response from ADK agent")
 	}
 
-	usage = a.extractUsage(finalMsg)
-
 	outputAttrs := a.buildOutputAttributes(finalMsg, usage)
 	span.SetAttributes(outputAttrs...)
 
 	return finalMsg, &usage, nil
+}
+
+func (a *EinoAgentAdapter) parseChatOptions(opts []ChatOption) *ChatOptions {
+	chatOpts := &ChatOptions{}
+	for _, o := range opts {
+		o(chatOpts)
+	}
+	return chatOpts
+}
+
+func (a *EinoAgentAdapter) buildRunOptions(chatOpts *ChatOptions) []eino_adk.AgentRunOption {
+	modelOpts := []eino_model.Option{
+		eino_model.WithTemperature(chatOpts.Temperature),
+		eino_model.WithMaxTokens(chatOpts.MaxTokens),
+	}
+	return []eino_adk.AgentRunOption{
+		eino_adk.WithChatModelOptions(modelOpts),
+	}
+}
+
+func (a *EinoAgentAdapter) buildInputAttributes(ctx context.Context, messages []*eino_schema.Message) []attribute.KeyValue {
+	attrs := a.buildMessageAttributes(messages)
+	if sessionID, ok := SessionIDFromContext(ctx); ok && sessionID != "" {
+		attrs = append(attrs, observability.SessionID.String(sessionID))
+	}
+	return attrs
+}
+
+func (a *EinoAgentAdapter) runADK(ctx context.Context, messages []*eino_schema.Message, runOpts []eino_adk.AgentRunOption) (*eino_schema.Message, error) {
+	iter := a.runner.Run(ctx, messages, runOpts...)
+
+	var finalMsg *eino_schema.Message
+	var lastErr error
+
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			lastErr = event.Err
+			a.logger.Error("[Chat] ADK event error", "error", event.Err)
+			continue
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			msgVariant := event.Output.MessageOutput
+			if m, err := msgVariant.GetMessage(); err == nil && m != nil {
+				finalMsg = m
+			}
+		}
+	}
+
+	return finalMsg, lastErr
 }
 
 func (a *EinoAgentAdapter) buildMessageAttributes(messages []*eino_schema.Message) []attribute.KeyValue {
@@ -433,11 +420,6 @@ func (a *EinoAgentAdapter) buildOutputAttributes(msg *eino_schema.Message, usage
 		observability.GenAIRequestInputTokenCount.Int(usage.PromptTokens),
 		observability.GenAIRequestOutputTokenCount.Int(usage.CompletionTokens),
 		observability.GenAIRequestTotalTokenCount.Int(usage.TotalTokens),
-		// Langfuse 专用属性，用于成本计算
-		observability.GenAIUsageInputTokens.Int(usage.PromptTokens),
-		observability.GenAIUsageOutputTokens.Int(usage.CompletionTokens),
-		observability.GenAIUsageTotalTokens.Int(usage.TotalTokens),
-		observability.GenAIUsageCost.Float64(usage.Cost),
 	)
 
 	if msg.ResponseMeta != nil && msg.ResponseMeta.FinishReason != "" {
@@ -472,25 +454,9 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 		return nil, errors.New("no ADK agent available")
 	}
 
-	chatOpts := &ChatOptions{}
-	for _, o := range opts {
-		o(chatOpts)
-	}
-
-	modelOpts := []eino_model.Option{
-		eino_model.WithTemperature(chatOpts.Temperature),
-		eino_model.WithMaxTokens(chatOpts.MaxTokens),
-	}
-
-	runOpts := []eino_adk.AgentRunOption{
-		eino_adk.WithChatModelOptions(modelOpts),
-	}
-
-	inputAttrs := a.buildMessageAttributes(messages)
-
-	if sessionID, ok := ctx.Value("session_id").(string); ok && sessionID != "" {
-		inputAttrs = append(inputAttrs, observability.SessionID.String(sessionID))
-	}
+	chatOpts := a.parseChatOptions(opts)
+	runOpts := a.buildRunOptions(chatOpts)
+	inputAttrs := a.buildInputAttributes(ctx, messages)
 
 	ctx, span := observability.StartLLMSpan(ctx, a.primaryModelName, inputAttrs...)
 	span.SetAttributes(
@@ -500,396 +466,388 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 
 	iter := a.runner.Run(ctx, messages, runOpts...)
 
-	streamChan := make(chan *StreamResult, 100)
+	streamChan := make(chan *StreamResult, streamResultBuffer)
 	done := make(chan struct{})
 
-	go func(ctx context.Context) {
-		defer close(streamChan)
-		defer span.End()
-
-		var modelName string
-		var usage *ChatUsage
-		var finalMsg *eino_schema.Message
-		startTime := time.Now()
-		isFirstModelCall := true
-		var toolCallSpan trace.Span
-		var secondModelSpan trace.Span
-		var secondModelFinalMsg *eino_schema.Message
-		var secondModelOutput strings.Builder
-
-		for {
-			select {
-			case <-ctx.Done():
-				if toolCallSpan != nil {
-					toolCallSpan.End()
-				}
-				a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-				return
-			case <-done:
-				if toolCallSpan != nil {
-					toolCallSpan.End()
-				}
-				a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-				return
-			default:
-			}
-
-			event, ok := iter.Next()
-			if !ok {
-
-				if toolCallSpan != nil {
-					toolCallSpan.End()
-				}
-				a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-
-				select {
-				case streamChan <- &StreamResult{
-					Event: &StreamEvent{
-						Type:       StreamEventTypeAction,
-						ActionType: "exit",
-						Model:      modelName,
-						Usage:      usage,
-					},
-				}:
-				case <-ctx.Done():
-				case <-done:
-				}
-
-				if modelName != "" {
-					latency := time.Since(startTime)
-					a.recordStats(modelName, latency, false, usage)
-				}
-
-				if finalMsg != nil {
-					if usage == nil {
-						usage = &ChatUsage{}
-						*usage = a.extractUsage(finalMsg)
-					}
-					outputAttrs := a.buildOutputAttributes(finalMsg, *usage)
-					if len(outputAttrs) == 0 && len(finalMsg.ToolCalls) > 0 {
-						var toolNames []string
-						for _, tc := range finalMsg.ToolCalls {
-							if tc.Function.Name != "" {
-								toolNames = append(toolNames, tc.Function.Name)
-							}
-						}
-						outputAttrs = []attribute.KeyValue{
-							observability.GenAICompletion.String("[tool_call] " + strings.Join(toolNames, ", ")),
-							observability.LangfuseObservationOutput.String("[tool_call] " + strings.Join(toolNames, ", ")),
-						}
-					}
-					span.SetAttributes(outputAttrs...)
-				}
-
-				return
-			}
-
-			if event.Err != nil {
-				continue
-			}
-
-			if event.Output != nil && event.Output.MessageOutput != nil {
-				msgVariant := event.Output.MessageOutput
-
-				if msgVariant.Role == eino_schema.Tool {
-					continue
-				}
-
-				if msgVariant.Message != nil && msgVariant.Message.Role == eino_schema.Assistant && !msgVariant.IsStreaming {
-					if modelName == "" {
-						modelName = a.getCurrentModelName(msgVariant.Message)
-					}
-					finalMsg = msgVariant.Message
-					usage = &ChatUsage{}
-					*usage = a.extractUsage(msgVariant.Message)
-
-					if len(msgVariant.Message.ToolCalls) > 0 && toolCallSpan == nil {
-						var toolNames []string
-						for _, tc := range msgVariant.Message.ToolCalls {
-							if tc.Function.Name != "" {
-								toolNames = append(toolNames, tc.Function.Name)
-							}
-						}
-						ctx, toolCallSpan = observability.StartChildSpan(ctx, "Eino.Tool."+strings.Join(toolNames, "."))
-						toolCallSpan.SetAttributes(
-							attribute.String("tool.names", strings.Join(toolNames, ",")),
-							attribute.Int("tool.count", len(toolNames)),
-						)
-
-					}
-
-					if isFirstModelCall && len(msgVariant.Message.ToolCalls) > 0 {
-						isFirstModelCall = false
-					}
-
-					if msgVariant.Message.ReasoningContent != "" {
-						select {
-						case streamChan <- &StreamResult{
-							Event: &StreamEvent{
-								Type:             StreamEventTypeChunk,
-								ReasoningContent: msgVariant.Message.ReasoningContent,
-								IsThinking:       true,
-								Model:            modelName,
-							},
-						}:
-						case <-ctx.Done():
-							return
-						case <-done:
-							return
-						}
-					}
-
-					if msgVariant.Message.Content != "" {
-						if !isFirstModelCall && secondModelSpan == nil {
-							inputText := "[user] tool result summary"
-							ctx, secondModelSpan = observability.StartLLMSpan(ctx, modelName,
-								observability.GenAIPrompt.String(inputText),
-								observability.LangfuseObservationInput.String(inputText),
-							)
-
-						}
-						if !isFirstModelCall {
-							secondModelOutput.WriteString(msgVariant.Message.Content)
-						}
-						secondModelFinalMsg = msgVariant.Message
-
-						select {
-						case streamChan <- &StreamResult{
-							Event: &StreamEvent{
-								Type:    StreamEventTypeChunk,
-								Content: msgVariant.Message.Content,
-								Model:   modelName,
-							},
-						}:
-						case <-ctx.Done():
-							return
-						case <-done:
-							return
-						}
-					}
-					continue
-				}
-
-				if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
-					stream := msgVariant.MessageStream
-
-					for {
-						select {
-						case <-ctx.Done():
-							stream.Close()
-							if toolCallSpan != nil {
-								toolCallSpan.End()
-							}
-							if secondModelSpan != nil {
-								a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-							}
-							return
-						case <-done:
-							stream.Close()
-							if toolCallSpan != nil {
-								toolCallSpan.End()
-							}
-							if secondModelSpan != nil {
-								a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-							}
-							return
-						default:
-						}
-
-						chunk, err := stream.Recv()
-
-						if err == io.EOF {
-							stream.Close()
-
-							if chunk != nil {
-								finalMsg = chunk
-								if modelName == "" {
-									modelName = a.getCurrentModelName(chunk)
-								}
-							}
-
-							var finishReason string
-							if chunk != nil && chunk.ResponseMeta != nil {
-								finishReason = chunk.ResponseMeta.FinishReason
-							}
-
-							if toolCallSpan != nil {
-								toolCallSpan.End()
-							}
-							if secondModelSpan != nil {
-								a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-							}
-
-							select {
-							case streamChan <- &StreamResult{
-								Event: &StreamEvent{
-									Type:         StreamEventTypeChunk,
-									Content:      "",
-									FinishReason: finishReason,
-									Model:        modelName,
-									Usage:        usage,
-								},
-							}:
-							case <-ctx.Done():
-							case <-done:
-							}
-							break
-						}
-
-						if err != nil {
-							stream.Close()
-							if toolCallSpan != nil {
-								toolCallSpan.End()
-							}
-							if secondModelSpan != nil {
-								a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-							}
-							select {
-							case streamChan <- &StreamResult{Err: err}:
-							case <-ctx.Done():
-							case <-done:
-							}
-							return
-						}
-
-						if modelName == "" {
-							modelName = a.getCurrentModelName(chunk)
-						}
-						usage = &ChatUsage{}
-						*usage = a.extractUsage(chunk)
-
-						var finishReason string
-						if chunk.ResponseMeta != nil {
-							finishReason = chunk.ResponseMeta.FinishReason
-						}
-
-						var toolCalls []ToolCall
-						if len(chunk.ToolCalls) > 0 {
-							toolCalls = make([]ToolCall, 0, len(chunk.ToolCalls))
-							for _, tc := range chunk.ToolCalls {
-								if tc.Function.Name == "" {
-									continue
-								}
-								var params map[string]interface{}
-								if tc.Function.Arguments != "" {
-									if err := json.Unmarshal([]byte(tc.Function.Arguments), &params); err != nil {
-										params = map[string]interface{}{"arguments": tc.Function.Arguments}
-									}
-								}
-								toolCalls = append(toolCalls, ToolCall{
-									ID:       tc.ID,
-									ToolName: tc.Function.Name,
-									Params:   params,
-								})
-							}
-
-							if toolCallSpan == nil {
-								var toolNames []string
-								for _, tc := range chunk.ToolCalls {
-									if tc.Function.Name != "" {
-										toolNames = append(toolNames, tc.Function.Name)
-									}
-								}
-								ctx, toolCallSpan = observability.StartChildSpan(ctx, "Eino.Tool."+strings.Join(toolNames, "."))
-								toolCallSpan.SetAttributes(
-									attribute.String("tool.names", strings.Join(toolNames, ",")),
-									attribute.Int("tool.count", len(toolNames)),
-								)
-
-							}
-						}
-
-						isThinking := chunk.ReasoningContent != "" && chunk.Content == ""
-
-						if isFirstModelCall && len(chunk.ToolCalls) > 0 {
-							isFirstModelCall = false
-						}
-
-						if chunk.ReasoningContent != "" {
-							select {
-							case streamChan <- &StreamResult{
-								Event: &StreamEvent{
-									Type:             StreamEventTypeChunk,
-									ReasoningContent: chunk.ReasoningContent,
-									IsThinking:       true,
-									Model:            modelName,
-								},
-							}:
-							case <-ctx.Done():
-								stream.Close()
-								if toolCallSpan != nil {
-									toolCallSpan.End()
-								}
-								if secondModelSpan != nil {
-									a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-								}
-								return
-							case <-done:
-								stream.Close()
-								if toolCallSpan != nil {
-									toolCallSpan.End()
-								}
-								if secondModelSpan != nil {
-									a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-								}
-								return
-							}
-						}
-
-						if chunk.Content != "" {
-							if !isFirstModelCall && secondModelSpan == nil {
-								inputText := "[user] tool result summary"
-								ctx, secondModelSpan = observability.StartLLMSpan(ctx, modelName,
-									observability.GenAIPrompt.String(inputText),
-									observability.LangfuseObservationInput.String(inputText),
-								)
-
-							}
-							if !isFirstModelCall {
-								secondModelOutput.WriteString(chunk.Content)
-							}
-							secondModelFinalMsg = chunk
-
-							select {
-							case streamChan <- &StreamResult{
-								Event: &StreamEvent{
-									Type:         StreamEventTypeChunk,
-									Content:      chunk.Content,
-									FinishReason: finishReason,
-									Model:        modelName,
-									Usage:        usage,
-									ToolCalls:    toolCalls,
-									IsThinking:   isThinking,
-								},
-							}:
-
-							case <-ctx.Done():
-								stream.Close()
-								if toolCallSpan != nil {
-									toolCallSpan.End()
-								}
-								if secondModelSpan != nil {
-									a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-								}
-								return
-							case <-done:
-								stream.Close()
-								if toolCallSpan != nil {
-									toolCallSpan.End()
-								}
-								if secondModelSpan != nil {
-									a.endSecondModelSpan(secondModelSpan, secondModelFinalMsg, secondModelOutput.String())
-								}
-								return
-							}
-						}
-					}
-				}
-			}
-		}
-	}(ctx)
+	go a.runStream(ctx, span, iter, streamChan, done)
 
 	return &adkEventStream{streamChan: streamChan, done: done}, nil
+}
+
+// adkIterator 抽象 eino ADK 事件迭代器，便于解耦与测试。
+type adkIterator interface {
+	Next() (*eino_adk.AgentEvent, bool)
+}
+
+// streamState 维护 StreamChat 单次调用的可变状态，避免所有状态散落在主 goroutine 中。
+type streamState struct {
+	adapter          *EinoAgentAdapter
+	ctx              context.Context
+	span             trace.Span
+	modelName        string
+	usage            *ChatUsage
+	finalMsg         *eino_schema.Message
+	isFirstModelCall bool
+	toolCallSpan     trace.Span
+	secondModelSpan  trace.Span
+	secondModelOut   strings.Builder
+	secondModelFinal *eino_schema.Message
+	startTime        time.Time
+}
+
+func newStreamState(a *EinoAgentAdapter, ctx context.Context, span trace.Span) *streamState {
+	return &streamState{
+		adapter:          a,
+		ctx:              ctx,
+		span:             span,
+		isFirstModelCall: true,
+		startTime:        time.Now(),
+	}
+}
+
+// closeSpans 统一关闭 toolCallSpan 与 secondModelSpan，防止 goroutine 各分支重复处理。
+func (s *streamState) closeSpans() {
+	if s.toolCallSpan != nil {
+		s.toolCallSpan.End()
+	}
+	s.endSecondModelSpan()
+}
+
+func (s *streamState) endSecondModelSpan() {
+	if s.secondModelSpan == nil {
+		return
+	}
+	if s.secondModelOut.Len() > 0 {
+		out := s.secondModelOut.String()
+		s.secondModelSpan.SetAttributes(
+			observability.GenAICompletion.String(out),
+			observability.LangfuseObservationOutput.String(out),
+		)
+	} else if s.secondModelFinal != nil && s.secondModelFinal.Content != "" {
+		usage := s.adapter.extractUsage(s.secondModelFinal)
+		attrs := s.adapter.buildOutputAttributes(s.secondModelFinal, usage)
+		s.secondModelSpan.SetAttributes(attrs...)
+	}
+	s.secondModelSpan.End()
+}
+
+func (s *streamState) setModelName(msg *eino_schema.Message) {
+	if s.modelName == "" {
+		s.modelName = s.adapter.getCurrentModelName(msg)
+	}
+}
+
+func (s *streamState) setUsage(msg *eino_schema.Message) {
+	s.usage = &ChatUsage{}
+	*s.usage = s.adapter.extractUsage(msg)
+}
+
+func (s *streamState) ensureToolCallSpan(tcs []eino_schema.ToolCall) {
+	if s.toolCallSpan != nil || len(tcs) == 0 {
+		return
+	}
+	toolNames := collectToolNames(tcs)
+	if len(toolNames) == 0 {
+		return
+	}
+	s.ctx, s.toolCallSpan = observability.StartChildSpan(s.ctx, "Eino.Tool."+strings.Join(toolNames, "."))
+	s.toolCallSpan.SetAttributes(
+		attribute.String("tool.names", strings.Join(toolNames, ",")),
+		attribute.Int("tool.count", len(toolNames)),
+	)
+}
+
+func (s *streamState) startSecondModelSpan() {
+	if s.secondModelSpan != nil || s.isFirstModelCall {
+		return
+	}
+	inputText := "[user] tool result summary"
+	s.ctx, s.secondModelSpan = observability.StartLLMSpan(s.ctx, s.modelName,
+		observability.GenAIPrompt.String(inputText),
+		observability.LangfuseObservationInput.String(inputText),
+	)
+}
+
+func (s *streamState) recordSecondModelOutput(content string, msg *eino_schema.Message) {
+	if s.isFirstModelCall {
+		return
+	}
+	s.startSecondModelSpan()
+	s.secondModelOut.WriteString(content)
+	s.secondModelFinal = msg
+}
+
+func (s *streamState) emitEvent(out chan<- *StreamResult, done <-chan struct{}, event *StreamEvent) bool {
+	select {
+	case out <- &StreamResult{Event: event}:
+		return true
+	case <-s.ctx.Done():
+		return false
+	case <-done:
+		return false
+	}
+}
+
+func (s *streamState) emitError(out chan<- *StreamResult, done <-chan struct{}, err error) bool {
+	select {
+	case out <- &StreamResult{Err: err}:
+		return true
+	case <-s.ctx.Done():
+		return false
+	case <-done:
+		return false
+	}
+}
+
+func (s *streamState) handleAssistantMessage(msg *eino_schema.Message, out chan<- *StreamResult, done <-chan struct{}) bool {
+	s.setModelName(msg)
+	s.finalMsg = msg
+	s.setUsage(msg)
+
+	s.ensureToolCallSpan(msg.ToolCalls)
+
+	if s.isFirstModelCall && len(msg.ToolCalls) > 0 {
+		s.isFirstModelCall = false
+	}
+
+	if msg.ReasoningContent != "" {
+		if !s.emitEvent(out, done, &StreamEvent{
+			Type:             StreamEventTypeChunk,
+			ReasoningContent: msg.ReasoningContent,
+			IsThinking:       true,
+			Model:            s.modelName,
+		}) {
+			return false
+		}
+	}
+
+	if msg.Content != "" {
+		s.recordSecondModelOutput(msg.Content, msg)
+		if !s.emitEvent(out, done, &StreamEvent{
+			Type:    StreamEventTypeChunk,
+			Content: msg.Content,
+			Model:   s.modelName,
+		}) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (s *streamState) handleStreamingMessage(stream *eino_schema.StreamReader[*eino_schema.Message], out chan<- *StreamResult, done <-chan struct{}) bool {
+	defer stream.Close()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return false
+		case <-done:
+			return false
+		default:
+		}
+
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			return s.handleStreamEOF(chunk, out, done)
+		}
+		if err != nil {
+			s.emitError(out, done, err)
+			return false
+		}
+
+		if !s.handleStreamChunk(chunk, out, done) {
+			return false
+		}
+	}
+}
+
+func (s *streamState) handleStreamEOF(chunk *eino_schema.Message, out chan<- *StreamResult, done <-chan struct{}) bool {
+	if chunk != nil {
+		s.finalMsg = chunk
+		s.setModelName(chunk)
+	}
+
+	var finishReason string
+	if chunk != nil && chunk.ResponseMeta != nil {
+		finishReason = chunk.ResponseMeta.FinishReason
+	}
+
+	return s.emitEvent(out, done, &StreamEvent{
+		Type:         StreamEventTypeChunk,
+		Content:      "",
+		FinishReason: finishReason,
+		Model:        s.modelName,
+		Usage:        s.usage,
+	})
+}
+
+func (s *streamState) handleStreamChunk(chunk *eino_schema.Message, out chan<- *StreamResult, done <-chan struct{}) bool {
+	s.setModelName(chunk)
+	s.setUsage(chunk)
+
+	s.ensureToolCallSpan(chunk.ToolCalls)
+
+	if s.isFirstModelCall && len(chunk.ToolCalls) > 0 {
+		s.isFirstModelCall = false
+	}
+
+	isThinking := chunk.ReasoningContent != "" && chunk.Content == ""
+
+	if chunk.ReasoningContent != "" {
+		if !s.emitEvent(out, done, &StreamEvent{
+			Type:             StreamEventTypeChunk,
+			ReasoningContent: chunk.ReasoningContent,
+			IsThinking:       true,
+			Model:            s.modelName,
+		}) {
+			return false
+		}
+	}
+
+	if chunk.Content == "" {
+		return true
+	}
+
+	s.recordSecondModelOutput(chunk.Content, chunk)
+
+	var finishReason string
+	if chunk.ResponseMeta != nil {
+		finishReason = chunk.ResponseMeta.FinishReason
+	}
+
+	toolCalls := buildToolCalls(chunk.ToolCalls)
+
+	return s.emitEvent(out, done, &StreamEvent{
+		Type:         StreamEventTypeChunk,
+		Content:      chunk.Content,
+		FinishReason: finishReason,
+		Model:        s.modelName,
+		Usage:        s.usage,
+		ToolCalls:    toolCalls,
+		IsThinking:   isThinking,
+	})
+}
+
+func (s *streamState) finish(out chan<- *StreamResult, done <-chan struct{}) {
+	s.emitEvent(out, done, &StreamEvent{
+		Type:       StreamEventTypeAction,
+		ActionType: "exit",
+		Model:      s.modelName,
+		Usage:      s.usage,
+	})
+
+	if s.modelName != "" {
+		latency := time.Since(s.startTime)
+		s.adapter.recordStats(s.modelName, latency, false, s.usage)
+	}
+
+	if s.finalMsg == nil {
+		return
+	}
+
+	if s.usage == nil {
+		s.setUsage(s.finalMsg)
+	}
+
+	outputAttrs := s.adapter.buildOutputAttributes(s.finalMsg, *s.usage)
+	if len(outputAttrs) == 0 && len(s.finalMsg.ToolCalls) > 0 {
+		toolNames := collectToolNames(s.finalMsg.ToolCalls)
+		outputAttrs = []attribute.KeyValue{
+			observability.GenAICompletion.String("[tool_call] " + strings.Join(toolNames, ", ")),
+			observability.LangfuseObservationOutput.String("[tool_call] " + strings.Join(toolNames, ", ")),
+		}
+	}
+	s.span.SetAttributes(outputAttrs...)
+}
+
+func (a *EinoAgentAdapter) runStream(ctx context.Context, span trace.Span, iter adkIterator, out chan<- *StreamResult, done <-chan struct{}) {
+	defer close(out)
+	defer span.End()
+
+	state := newStreamState(a, ctx, span)
+	defer state.closeSpans()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		default:
+		}
+
+		event, ok := iter.Next()
+		if !ok {
+			state.finish(out, done)
+			return
+		}
+
+		if event.Err != nil {
+			continue
+		}
+
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+
+		msgVariant := event.Output.MessageOutput
+		if msgVariant.Role == eino_schema.Tool {
+			continue
+		}
+
+		if msgVariant.Message != nil && msgVariant.Message.Role == eino_schema.Assistant && !msgVariant.IsStreaming {
+			if !state.handleAssistantMessage(msgVariant.Message, out, done) {
+				return
+			}
+			continue
+		}
+
+		if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
+			if !state.handleStreamingMessage(msgVariant.MessageStream, out, done) {
+				return
+			}
+		}
+	}
+}
+
+func collectToolNames(tcs []eino_schema.ToolCall) []string {
+	var names []string
+	for _, tc := range tcs {
+		if tc.Function.Name != "" {
+			names = append(names, tc.Function.Name)
+		}
+	}
+	return names
+}
+
+func buildToolCalls(tcs []eino_schema.ToolCall) []ToolCall {
+	if len(tcs) == 0 {
+		return nil
+	}
+	toolCalls := make([]ToolCall, 0, len(tcs))
+	for _, tc := range tcs {
+		if tc.Function.Name == "" {
+			continue
+		}
+		toolCalls = append(toolCalls, ToolCall{
+			ID:       tc.ID,
+			ToolName: tc.Function.Name,
+			Params:   parseToolCallParams(tc.Function.Arguments),
+		})
+	}
+	return toolCalls
+}
+
+func parseToolCallParams(arguments string) map[string]any {
+	if arguments == "" {
+		return nil
+	}
+	var params map[string]any
+	if err := json.Unmarshal([]byte(arguments), &params); err != nil {
+		return map[string]any{"arguments": arguments}
+	}
+	return params
 }
 
 func (a *EinoAgentAdapter) getCurrentModelName(msg *eino_schema.Message) string {
@@ -901,24 +859,7 @@ func (a *EinoAgentAdapter) getCurrentModelName(msg *eino_schema.Message) string 
 	if a.primaryModelName != "" {
 		return a.primaryModelName
 	}
-	return "unknown"
-}
-
-func (a *EinoAgentAdapter) endSecondModelSpan(span trace.Span, finalMsg *eino_schema.Message, accumulatedOutput string) {
-	if span == nil {
-		return
-	}
-	if accumulatedOutput != "" {
-		span.SetAttributes(
-			observability.GenAICompletion.String(accumulatedOutput),
-			observability.LangfuseObservationOutput.String(accumulatedOutput),
-		)
-	} else if finalMsg != nil && finalMsg.Content != "" {
-		usage := a.extractUsage(finalMsg)
-		outputAttrs := a.buildOutputAttributes(finalMsg, usage)
-		span.SetAttributes(outputAttrs...)
-	}
-	span.End()
+	return unknownModelName
 }
 
 func (a *EinoAgentAdapter) extractUsage(msg *eino_schema.Message) ChatUsage {
@@ -926,14 +867,11 @@ func (a *EinoAgentAdapter) extractUsage(msg *eino_schema.Message) ChatUsage {
 	if msg == nil || msg.ResponseMeta == nil || msg.ResponseMeta.Usage == nil {
 		return ChatUsage{Model: model}
 	}
-	promptTokens := int(msg.ResponseMeta.Usage.PromptTokens)
-	completionTokens := int(msg.ResponseMeta.Usage.CompletionTokens)
 	return ChatUsage{
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
+		PromptTokens:     int(msg.ResponseMeta.Usage.PromptTokens),
+		CompletionTokens: int(msg.ResponseMeta.Usage.CompletionTokens),
 		TotalTokens:      int(msg.ResponseMeta.Usage.TotalTokens),
 		Model:            model,
-		Cost:             calculateLLMCost(model, promptTokens, completionTokens),
 	}
 }
 
