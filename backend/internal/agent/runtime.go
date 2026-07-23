@@ -250,7 +250,7 @@ func (r *Runtime) checkExactCache(ctx context.Context, span trace.Span, cacheKey
 	defer observability.EndChildSpan(ctx, cacheSpan)
 
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
-		span.SetAttributes(attribute.Bool("cache_hit", true))
+		markCacheHit(span)
 		observability.CacheHitsTotal.WithLabelValues("exact").Inc()
 		r.recordCacheHit()
 		return cached, true
@@ -266,7 +266,7 @@ func (r *Runtime) checkSimilarityCache(ctx context.Context, span trace.Span, mes
 	defer observability.EndChildSpan(ctx, similaritySpan)
 
 	if cached, hit := r.optimizer.CheckSimilarity(ctx, message, 0.85); hit {
-		span.SetAttributes(attribute.Bool("cache_hit", true))
+		markCacheHit(span)
 		observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
 		r.recordCacheHit()
 		return cached, true
@@ -405,7 +405,7 @@ func (r *Runtime) checkCache(ctx context.Context, cacheKey string) (string, bool
 }
 
 func (r *Runtime) handleCacheHit(ctx context.Context, span trace.Span, cached string) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
-	span.SetAttributes(attribute.Bool("cache_hit", true))
+	markCacheHit(span)
 	observability.AddEvent(ctx, "cache_hit", attribute.String("type", "check"))
 	observability.CacheHitsTotal.WithLabelValues("check").Inc()
 	r.recordCacheHit()
@@ -493,8 +493,7 @@ func (r *Runtime) processStreamEvents(ctx context.Context, stream llm.EventStrea
 	var finishReason string
 	var streamSpan trace.Span
 
-	span.SetAttributes(observability.GenAIPrompt.String(message))
-	span.SetAttributes(observability.LangfuseObservationInput.String(message))
+	setSpanInput(span, message)
 
 	for {
 		event, err := stream.Recv()
@@ -541,8 +540,7 @@ func (r *Runtime) processStreamEvents(ctx context.Context, stream llm.EventStrea
 	r.updateSession(ctx, session, message, emotionStr, fullReply.String())
 	r.writeCache(ctx, cacheKey, fullReply.String())
 
-	span.SetAttributes(observability.GenAICompletion.String(fullReply.String()))
-	span.SetAttributes(observability.LangfuseObservationOutput.String(fullReply.String()))
+	setSpanOutput(span, fullReply.String())
 
 	statsChan <- stats
 	close(statsChan)
@@ -857,6 +855,27 @@ func messagesToText(msgs []Message) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// markCacheHit 在 span 上标记缓存命中。
+func markCacheHit(span trace.Span) {
+	span.SetAttributes(attribute.Bool("cache_hit", true))
+}
+
+// setSpanInput 在 span 上设置 LLM 输入内容属性（GenAI + Langfuse）。
+func setSpanInput(span trace.Span, input string) {
+	span.SetAttributes(
+		observability.GenAIPrompt.String(input),
+		observability.LangfuseObservationInput.String(input),
+	)
+}
+
+// setSpanOutput 在 span 上设置 LLM 输出内容属性（GenAI + Langfuse）。
+func setSpanOutput(span trace.Span, output string) {
+	span.SetAttributes(
+		observability.GenAICompletion.String(output),
+		observability.LangfuseObservationOutput.String(output),
+	)
 }
 
 // buildLLMSpanAttributes 构建 LLM 调用相关的 OTel span 属性。
