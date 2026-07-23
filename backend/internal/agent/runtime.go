@@ -250,10 +250,7 @@ func (r *Runtime) processWelcomeResponse(ctx context.Context, startTime time.Tim
 }
 
 func (r *Runtime) recordWelcomeMetrics(startTime time.Time, usage *llm.ChatUsage) {
-	model := usage.Model
-	if model == "" {
-		model = "unknown"
-	}
+	model := normalizeModelName(usage.Model)
 	llmCost := cost.CalculateCost(model, usage.PromptTokens, usage.CompletionTokens)
 
 	r.recordLLMMetrics(model, "success", time.Since(startTime).Seconds(),
@@ -349,13 +346,13 @@ func (r *Runtime) callLLMAndProcess(ctx context.Context, span trace.Span,
 func (r *Runtime) processLLMResponse(span trace.Span,
 	session *Session, message, emotionStr, cacheKey string, msg *eino_schema.Message, usage *llm.ChatUsage) (string, string, *LLMStats, error) {
 
-	startTime := time.Now()
+	metricsStart := time.Now()
 
 	reply := strings.TrimSpace(msg.Content)
 
 	stats := &LLMStats{
 		Model:        usage.Model,
-		LatencyMs:    time.Since(startTime).Milliseconds(),
+		LatencyMs:    time.Since(metricsStart).Milliseconds(),
 		InputTokens:  usage.PromptTokens,
 		OutputTokens: usage.CompletionTokens,
 		TotalTokens:  usage.TotalTokens,
@@ -363,10 +360,10 @@ func (r *Runtime) processLLMResponse(span trace.Span,
 		CacheHit:     false,
 	}
 
-	r.recordLLMMetrics(usage.Model, "success", time.Since(startTime).Seconds(),
+	r.recordLLMMetrics(usage.Model, "success", time.Since(metricsStart).Seconds(),
 		usage.PromptTokens, usage.CompletionTokens, stats.Cost)
 	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
-	observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(startTime).Seconds())
+	observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(metricsStart).Seconds())
 
 	span.SetAttributes(buildLLMSpanAttributes(
 		usage.Model,
@@ -632,10 +629,7 @@ func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span
 	stats.LatencyMs = time.Since(startTime).Milliseconds()
 	stats.Cost = cost.CalculateCost(stats.Model, stats.InputTokens, stats.OutputTokens)
 
-	model := stats.Model
-	if model == "" {
-		model = "unknown"
-	}
+	model := normalizeModelName(stats.Model)
 
 	r.recordLLMMetrics(model, "success", time.Since(startTime).Seconds(),
 		stats.InputTokens, stats.OutputTokens, stats.Cost)
@@ -901,11 +895,17 @@ func buildLLMSpanAttributes(model string, inputTokens, outputTokens, totalTokens
 	}
 }
 
+// normalizeModelName 将空模型名归一化为默认值，避免指标标签出现空字符串。
+func normalizeModelName(model string) string {
+	if model == "" {
+		return defaultModelName
+	}
+	return model
+}
+
 // recordLLMMetrics 记录 LLM 相关的 Prometheus 指标。
 func (r *Runtime) recordLLMMetrics(model, status string, durationSec float64, inputTokens, outputTokens int, costAmount float64) {
-	if model == "" {
-		model = "unknown"
-	}
+	model = normalizeModelName(model)
 	observability.LLMRequestsTotal.WithLabelValues(model, status).Inc()
 	observability.LLMRequestDuration.WithLabelValues(model).Observe(durationSec)
 	observability.LLMRequestTokens.WithLabelValues(model).Add(float64(inputTokens))
