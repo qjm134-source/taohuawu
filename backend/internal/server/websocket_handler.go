@@ -99,63 +99,74 @@ func (h *WebSocketHandler) handleMessage(client *websocket.Client, message []byt
 
 // handleConnection 处理连接消息
 func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *websocket.Message) {
-	var payload websocket.ConnectionPayload
-	if err := msg.ParsePayload(&payload); err != nil {
-		h.logger.Error("Failed to parse connection payload", "error", err)
+	payload, ok := h.parseConnectionPayload(client, msg)
+	if !ok {
 		return
 	}
 
-	// 设置客户端信息
-	client.TenantID = msg.TenantID
-	client.PlayerID = payload.PlayerID
-
-	// PlayerID 设置完成后注册到 Hub（Hub 会去重同一 player 的旧连接）
-	h.hub.Register <- client
-
-	// 记录 WebSocket 连接指标
-	observability.WebSocketConnections.WithLabelValues(msg.TenantID).Inc()
-
-	// 检查客户端是否仍然有效（可能被 Hub 关闭）
-	if !h.isClientValid(client) {
-		h.logger.Warn("Client was closed by Hub during registration", "playerId", payload.PlayerID)
+	h.registerClient(client, msg, payload)
+	if !client.IsValid() {
 		observability.WebSocketConnections.WithLabelValues(msg.TenantID).Dec()
 		return
 	}
 
-	// 查找或创建玩家
-	isNewPlayer := false
-	player, err := h.playerRepo.GetByDeviceID(payload.DeviceID, msg.TenantID)
-	if err != nil {
-		isNewPlayer = true
-		player = &database.Player{
-			ID:             uuid.New().String(),
-			TenantID:       msg.TenantID,
-			Nickname:       payload.Nickname,
-			DeviceID:       payload.DeviceID,
-			FirstVisitTime: time.Now(),
-			LastVisitTime:  time.Now(),
-			TotalDialogues: 0,
-		}
-		if err := h.playerRepo.Create(player); err != nil {
-			h.logger.Error("Failed to create player", "error", err)
-			return
-		}
-
-	} else {
-		_ = h.playerRepo.UpdateLastVisit(player.ID)
-	}
-
-	// 再次检查客户端是否仍然有效
-	if !h.isClientValid(client) {
-		h.logger.Warn("Client was closed during player lookup", "playerId", payload.PlayerID)
+	player, isNewPlayer, ok := h.ensurePlayer(payload, msg)
+	if !ok || !client.IsValid() {
 		return
 	}
 
-	// 获取会话
-	session := h.runtime.GetSession(player.ID, msg.TenantID)
-	session.Nickname = payload.Nickname
+	h.sendWelcome(client, msg, player, isNewPlayer)
+}
 
-	// 处理欢迎
+func (h *WebSocketHandler) parseConnectionPayload(client *websocket.Client, msg *websocket.Message) (websocket.ConnectionPayload, bool) {
+	var payload websocket.ConnectionPayload
+	if err := msg.ParsePayload(&payload); err != nil {
+		h.logger.Error("Failed to parse connection payload", "error", err)
+		return payload, false
+	}
+	client.TenantID = msg.TenantID
+	client.PlayerID = payload.PlayerID
+	return payload, true
+}
+
+func (h *WebSocketHandler) registerClient(client *websocket.Client, msg *websocket.Message, payload websocket.ConnectionPayload) {
+	h.hub.Register <- client
+	observability.WebSocketConnections.WithLabelValues(msg.TenantID).Inc()
+}
+
+func (h *WebSocketHandler) ensurePlayer(payload websocket.ConnectionPayload, msg *websocket.Message) (*database.Player, bool, bool) {
+	player, err := h.playerRepo.GetByDeviceID(payload.DeviceID, msg.TenantID)
+	if err != nil {
+		return h.createPlayer(payload, msg)
+	}
+
+	if err := h.playerRepo.UpdateLastVisit(player.ID); err != nil {
+		h.logger.Error("Failed to update last visit", "error", err, "player_id", player.ID)
+	}
+	return player, false, true
+}
+
+func (h *WebSocketHandler) createPlayer(payload websocket.ConnectionPayload, msg *websocket.Message) (*database.Player, bool, bool) {
+	player := &database.Player{
+		ID:             uuid.New().String(),
+		TenantID:       msg.TenantID,
+		Nickname:       payload.Nickname,
+		DeviceID:       payload.DeviceID,
+		FirstVisitTime: time.Now(),
+		LastVisitTime:  time.Now(),
+		TotalDialogues: 0,
+	}
+	if err := h.playerRepo.Create(player); err != nil {
+		h.logger.Error("Failed to create player", "error", err)
+		return nil, false, false
+	}
+	return player, true, true
+}
+
+func (h *WebSocketHandler) sendWelcome(client *websocket.Client, msg *websocket.Message, player *database.Player, isNewPlayer bool) {
+	session := h.runtime.GetSession(player.ID, msg.TenantID)
+	session.Nickname = player.Nickname
+
 	reply, err := h.runtime.HandleWelcome(context.Background(), session)
 	if err != nil {
 		h.logger.Error("Failed to handle welcome", "error", err)
@@ -183,77 +194,98 @@ func (h *WebSocketHandler) handleConnection(client *websocket.Client, msg *webso
 
 	if err := client.SendMessage(welcomeMsg); err != nil {
 		h.logger.Error("Failed to send welcome message", "error", err)
-		return
 	}
 }
 
 // handleChatMessage 处理聊天消息
 func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *websocket.Message) {
-	var payload websocket.ChatMessagePayload
-	if err := msg.ParsePayload(&payload); err != nil {
-		h.logger.Error("Failed to parse chat payload", "error", err)
+	payload, ok := h.parseChatPayload(client, msg)
+	if !ok {
 		return
 	}
 
-	// 查找玩家
-	player, err := h.playerRepo.GetByID(payload.PlayerID)
-	if err != nil {
-		h.logger.Warn("Player not found by ID, trying to find by deviceId", "player_id", payload.PlayerID)
-
-		// 尝试用 deviceId 查找
-		player, err = h.playerRepo.GetByDeviceID(client.ID, msg.TenantID)
-		if err != nil {
-			// 创建新玩家
-			player = &database.Player{
-				ID:             uuid.New().String(),
-				TenantID:       msg.TenantID,
-				Nickname:       "游客",
-				DeviceID:       client.ID,
-				FirstVisitTime: time.Now(),
-				LastVisitTime:  time.Now(),
-				TotalDialogues: 0,
-			}
-			if err := h.playerRepo.Create(player); err != nil {
-				h.logger.Error("Failed to create player", "error", err)
-				errMsg, _ := websocket.NewMessage(
-					websocket.MessageTypeError,
-					msg.RequestID,
-					msg.TenantID,
-					websocket.ErrorPayload{
-						Code:    "PLAYER_CREATE_ERROR",
-						Message: "无法创建玩家信息，请重试。",
-					},
-				)
-				_ = client.SendMessage(errMsg)
-				return
-			}
-
-		}
+	player, ok := h.ensureChatPlayer(client, msg, payload)
+	if !ok {
+		return
 	}
 
-	// 获取会话
 	session := h.runtime.GetSession(player.ID, msg.TenantID)
 	eventChan, statsChan, err := h.runtime.HandleChatStream(context.Background(), session, payload.Message)
 	if err != nil {
 		h.logger.Error("Failed to handle chat stream", "error", err, "player_id", player.ID)
-
-		// 返回错误消息
-		errMsg, _ := websocket.NewMessage(
-			websocket.MessageTypeError,
-			msg.RequestID,
-			msg.TenantID,
-			websocket.ErrorPayload{
-				Code:    "CHAT_ERROR",
-				Message: "抱歉，我现在无法回答你的问题。请稍后再试。",
-			},
-		)
-		_ = client.SendMessage(errMsg)
+		h.sendError(client, msg, "CHAT_ERROR", "抱歉，我现在无法回答你的问题。请稍后再试。")
 		return
 	}
 
-	var fullReply strings.Builder
+	fullReply, stats := h.streamResponse(client, msg, eventChan, statsChan)
+	h.persistChatResult(session, player, msg, payload.Message, fullReply, stats)
+}
 
-	// 流式发送响应（推送有内容、思考过程或工具调用的事件）
+func (h *WebSocketHandler) parseChatPayload(client *websocket.Client, msg *websocket.Message) (websocket.ChatMessagePayload, bool) {
+	var payload websocket.ChatMessagePayload
+	if err := msg.ParsePayload(&payload); err != nil {
+		h.logger.Error("Failed to parse chat payload", "error", err)
+		return payload, false
+	}
+	return payload, true
+}
+
+func (h *WebSocketHandler) ensureChatPlayer(client *websocket.Client, msg *websocket.Message, payload websocket.ChatMessagePayload) (*database.Player, bool) {
+	player, err := h.playerRepo.GetByID(payload.PlayerID)
+	if err == nil {
+		return player, true
+	}
+
+	h.logger.Warn("Player not found by ID, trying to find by deviceId", "player_id", payload.PlayerID)
+	player, err = h.playerRepo.GetByDeviceID(client.ID, msg.TenantID)
+	if err == nil {
+		return player, true
+	}
+
+	return h.createChatPlayer(client, msg)
+}
+
+func (h *WebSocketHandler) createChatPlayer(client *websocket.Client, msg *websocket.Message) (*database.Player, bool) {
+	player := &database.Player{
+		ID:             uuid.New().String(),
+		TenantID:       msg.TenantID,
+		Nickname:       "游客",
+		DeviceID:       client.ID,
+		FirstVisitTime: time.Now(),
+		LastVisitTime:  time.Now(),
+		TotalDialogues: 0,
+	}
+	if err := h.playerRepo.Create(player); err != nil {
+		h.logger.Error("Failed to create player", "error", err)
+		h.sendError(client, msg, "PLAYER_CREATE_ERROR", "无法创建玩家信息，请重试。")
+		return nil, false
+	}
+	return player, true
+}
+
+func (h *WebSocketHandler) sendError(client *websocket.Client, msg *websocket.Message, code, message string) {
+	errMsg, err := websocket.NewMessage(
+		websocket.MessageTypeError,
+		msg.RequestID,
+		msg.TenantID,
+		websocket.ErrorPayload{
+			Code:    code,
+			Message: message,
+		},
+	)
+	if err != nil {
+		h.logger.Error("Failed to create error message", "error", err)
+		return
+	}
+	if err := client.SendMessage(errMsg); err != nil {
+		h.logger.Error("Failed to send error message", "error", err)
+	}
+}
+
+func (h *WebSocketHandler) streamResponse(client *websocket.Client, msg *websocket.Message,
+	eventChan <-chan *llm.StreamEvent, statsChan <-chan *agent.LLMStats) (string, *agent.LLMStats) {
+
+	var fullReply strings.Builder
 	for event := range eventChan {
 		if event.Type == llm.StreamEventTypeChunk && event.Content != "" {
 			fullReply.WriteString(event.Content)
@@ -263,46 +295,51 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 			continue
 		}
 
-		toolCalls := make([]websocket.ToolCall, 0, len(event.ToolCalls))
-		for _, tc := range event.ToolCalls {
-			toolCalls = append(toolCalls, websocket.ToolCall{
-				ID:       tc.ID,
-				ToolName: tc.ToolName,
-				Params:   tc.Params,
-			})
-		}
-
-		eventMsg, err := websocket.NewMessage(
-			websocket.MessageTypeStreamEvent,
-			msg.RequestID,
-			msg.TenantID,
-			websocket.StreamEventPayload{
-				Type:             string(event.Type),
-				Content:          event.Content,
-				ReasoningContent: event.ReasoningContent,
-				IsThinking:       event.IsThinking,
-				ToolCalls:        toolCalls,
-				ToolResult:       event.ToolResult,
-				ActionType:       event.ActionType,
-				Model:            event.Model,
-				FinishReason:     event.FinishReason,
-			},
-		)
-		if err != nil {
-			h.logger.Error("[WebSocket] Failed to create message", "error", err)
-			continue
-		}
-		if err := client.SendMessage(eventMsg); err != nil {
-			h.logger.Error("[WebSocket] Failed to send message", "error", err)
-			break
-		}
+		h.sendStreamEvent(client, msg, event)
 	}
 
-	// 等待统计信息
 	stats := <-statsChan
+	h.sendCompleteEvent(client, msg, stats)
+	return fullReply.String(), stats
+}
 
-	// 发送包含统计信息的完成事件
-	completeMsg, _ := websocket.NewMessage(
+func (h *WebSocketHandler) sendStreamEvent(client *websocket.Client, msg *websocket.Message, event *llm.StreamEvent) {
+	toolCalls := make([]websocket.ToolCall, 0, len(event.ToolCalls))
+	for _, tc := range event.ToolCalls {
+		toolCalls = append(toolCalls, websocket.ToolCall{
+			ID:       tc.ID,
+			ToolName: tc.ToolName,
+			Params:   tc.Params,
+		})
+	}
+
+	eventMsg, err := websocket.NewMessage(
+		websocket.MessageTypeStreamEvent,
+		msg.RequestID,
+		msg.TenantID,
+		websocket.StreamEventPayload{
+			Type:             string(event.Type),
+			Content:          event.Content,
+			ReasoningContent: event.ReasoningContent,
+			IsThinking:       event.IsThinking,
+			ToolCalls:        toolCalls,
+			ToolResult:       event.ToolResult,
+			ActionType:       event.ActionType,
+			Model:            event.Model,
+			FinishReason:     event.FinishReason,
+		},
+	)
+	if err != nil {
+		h.logger.Error("[WebSocket] Failed to create message", "error", err)
+		return
+	}
+	if err := client.SendMessage(eventMsg); err != nil {
+		h.logger.Error("[WebSocket] Failed to send message", "error", err)
+	}
+}
+
+func (h *WebSocketHandler) sendCompleteEvent(client *websocket.Client, msg *websocket.Message, stats *agent.LLMStats) {
+	completeMsg, err := websocket.NewMessage(
 		websocket.MessageTypeStreamEvent,
 		msg.RequestID,
 		msg.TenantID,
@@ -318,19 +355,38 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 			LatencyMs:    stats.LatencyMs,
 		},
 	)
-	_ = client.SendMessage(completeMsg)
+	if err != nil {
+		h.logger.Error("Failed to create complete message", "error", err)
+		return
+	}
+	if err := client.SendMessage(completeMsg); err != nil {
+		h.logger.Error("Failed to send complete message", "error", err)
+	}
+}
 
-	// 增加对话计数
-	_ = h.playerRepo.IncrementDialogues(player.ID)
+func (h *WebSocketHandler) persistChatResult(session *agent.Session, player *database.Player, msg *websocket.Message,
+	userMessage, reply string, stats *agent.LLMStats) {
 
-	// 保存对话记录（包含 LLM 统计信息和工具使用记录）
+	if err := h.playerRepo.IncrementDialogues(player.ID); err != nil {
+		h.logger.Error("Failed to increment dialogues", "error", err, "player_id", player.ID)
+	}
+
+	h.saveConversation(session, player, msg, userMessage, reply, stats)
+	h.saveAuditLog(session, player, msg, userMessage, reply, stats)
+
+	observability.WebSocketMessagesTotal.WithLabelValues(string(websocket.MessageTypeStreamEvent), "out").Inc()
+}
+
+func (h *WebSocketHandler) saveConversation(session *agent.Session, player *database.Player, msg *websocket.Message,
+	userMessage, reply string, stats *agent.LLMStats) {
+
 	conv := &database.Conversation{
 		ID:          uuid.New().String(),
 		PlayerID:    player.ID,
 		TenantID:    msg.TenantID,
 		SessionID:   session.ID,
-		UserMessage: payload.Message,
-		AIMessage:   fullReply.String(),
+		UserMessage: userMessage,
+		AIMessage:   reply,
 		Emotion:     stats.Model, // 临时使用，实际应该从上下文获取
 		ToolsUsed:   database.JSON{Data: stats.ToolsUsed},
 		LLMModel:    stats.Model,
@@ -342,42 +398,43 @@ func (h *WebSocketHandler) handleChatMessage(client *websocket.Client, msg *webs
 	if err := h.convRepo.Create(conv); err != nil {
 		h.logger.Error("Failed to create conversation", "error", err)
 	}
+}
 
-	// 记录审计日志
+func (h *WebSocketHandler) saveAuditLog(session *agent.Session, player *database.Player, msg *websocket.Message,
+	userMessage, reply string, stats *agent.LLMStats) {
+
 	if h.auditRepo == nil {
 		h.logger.Error("auditRepo is nil, cannot create audit log")
-	} else {
-		auditLog := &database.AuditLog{
-			ID:             uuid.New().String(),
-			TenantID:       msg.TenantID,
-			PlayerID:       player.ID,
-			Action:         "chat",
-			RequestPayload: database.JSON{Data: map[string]string{"message": payload.Message}},
-			ResponsePayload: database.JSON{Data: map[string]interface{}{
-				"reply":       fullReply.String(),
-				"model":       stats.Model,
-				"totalTokens": stats.TotalTokens,
-				"latencyMs":   stats.LatencyMs,
-				"cost":        stats.Cost,
-				"cacheHit":    stats.CacheHit,
-			}},
-			Status:    "success",
-			LatencyMs: int(stats.LatencyMs),
-			CreatedAt: time.Now(),
-		}
-
-		if err := h.auditRepo.Create(auditLog); err != nil {
-			h.logger.Error("Failed to create audit log", "error", err, "auditId", auditLog.ID)
-		}
+		return
 	}
 
-	// 记录发出的消息指标
-	observability.WebSocketMessagesTotal.WithLabelValues(string(websocket.MessageTypeStreamEvent), "out").Inc()
+	auditLog := &database.AuditLog{
+		ID:             uuid.New().String(),
+		TenantID:       msg.TenantID,
+		PlayerID:       player.ID,
+		Action:         "chat",
+		RequestPayload: database.JSON{Data: map[string]string{"message": userMessage}},
+		ResponsePayload: database.JSON{Data: map[string]interface{}{
+			"reply":       reply,
+			"model":       stats.Model,
+			"totalTokens": stats.TotalTokens,
+			"latencyMs":   stats.LatencyMs,
+			"cost":        stats.Cost,
+			"cacheHit":    stats.CacheHit,
+		}},
+		Status:    "success",
+		LatencyMs: int(stats.LatencyMs),
+		CreatedAt: time.Now(),
+	}
+
+	if err := h.auditRepo.Create(auditLog); err != nil {
+		h.logger.Error("Failed to create audit log", "error", err, "auditId", auditLog.ID)
+	}
 }
 
 // handlePing 处理心跳
 func (h *WebSocketHandler) handlePing(client *websocket.Client, msg *websocket.Message) {
-	pongMsg, _ := websocket.NewMessage(
+	pongMsg, err := websocket.NewMessage(
 		websocket.MessageTypePong,
 		msg.RequestID,
 		msg.TenantID,
@@ -385,10 +442,11 @@ func (h *WebSocketHandler) handlePing(client *websocket.Client, msg *websocket.M
 			ServerTime: time.Now().UnixMilli(),
 		},
 	)
-	_ = client.SendMessage(pongMsg)
-}
-
-// isClientValid 检查客户端是否仍然有效（channel 未关闭）
-func (h *WebSocketHandler) isClientValid(client *websocket.Client) bool {
-	return client.IsValid()
+	if err != nil {
+		h.logger.Error("Failed to create pong message", "error", err)
+		return
+	}
+	if err := client.SendMessage(pongMsg); err != nil {
+		h.logger.Error("Failed to send pong message", "error", err)
+	}
 }
