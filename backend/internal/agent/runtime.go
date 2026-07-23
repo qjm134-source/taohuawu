@@ -23,6 +23,25 @@ import (
 	"github.com/watertown/guide/pkg/utils"
 )
 
+const (
+	defaultTemperature         float32 = 0.7
+	welcomeMaxTokens           int     = 500
+	chatMaxTokens              int     = 300
+	defaultModelName                   = "unknown"
+	finishReasonStop                   = "stop"
+	defaultSimilarityThreshold         = 0.85
+
+	// 上下文构建相关
+	tokenThreshold     = 4096
+	keepRecentMessages = 6
+	minRecentMessages  = 2
+
+	// channel 缓冲
+	streamEventBuffer = 100
+	cacheHitBuffer    = 2
+	statsBufferSize   = 1
+)
+
 // LLMStats LLM 调用统计信息
 type LLMStats struct {
 	Model        string
@@ -37,8 +56,7 @@ type LLMStats struct {
 
 // Runtime Agent 运行时
 type Runtime struct {
-	llmAdapter      llm.Adapter
-	fallbackAdapter llm.Adapter
+	llm             *llmCaller
 	toolRegistry    *tools.ToolRegistry
 	sessionManager  *SessionManager
 	optimizer       *cost.Optimizer
@@ -52,6 +70,54 @@ type Runtime struct {
 	// inflightWelcome 防止同一个 player 并发触发 HandleWelcome，
 	// value 是 chan struct{}，第一个请求 close channel，后续请求等待。
 	inflightWelcome sync.Map // playerID → chan struct{}
+}
+
+// llmCaller 封装主 LLM 适配器与 fallback 适配器的调用逻辑。
+type llmCaller struct {
+	primary    llm.Adapter
+	fallback   llm.Adapter
+	llmTimeout time.Duration
+	logger     logging.Logger
+}
+
+func newLLMCaller(primary, fallback llm.Adapter, llmTimeout time.Duration, logger logging.Logger) *llmCaller {
+	return &llmCaller{
+		primary:    primary,
+		fallback:   fallback,
+		llmTimeout: llmTimeout,
+		logger:     logger,
+	}
+}
+
+// chat 先尝试主适配器，失败或不可用时回退到 fallback。
+func (c *llmCaller) chat(ctx context.Context, messages []*eino_schema.Message, temperature float32, maxTokens int) (*eino_schema.Message, *llm.ChatUsage, error) {
+	if !c.primary.IsHealthy() {
+		c.logger.Warn("Primary LLM unhealthy, using fallback")
+		return c.fallback.Chat(ctx, messages, llm.WithTemperature(temperature), llm.WithMaxTokens(maxTokens))
+	}
+
+	llmCtx, cancel := utils.WithTimeoutFrom(ctx, c.llmTimeout)
+	defer cancel()
+
+	msg, usage, err := c.primary.Chat(llmCtx, messages, llm.WithTemperature(temperature), llm.WithMaxTokens(maxTokens))
+	if err != nil {
+		return c.fallback.Chat(ctx, messages, llm.WithTemperature(temperature), llm.WithMaxTokens(maxTokens))
+	}
+	return msg, usage, nil
+}
+
+// streamChat 先尝试主适配器流式调用，失败或不可用时回退到 fallback。
+func (c *llmCaller) streamChat(ctx context.Context, messages []*eino_schema.Message, temperature float32, maxTokens int) (llm.EventStream, error) {
+	if !c.primary.IsHealthy() {
+		c.logger.Warn("Primary LLM unhealthy, using fallback")
+		return c.fallback.StreamChat(ctx, messages, llm.WithTemperature(temperature), llm.WithMaxTokens(maxTokens))
+	}
+
+	stream, err := c.primary.StreamChat(ctx, messages, llm.WithTemperature(temperature), llm.WithMaxTokens(maxTokens))
+	if err != nil {
+		return c.fallback.StreamChat(ctx, messages, llm.WithTemperature(temperature), llm.WithMaxTokens(maxTokens))
+	}
+	return stream, nil
 }
 
 // Config Agent 配置
@@ -74,8 +140,7 @@ func NewRuntime(
 	logger logging.Logger,
 ) *Runtime {
 	return &Runtime{
-		llmAdapter:      llmAdapter,
-		fallbackAdapter: fallbackAdapter,
+		llm:             newLLMCaller(llmAdapter, fallbackAdapter, config.LLMTimeout, logger),
 		toolRegistry:    toolRegistry,
 		sessionManager:  sessionManager,
 		optimizer:       optimizer,
@@ -140,7 +205,7 @@ func (r *Runtime) handleWelcomeInternal(ctx context.Context, session *Session, c
 	prompt := BuildWelcomePrompt(session.Nickname)
 	messages := r.buildWelcomeMessages(prompt)
 
-	msg, usage, err := r.callLLMForWelcome(ctx, messages)
+	msg, usage, err := r.llm.chat(ctx, messages, defaultTemperature, welcomeMaxTokens)
 	if err != nil {
 		return r.handleWelcomeError(ctx, startTime, cacheKey, session, err)
 	}
@@ -153,22 +218,6 @@ func (r *Runtime) buildWelcomeMessages(prompt string) []*eino_schema.Message {
 		{Role: eino_schema.System, Content: SystemPrompt},
 		{Role: eino_schema.User, Content: prompt},
 	}
-}
-
-func (r *Runtime) callLLMForWelcome(ctx context.Context, messages []*eino_schema.Message) (*eino_schema.Message, *llm.ChatUsage, error) {
-	if r.llmAdapter.IsHealthy() {
-		llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
-		msg, usage, err := r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
-		llmCancel()
-
-		if err != nil {
-			return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
-		}
-		return msg, usage, nil
-	}
-
-	r.logger.Warn("[HandleWelcome] Primary LLM unhealthy, using fallback")
-	return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(500))
 }
 
 func (r *Runtime) handleWelcomeError(ctx context.Context, startTime time.Time,
@@ -234,15 +283,18 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	emotionStr := r.detectEmotion(ctx, message)
 
 	cacheKey := session.ID + "_" + message
-	if cached, hit := r.checkExactCache(ctx, span, cacheKey); hit {
-		return r.handleCacheHitSync(ctx, cached, emotionStr)
-	}
-
-	if cached, hit := r.checkSimilarityCache(ctx, span, message); hit {
-		return r.handleCacheHitSync(ctx, cached, emotionStr)
+	if cached, hit := r.lookupCache(ctx, span, cacheKey, message); hit {
+		return r.handleCacheHitSync(cached, emotionStr)
 	}
 
 	return r.callLLMAndProcess(ctx, span, session, message, emotionStr, cacheKey)
+}
+
+func (r *Runtime) lookupCache(ctx context.Context, span trace.Span, cacheKey, message string) (string, bool) {
+	if cached, hit := r.checkExactCache(ctx, span, cacheKey); hit {
+		return cached, true
+	}
+	return r.checkSimilarityCache(ctx, span, message)
 }
 
 func (r *Runtime) checkExactCache(ctx context.Context, span trace.Span, cacheKey string) (string, bool) {
@@ -252,12 +304,10 @@ func (r *Runtime) checkExactCache(ctx context.Context, span trace.Span, cacheKey
 	if cached, hit := r.optimizer.GetCache(cacheKey); hit {
 		markCacheHit(span)
 		observability.CacheHitsTotal.WithLabelValues("exact").Inc()
-		r.recordCacheHit()
 		return cached, true
 	}
 
 	observability.CacheMissesTotal.WithLabelValues("exact").Inc()
-	r.recordCacheMiss()
 	return "", false
 }
 
@@ -265,19 +315,17 @@ func (r *Runtime) checkSimilarityCache(ctx context.Context, span trace.Span, mes
 	_, similaritySpan := observability.StartChildSpan(ctx, "Cache.SimilarityCheck")
 	defer observability.EndChildSpan(ctx, similaritySpan)
 
-	if cached, hit := r.optimizer.CheckSimilarity(ctx, message, 0.85); hit {
+	if cached, hit := r.optimizer.CheckSimilarity(ctx, message, defaultSimilarityThreshold); hit {
 		markCacheHit(span)
 		observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
-		r.recordCacheHit()
 		return cached, true
 	}
 
 	observability.CacheMissesTotal.WithLabelValues("similarity").Inc()
-	r.recordCacheMiss()
 	return "", false
 }
 
-func (r *Runtime) handleCacheHitSync(ctx context.Context, cached, emotionStr string) (string, string, *LLMStats, error) {
+func (r *Runtime) handleCacheHitSync(cached, emotionStr string) (string, string, *LLMStats, error) {
 	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 	return cached, emotionStr, &LLMStats{CacheHit: true}, nil
 }
@@ -287,7 +335,7 @@ func (r *Runtime) callLLMAndProcess(ctx context.Context, span trace.Span,
 
 	messages := r.buildContextMessages(session, message, emotionStr)
 
-	msg, usage, err := r.callLLM(ctx, messages)
+	msg, usage, err := r.llm.chat(ctx, messages, defaultTemperature, chatMaxTokens)
 	if err != nil {
 		r.logger.Error("[HandleChat] All LLM calls failed", "error", err)
 		observability.AgentRequestsTotal.WithLabelValues("chat", "error").Inc()
@@ -295,29 +343,10 @@ func (r *Runtime) callLLMAndProcess(ctx context.Context, span trace.Span,
 		return "", "", nil, fmt.Errorf("failed to get response: %w", err)
 	}
 
-	return r.processLLMResponse(ctx, span, session, message, emotionStr, cacheKey, msg, usage)
+	return r.processLLMResponse(span, session, message, emotionStr, cacheKey, msg, usage)
 }
 
-func (r *Runtime) callLLM(ctx context.Context, messages []*eino_schema.Message) (*eino_schema.Message, *llm.ChatUsage, error) {
-	startTime := time.Now()
-
-	if r.llmAdapter.IsHealthy() {
-		llmCtx, llmCancel := utils.WithTimeoutFrom(ctx, r.config.LLMTimeout)
-		msg, usage, err := r.llmAdapter.Chat(llmCtx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-		llmCancel()
-
-		if err != nil {
-			return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-		}
-		_ = startTime
-		return msg, usage, nil
-	}
-
-	r.logger.Warn("[HandleChat] Primary LLM unhealthy, using fallback")
-	return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-}
-
-func (r *Runtime) processLLMResponse(ctx context.Context, span trace.Span,
+func (r *Runtime) processLLMResponse(span trace.Span,
 	session *Session, message, emotionStr, cacheKey string, msg *eino_schema.Message, usage *llm.ChatUsage) (string, string, *LLMStats, error) {
 
 	startTime := time.Now()
@@ -382,7 +411,7 @@ func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, messag
 	messages := r.buildContextMessagesWithSpan(ctx, session, message, emotionStr)
 
 	llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
-	stream, err := r.callLLMStream(llmCtx, messages)
+	stream, err := r.llm.streamChat(llmCtx, messages, defaultTemperature, chatMaxTokens)
 	if err != nil {
 		return r.handleLLMError(ctx, span, llmSpan, err)
 	}
@@ -408,11 +437,10 @@ func (r *Runtime) handleCacheHit(ctx context.Context, span trace.Span, cached st
 	markCacheHit(span)
 	observability.AddEvent(ctx, "cache_hit", attribute.String("type", "check"))
 	observability.CacheHitsTotal.WithLabelValues("check").Inc()
-	r.recordCacheHit()
 	observability.EndSpanWithDuration(ctx, span)
 	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 
-	eventChan := make(chan *llm.StreamEvent, 2)
+	eventChan := make(chan *llm.StreamEvent, cacheHitBuffer)
 	eventChan <- &llm.StreamEvent{
 		Type:    llm.StreamEventTypeChunk,
 		Content: cached,
@@ -423,7 +451,7 @@ func (r *Runtime) handleCacheHit(ctx context.Context, span trace.Span, cached st
 	}
 	close(eventChan)
 
-	statsChan := make(chan *LLMStats, 1)
+	statsChan := make(chan *LLMStats, statsBufferSize)
 	statsChan <- &LLMStats{CacheHit: true}
 	close(statsChan)
 
@@ -434,23 +462,7 @@ func (r *Runtime) buildContextMessagesWithSpan(ctx context.Context, session *Ses
 	_, span := observability.StartChildSpan(ctx, "Context.Build")
 	defer observability.EndChildSpan(ctx, span)
 	observability.CacheMissesTotal.WithLabelValues("check").Inc()
-	r.recordCacheMiss()
 	return r.buildContextMessages(session, message, emotionStr)
-}
-
-func (r *Runtime) callLLMStream(ctx context.Context, messages []*eino_schema.Message) (llm.EventStream, error) {
-	isHealthy := r.llmAdapter.IsHealthy()
-
-	if isHealthy {
-		stream, err := r.llmAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-		if err != nil {
-			return r.fallbackAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-		}
-		return stream, nil
-	}
-
-	r.logger.Warn("[HandleChatStream] Primary LLM unhealthy, using fallback")
-	return r.fallbackAdapter.StreamChat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
 }
 
 func (r *Runtime) handleLLMError(ctx context.Context, span, llmSpan trace.Span, err error) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
@@ -465,8 +477,8 @@ func (r *Runtime) handleLLMError(ctx context.Context, span, llmSpan trace.Span, 
 func (r *Runtime) processStreamAsync(ctx context.Context, span, llmSpan trace.Span,
 	stream llm.EventStream, session *Session, message, emotionStr, cacheKey string, startTime time.Time) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
 
-	eventChan := make(chan *llm.StreamEvent, 100)
-	statsChan := make(chan *LLMStats, 1)
+	eventChan := make(chan *llm.StreamEvent, streamEventBuffer)
+	statsChan := make(chan *LLMStats, statsBufferSize)
 
 	go func() {
 		defer utils.RecoverWithCustomLogger("HandleChatStream", r.logger)
@@ -475,33 +487,40 @@ func (r *Runtime) processStreamAsync(ctx context.Context, span, llmSpan trace.Sp
 		defer stream.Close()
 		defer observability.EndSpanWithDuration(ctx, span)
 
-		r.processStreamEvents(ctx, stream, eventChan, statsChan,
+		r.processStream(ctx, stream, eventChan, statsChan,
 			session, message, emotionStr, cacheKey, startTime, span, llmSpan)
 	}()
 
 	return eventChan, statsChan, nil
 }
 
-func (r *Runtime) processStreamEvents(ctx context.Context, stream llm.EventStream,
+func (r *Runtime) processStream(ctx context.Context, stream llm.EventStream,
 	eventChan chan<- *llm.StreamEvent, statsChan chan<- *LLMStats,
 	session *Session, message, emotionStr, cacheKey string, startTime time.Time, span, llmSpan trace.Span) {
 
 	var fullReply strings.Builder
 	stats := &LLMStats{CacheHit: false}
 
+	setSpanInput(span, message)
+	finishReason, chunkCount := r.consumeStream(ctx, stream, eventChan, &fullReply, stats)
+	r.finalizeStream(ctx, span, llmSpan, eventChan, stats, startTime, chunkCount, finishReason, fullReply.String(), session, message, emotionStr, cacheKey)
+
+	statsChan <- stats
+	close(statsChan)
+}
+
+func (r *Runtime) consumeStream(ctx context.Context, stream llm.EventStream,
+	eventChan chan<- *llm.StreamEvent, fullReply *strings.Builder, stats *LLMStats) (string, int) {
+
 	chunkCount := 0
 	var finishReason string
 	var streamSpan trace.Span
 
-	setSpanInput(span, message)
-
 	for {
 		event, err := stream.Recv()
-
 		if errors.Is(err, io.EOF) {
 			break
 		}
-
 		if err != nil {
 			r.logger.Error("[HandleChatStream] Stream recv error", "error", err)
 			_, errorSpan := observability.StartChildSpan(ctx, "LLM.StreamError")
@@ -509,42 +528,43 @@ func (r *Runtime) processStreamEvents(ctx context.Context, stream llm.EventStrea
 			observability.EndChildSpan(ctx, errorSpan)
 			break
 		}
-
 		if event == nil {
 			continue
 		}
 
-		if event.Type == llm.StreamEventTypeChunk {
+		switch event.Type {
+		case llm.StreamEventTypeChunk:
 			if chunkCount == 0 {
 				_, streamSpan = observability.StartChildSpan(ctx, "LLM.TokenStreaming")
 				defer observability.EndChildSpan(ctx, streamSpan)
 			}
 			chunkCount++
-
-			if reason := r.updateStatsFromChunk(event, &fullReply, stats); reason != "" {
+			if reason := r.updateStatsFromChunk(event, fullReply, stats); reason != "" {
 				finishReason = reason
 			}
-
 			select {
 			case eventChan <- event:
 			case <-ctx.Done():
-				return
+				return finishReason, chunkCount
 			}
-		} else if event.Type == llm.StreamEventTypeAction && event.ActionType == "exit" {
-			r.updateStatsFromExitEvent(event, stats)
+		case llm.StreamEventTypeAction:
+			if event.ActionType == "exit" {
+				r.updateStatsFromExitEvent(event, stats)
+			}
 		}
 	}
+	return finishReason, chunkCount
+}
 
-	r.sendFinishEvent(eventChan, ctx, finishReason, fullReply.Len() > 0, stats.Model)
+func (r *Runtime) finalizeStream(ctx context.Context, span, llmSpan trace.Span, eventChan chan<- *llm.StreamEvent,
+	stats *LLMStats, startTime time.Time, chunkCount int, finishReason, reply string,
+	session *Session, message, emotionStr, cacheKey string) {
+
+	r.sendFinishEvent(eventChan, ctx, finishReason, reply != "", stats.Model)
 	r.updateLLMStatsAndMetrics(ctx, llmSpan, span, stats, startTime, chunkCount, finishReason)
-	r.updateSession(ctx, session, message, emotionStr, fullReply.String())
-	r.writeCache(ctx, cacheKey, fullReply.String())
-
-	setSpanOutput(span, fullReply.String())
-
-	statsChan <- stats
-	close(statsChan)
-
+	r.updateSession(ctx, session, message, emotionStr, reply)
+	r.writeCache(ctx, cacheKey, reply)
+	setSpanOutput(span, reply)
 }
 
 func (r *Runtime) updateStatsFromChunk(event *llm.StreamEvent, fullReply *strings.Builder, stats *LLMStats) string {
@@ -677,184 +697,166 @@ func (r *Runtime) writeCache(llmCtx context.Context, cacheKey, value string) {
 		attribute.Int("value_len", len(value)))
 }
 
-// handleNonStreamChat 处理非流式调用，并模拟流式响应
-func (r *Runtime) handleNonStreamChat(ctx context.Context, messages []*eino_schema.Message, contentChan chan string, fullReply *strings.Builder, stats *LLMStats) {
-	msg, usage, err := r.callLLMNonStreaming(ctx, messages)
-	if err != nil || msg == nil {
-		return
-	}
-
-	r.updateStatsFromUsage(stats, usage)
-	r.streamContentToChan(contentChan, fullReply, msg.Content, stats)
-}
-
-func (r *Runtime) callLLMNonStreaming(ctx context.Context, messages []*eino_schema.Message) (*eino_schema.Message, *llm.ChatUsage, error) {
-	if r.llmAdapter.IsHealthy() {
-		msg, usage, err := r.llmAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-		if err != nil {
-			return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-		}
-		return msg, usage, nil
-	}
-
-	return r.fallbackAdapter.Chat(ctx, messages, llm.WithTemperature(0.7), llm.WithMaxTokens(300))
-}
-
-func (r *Runtime) updateStatsFromUsage(stats *LLMStats, usage *llm.ChatUsage) {
-	if usage == nil {
-		return
-	}
-	stats.Model = usage.Model
-	stats.InputTokens = usage.PromptTokens
-	stats.OutputTokens = usage.CompletionTokens
-	stats.TotalTokens = usage.TotalTokens
-}
-
-func (r *Runtime) streamContentToChan(contentChan chan string, fullReply *strings.Builder, content string, stats *LLMStats) {
-	if content != "" {
-		for _, char := range content {
-			contentChan <- string(char)
-			fullReply.WriteRune(char)
-		}
-	} else {
-		contentChan <- ""
-	}
-}
-
 // buildContextMessages 构建 LLM 请求的消息上下文。
 // 优先使用 LLM 摘要替代硬截断：当历史消息预估 Token 数超过阈值时，
 // 将早期消息压缩为一段摘要文本，保留最近的 N 条原始消息。
 func (r *Runtime) buildContextMessages(session *Session, currentMessage string, emotion string) []*eino_schema.Message {
 	allMessages := session.GetMessages(0)
-
 	if len(allMessages) == 0 {
-		return []*eino_schema.Message{
-			{Role: eino_schema.System, Content: SystemPrompt},
-			{Role: eino_schema.User, Content: fmt.Sprintf("[情绪:%s] %s", emotion, currentMessage)},
-		}
+		return r.buildInitialMessages(currentMessage, emotion)
 	}
 
+	if r.estimateMessagesTokens(allMessages, currentMessage) <= tokenThreshold {
+		return r.buildFullHistoryMessages(allMessages, currentMessage, emotion)
+	}
+	return r.buildSummarizedMessages(allMessages, currentMessage, emotion)
+}
+
+func (r *Runtime) buildInitialMessages(currentMessage, emotion string) []*eino_schema.Message {
+	return []*eino_schema.Message{
+		{Role: eino_schema.System, Content: SystemPrompt},
+		{Role: eino_schema.User, Content: fmt.Sprintf("[情绪:%s] %s", emotion, currentMessage)},
+	}
+}
+
+func (r *Runtime) estimateMessagesTokens(messages []Message, currentMessage string) int {
 	summarizer := cost.GetSummarizer()
-
-	totalTokens := 0
-	for _, msg := range allMessages {
-		if summarizer != nil {
-			totalTokens += summarizer.EstimateTokens(msg.Content)
-		} else {
-			totalTokens += len([]rune(msg.Content)) * 2
-		}
+	total := 0
+	for _, msg := range messages {
+		total += estimateContentTokens(summarizer, msg.Content)
 	}
+	total += estimateContentTokens(summarizer, currentMessage)
+	return total
+}
+
+func estimateContentTokens(summarizer cost.Summarizer, content string) int {
 	if summarizer != nil {
-		totalTokens += summarizer.EstimateTokens(currentMessage)
-	} else {
-		totalTokens += len([]rune(currentMessage)) * 2
+		return summarizer.EstimateTokens(content)
 	}
+	return len([]rune(content)) * 2
+}
 
-	const tokenThreshold = 4096
-
-	if totalTokens <= tokenThreshold {
-		messages := []*eino_schema.Message{{Role: eino_schema.System, Content: SystemPrompt}}
-		for _, msg := range allMessages {
-			if msg.Content == "" {
-				continue
-			}
-			role := eino_schema.User
-			if msg.Role == "assistant" {
-				role = eino_schema.Assistant
-			}
-			messages = append(messages, &eino_schema.Message{
-				Role:    role,
-				Content: msg.Content,
-			})
+func (r *Runtime) buildFullHistoryMessages(messages []Message, currentMessage, emotion string) []*eino_schema.Message {
+	result := []*eino_schema.Message{{Role: eino_schema.System, Content: SystemPrompt}}
+	for _, msg := range messages {
+		if msg.Content == "" {
+			continue
 		}
-		messages = append(messages, &eino_schema.Message{
-			Role:    eino_schema.User,
-			Content: fmt.Sprintf("[情绪:%s] %s", emotion, currentMessage),
-		})
-		return messages
-	}
-
-	keepRecent := 6
-	if len(allMessages) <= keepRecent {
-		keepRecent = len(allMessages) / 2
-		if keepRecent < 2 {
-			keepRecent = 2
-		}
-	}
-
-	recentMessages := allMessages[len(allMessages)-keepRecent:]
-	oldMessages := allMessages[:len(allMessages)-keepRecent]
-
-	messages := []*eino_schema.Message{{Role: eino_schema.System, Content: SystemPrompt}}
-
-	if summarizer != nil && len(oldMessages) > 0 {
-		oldText := messagesToText(oldMessages)
-		existingSummary := r.summaryCache
-		var newSummary string
-		var err error
-
-		if existingSummary != "" {
-			newSummary, err = summarizer.IncrementalSummarize(context.Background(), existingSummary, oldText)
-		} else {
-			newSummary, err = summarizer.Summarize(context.Background(), oldText)
-		}
-
-		if err == nil && newSummary != "" {
-			r.summaryCache = newSummary
-			messages = append(messages, &eino_schema.Message{
-				Role:    eino_schema.System,
-				Content: "[对话历史摘要] " + newSummary,
-			})
-		} else {
-			messages = append(messages, &eino_schema.Message{
-				Role:    eino_schema.System,
-				Content: fmt.Sprintf("[之前有%d条对话，以下是最近的对话内容]", len(oldMessages)),
-			})
-		}
-	} else if len(oldMessages) > 0 {
-		messages = append(messages, &eino_schema.Message{
-			Role:    eino_schema.System,
-			Content: fmt.Sprintf("[之前有%d条对话，以下是最近的对话内容]", len(oldMessages)),
+		result = append(result, &eino_schema.Message{
+			Role:    toEinoRole(msg.Role),
+			Content: msg.Content,
 		})
 	}
+	result = append(result, &eino_schema.Message{
+		Role:    eino_schema.User,
+		Content: fmt.Sprintf("[情绪:%s] %s", emotion, currentMessage),
+	})
+	return result
+}
+
+func toEinoRole(role string) eino_schema.RoleType {
+	if role == "assistant" {
+		return eino_schema.Assistant
+	}
+	return eino_schema.User
+}
+
+func (r *Runtime) buildSummarizedMessages(messages []Message, currentMessage, emotion string) []*eino_schema.Message {
+	keepRecent := recentMessageCount(len(messages))
+	recentMessages := messages[len(messages)-keepRecent:]
+	oldMessages := messages[:len(messages)-keepRecent]
+
+	result := []*eino_schema.Message{{Role: eino_schema.System, Content: SystemPrompt}}
+	result = append(result, r.buildSummaryMessage(oldMessages)...)
 
 	for _, msg := range recentMessages {
 		if msg.Content == "" {
 			continue
 		}
-		role := eino_schema.User
-		if msg.Role == "assistant" {
-			role = eino_schema.Assistant
-		}
-		messages = append(messages, &eino_schema.Message{
-			Role:    role,
+		result = append(result, &eino_schema.Message{
+			Role:    toEinoRole(msg.Role),
 			Content: msg.Content,
 		})
 	}
 
-	messages = append(messages, &eino_schema.Message{
+	result = append(result, &eino_schema.Message{
 		Role:    eino_schema.User,
 		Content: fmt.Sprintf("[情绪:%s] %s", emotion, currentMessage),
 	})
+	return result
+}
 
-	return messages
+func recentMessageCount(total int) int {
+	if total <= keepRecentMessages {
+		count := total / 2
+		if count < minRecentMessages {
+			return minRecentMessages
+		}
+		return count
+	}
+	return keepRecentMessages
+}
+
+func (r *Runtime) buildSummaryMessage(oldMessages []Message) []*eino_schema.Message {
+	if len(oldMessages) == 0 {
+		return nil
+	}
+
+	summary := r.summarizeMessages(context.Background(), oldMessages)
+	if summary != "" {
+		return []*eino_schema.Message{{
+			Role:    eino_schema.System,
+			Content: "[对话历史摘要] " + summary,
+		}}
+	}
+	return []*eino_schema.Message{{
+		Role:    eino_schema.System,
+		Content: fmt.Sprintf("[之前有%d条对话，以下是最近的对话内容]", len(oldMessages)),
+	}}
+}
+
+func (r *Runtime) summarizeMessages(ctx context.Context, oldMessages []Message) string {
+	summarizer := cost.GetSummarizer()
+	if summarizer == nil {
+		return ""
+	}
+
+	oldText := messagesToText(oldMessages)
+	var summary string
+	var err error
+	if r.summaryCache != "" {
+		summary, err = summarizer.IncrementalSummarize(ctx, r.summaryCache, oldText)
+	} else {
+		summary, err = summarizer.Summarize(ctx, oldText)
+	}
+	if err != nil {
+		return ""
+	}
+
+	r.summaryCache = summary
+	return summary
 }
 
 // messagesToText 将 Session 消息列表转换为纯文本。
 func messagesToText(msgs []Message) string {
 	var sb strings.Builder
 	for _, msg := range msgs {
-		prefix := "[用户] "
-		if msg.Role == "assistant" {
-			prefix = "[助手] "
-		} else if msg.Role == "system" {
-			prefix = "[系统] "
-		}
-		sb.WriteString(prefix)
+		sb.WriteString(rolePrefix(msg.Role))
 		sb.WriteString(msg.Content)
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+func rolePrefix(role string) string {
+	switch role {
+	case "assistant":
+		return "[助手] "
+	case "system":
+		return "[系统] "
+	default:
+		return "[用户] "
+	}
 }
 
 // markCacheHit 在 span 上标记缓存命中。
@@ -909,14 +911,6 @@ func (r *Runtime) recordLLMMetrics(model, status string, durationSec float64, in
 	observability.LLMRequestTokens.WithLabelValues(model).Add(float64(inputTokens))
 	observability.LLMCompletionTokens.WithLabelValues(model).Add(float64(outputTokens))
 	observability.CostTotal.WithLabelValues(model).Add(costAmount)
-}
-
-// recordCacheHit 记录缓存命中（仅用于日志，指标通过 CacheHitsTotal Counter 记录）
-func (r *Runtime) recordCacheHit() {
-}
-
-// recordCacheMiss 记录缓存未命中（仅用于日志，指标通过 CacheMissesTotal Counter 记录）
-func (r *Runtime) recordCacheMiss() {
 }
 
 // GetSession 获取会话
