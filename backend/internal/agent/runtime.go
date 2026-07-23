@@ -268,7 +268,7 @@ func (r *Runtime) HandleChat(ctx context.Context, session *Session, message stri
 	ctx, cancel := utils.WithTimeoutFrom(ctx, r.config.Timeout)
 	defer cancel()
 
-	ctx = context.WithValue(ctx, "session_id", session.ID)
+	ctx = llm.ContextWithSessionID(ctx, session.ID)
 
 	ctx, span := observability.StartSpanWithStartTime(ctx, "Agent.HandleChat",
 		trace.WithAttributes(
@@ -390,7 +390,7 @@ func (r *Runtime) processLLMResponse(span trace.Span,
 func (r *Runtime) HandleChatStream(ctx context.Context, session *Session, message string) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
 	startTime := time.Now()
 
-	ctx = context.WithValue(ctx, "session_id", session.ID)
+	ctx = llm.ContextWithSessionID(ctx, session.ID)
 
 	ctx, span := observability.StartSpanWithStartTime(ctx, "Agent.HandleChatStream",
 		trace.WithAttributes(
@@ -720,7 +720,7 @@ func (r *Runtime) buildInitialMessages(currentMessage, emotion string) []*eino_s
 }
 
 func (r *Runtime) estimateMessagesTokens(messages []Message, currentMessage string) int {
-	summarizer := cost.GetSummarizer()
+	summarizer := r.optimizer.GetSummarizer()
 	total := 0
 	for _, msg := range messages {
 		total += estimateContentTokens(summarizer, msg.Content)
@@ -816,7 +816,7 @@ func (r *Runtime) buildSummaryMessage(oldMessages []Message) []*eino_schema.Mess
 }
 
 func (r *Runtime) summarizeMessages(ctx context.Context, oldMessages []Message) string {
-	summarizer := cost.GetSummarizer()
+	summarizer := r.optimizer.GetSummarizer()
 	if summarizer == nil {
 		return ""
 	}

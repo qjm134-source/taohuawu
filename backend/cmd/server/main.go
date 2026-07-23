@@ -67,11 +67,6 @@ func main() {
 	logger.Info("Knowledge base loaded", "questions", len(kb.Categories))
 
 	// 初始化 OpenTelemetry（包含 Langfuse OTLP 导出）
-	fmt.Fprintf(os.Stderr, "[Langfuse] Config: Enabled=%v PublicKey=%q SecretKey=%q\n",
-		cfg.Observability.Langfuse.Enabled,
-		cfg.Observability.Langfuse.PublicKey,
-		cfg.Observability.Langfuse.SecretKey)
-
 	tp, err := observability.InitTracing(observability.ObservabilityConfig{
 		Enabled:     cfg.Observability.Enabled,
 		ServiceName: cfg.Observability.ServiceName,
@@ -84,7 +79,7 @@ func main() {
 			PublicKey: cfg.Observability.Langfuse.PublicKey,
 			SecretKey: cfg.Observability.Langfuse.SecretKey,
 		},
-	})
+	}, logger)
 	if err != nil {
 		logger.Warn("Failed to initialize tracing", "error", err)
 	} else {

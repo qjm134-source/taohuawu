@@ -9,6 +9,23 @@ import (
 	"github.com/watertown/guide/pkg/logging"
 )
 
+const (
+	// defaultPricingModel 是模型未找到定价时的 fallback 模型。
+	defaultPricingModel = "gpt-3.5-turbo"
+
+	// defaultSimilarityThreshold 是语义缓存默认相似度阈值。
+	defaultSimilarityThreshold = 0.85
+
+	// defaultCacheMaxEntries 是默认最大缓存条目数。
+	defaultCacheMaxEntries = 1000
+
+	// fallbackRecentMessages 是降级压缩时保留的最近消息数。
+	fallbackRecentMessages = 3
+
+	// llmSummaryRecentMessages 是 LLM 摘要时保留的最近消息数。
+	llmSummaryRecentMessages = 2
+)
+
 // 模型定价（每 1K tokens，单位：美元）
 var modelPricing = map[string]struct {
 	Input  float64
@@ -31,12 +48,11 @@ var modelPricing = map[string]struct {
 	"glm-4-flash":       {Input: 0.0001, Output: 0.0001},
 }
 
-// CalculateCost 计算 LLM 调用成本
+// CalculateCost 计算 LLM 调用成本（美元）。
 func CalculateCost(model string, inputTokens, outputTokens int) float64 {
 	pricing, ok := modelPricing[model]
 	if !ok {
-		// 默认使用较低的价格估算
-		pricing = modelPricing["gpt-3.5-turbo"]
+		pricing = modelPricing[defaultPricingModel]
 	}
 
 	inputCost := float64(inputTokens) / 1000 * pricing.Input
@@ -45,74 +61,70 @@ func CalculateCost(model string, inputTokens, outputTokens int) float64 {
 	return inputCost + outputCost
 }
 
-// Optimizer 成本优化器
+// Optimizer 成本优化器，负责缓存管理和对话摘要。
 type Optimizer struct {
 	cache        *LayeredCache
 	summary      *Summary
 	embeddingAPI EmbeddingAPI
+	summarizer   Summarizer
 	mu           sync.RWMutex
 }
 
-// Summary 摘要
+// Summary 摘要，维护一段可压缩的对话历史。
 type Summary struct {
 	maxMessages    int
 	tokenLimit     int
 	history        []Message
 	currentSummary string
+	summarizer     Summarizer
 	mu             sync.RWMutex
 }
 
 // Message 消息
+// Deprecated: 仅用于 Summary 内部表示，外部应使用 agent.Session.Message。
 type Message struct {
 	Role      string
 	Content   string
 	IsSummary bool
 }
 
-// Summarizer LLM摘要器接口
+// Summarizer LLM 摘要器接口
 type Summarizer interface {
 	Summarize(ctx context.Context, text string) (string, error)
 	IncrementalSummarize(ctx context.Context, existingSummary, newContent string) (string, error)
 	EstimateTokens(text string) int
 }
 
-// summarizer 全局摘要器
-var summarizer Summarizer
-
-// SetSummarizer 设置摘要器
-func SetSummarizer(s Summarizer) {
-	summarizer = s
-}
-
-// GetSummarizer 获取全局摘要器
-func GetSummarizer() Summarizer {
-	return summarizer
-}
-
 // NewOptimizer 创建优化器
-func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embeddingAPI EmbeddingAPI, logger logging.Logger) *Optimizer {
+func NewOptimizer(cacheTTL time.Duration, maxMessages, tokenLimit int, embeddingAPI EmbeddingAPI, summarizer Summarizer, logger logging.Logger) *Optimizer {
 	cacheConfig := CacheConfig{
 		Enabled:             true,
 		TTL:                 cacheTTL,
-		MaxEntries:          1000,
-		SimilarityThreshold: 0.85,
+		MaxEntries:          defaultCacheMaxEntries,
+		SimilarityThreshold: defaultSimilarityThreshold,
 	}
 
 	return &Optimizer{
 		cache:        NewLayeredCache(cacheConfig, embeddingAPI, logger),
-		summary:      NewSummary(maxMessages, tokenLimit),
+		summary:      NewSummary(maxMessages, tokenLimit, summarizer),
 		embeddingAPI: embeddingAPI,
+		summarizer:   summarizer,
 	}
+}
+
+// GetSummarizer 返回优化器持有的摘要器，供外部估算 token 或摘要使用。
+func (o *Optimizer) GetSummarizer() Summarizer {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.summarizer
 }
 
 // GetCache 获取缓存（包含语义匹配）
 func (o *Optimizer) GetCache(question string) (string, bool) {
-	// 先尝试精确匹配
 	if answer, ok := o.cache.Get(context.Background(), question, ""); ok {
 		return answer, true
 	}
 
-	// 如果有 embedding API，尝试语义匹配
 	if o.embeddingAPI != nil {
 		if answer, ok, _ := o.cache.GetWithSemantic(context.Background(), question, ""); ok {
 			return answer, true
@@ -153,12 +165,13 @@ func (o *Optimizer) CheckSimilarity(ctx context.Context, question string, thresh
 }
 
 // NewSummary 创建摘要
-func NewSummary(maxMessages, tokenLimit int) *Summary {
+func NewSummary(maxMessages, tokenLimit int, summarizer Summarizer) *Summary {
 	return &Summary{
 		maxMessages:    maxMessages,
 		tokenLimit:     tokenLimit,
 		history:        make([]Message, 0, maxMessages),
 		currentSummary: "",
+		summarizer:     summarizer,
 	}
 }
 
@@ -172,8 +185,7 @@ func (s *Summary) Add(role, content string) {
 		Content: content,
 	})
 
-	// 检查 Token 数量是否超过限制
-	if s.tokenLimit > 0 && summarizer != nil {
+	if s.tokenLimit > 0 && s.summarizer != nil {
 		totalTokens := s.calculateTotalTokens()
 		if totalTokens > s.tokenLimit {
 			s.compressWithLLM()
@@ -181,7 +193,6 @@ func (s *Summary) Add(role, content string) {
 		}
 	}
 
-	// 如果超过消息数量阈值，压缩历史
 	if len(s.history) >= s.maxMessages {
 		s.compress()
 	}
@@ -206,45 +217,33 @@ func (s *Summary) GetSummary() string {
 
 // calculateTotalTokens 计算总 Token 数
 func (s *Summary) calculateTotalTokens() int {
-	if summarizer == nil {
+	if s.summarizer == nil {
 		return 0
 	}
 	total := 0
 	for _, msg := range s.history {
-		total += summarizer.EstimateTokens(msg.Content)
+		total += s.summarizer.EstimateTokens(msg.Content)
 	}
 	return total
 }
 
 // compress 压缩历史（降级方案）
 func (s *Summary) compress() {
-	// 如果有摘要器，使用 LLM 压缩
-	if summarizer != nil {
+	if s.summarizer != nil {
 		s.compressWithLLM()
 		return
 	}
 
-	// 简单实现：保留最近的 3 条消息
-	if len(s.history) > 3 {
-		summary := Message{
-			Role:      "system",
-			Content:   "之前进行了一些对话，以下是最近的对话内容。",
-			IsSummary: true,
-		}
-
-		recent := s.history[len(s.history)-3:]
-		s.history = append([]Message{summary}, recent...)
-	}
+	s.compressFallback()
 }
 
 // compressWithLLM 使用 LLM 进行增量式摘要压缩
 func (s *Summary) compressWithLLM() {
-	if len(s.history) < 2 {
+	if len(s.history) < llmSummaryRecentMessages {
 		return
 	}
 
-	// 获取需要压缩的历史消息（保留最近2条作为上下文）
-	recentCount := 2
+	recentCount := llmSummaryRecentMessages
 	if len(s.history) < recentCount {
 		recentCount = len(s.history)
 	}
@@ -255,28 +254,24 @@ func (s *Summary) compressWithLLM() {
 		return
 	}
 
-	// 将消息转换为文本
 	textToSummarize := s.messagesToText(messagesToSummarize)
 
 	var newSummary string
 	var err error
 
-	// 使用增量式摘要
 	if s.currentSummary != "" {
-		newSummary, err = summarizer.IncrementalSummarize(context.Background(), s.currentSummary, textToSummarize)
+		newSummary, err = s.summarizer.IncrementalSummarize(context.Background(), s.currentSummary, textToSummarize)
 	} else {
-		newSummary, err = summarizer.Summarize(context.Background(), textToSummarize)
+		newSummary, err = s.summarizer.Summarize(context.Background(), textToSummarize)
 	}
 
 	if err != nil {
-		// 如果 LLM 摘要失败，使用降级方案
 		s.compressFallback()
 		return
 	}
 
 	s.currentSummary = newSummary
 
-	// 构建新的历史：摘要 + 最近消息
 	summaryMsg := Message{
 		Role:      "system",
 		Content:   "[对话摘要] " + newSummary,
@@ -288,14 +283,14 @@ func (s *Summary) compressWithLLM() {
 
 // compressFallback 降级压缩方案
 func (s *Summary) compressFallback() {
-	if len(s.history) > 3 {
+	if len(s.history) > fallbackRecentMessages {
 		summary := Message{
 			Role:      "system",
 			Content:   "之前进行了一些对话，以下是最近的对话内容。",
 			IsSummary: true,
 		}
 
-		recent := s.history[len(s.history)-3:]
+		recent := s.history[len(s.history)-fallbackRecentMessages:]
 		s.history = append([]Message{summary}, recent...)
 	}
 }
@@ -315,12 +310,4 @@ func (s *Summary) messagesToText(messages []Message) string {
 		builder.WriteString("\n")
 	}
 	return builder.String()
-}
-
-// embeddingAPI 全局变量用于缓存
-var embeddingAPI EmbeddingAPI
-
-// SetEmbeddingAPI 设置 Embedding API
-func SetEmbeddingAPI(api EmbeddingAPI) {
-	embeddingAPI = api
 }

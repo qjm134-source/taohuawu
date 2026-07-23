@@ -327,7 +327,7 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 
 	inputAttrs := a.buildMessageAttributes(messages)
 
-	if sessionID, ok := ctx.Value("session_id").(string); ok && sessionID != "" {
+	if sessionID, ok := SessionIDFromContext(ctx); ok && sessionID != "" {
 		inputAttrs = append(inputAttrs, observability.SessionID.String(sessionID))
 	}
 
@@ -414,11 +414,6 @@ func (a *EinoAgentAdapter) buildMessageAttributes(messages []*eino_schema.Messag
 	attrs = append(attrs, observability.GenAIPrompt.String(strings.Join(inputMsgs, "\n")))
 	attrs = append(attrs, observability.LangfuseObservationInput.String(strings.Join(inputMsgs, "\n")))
 	return attrs
-}
-
-// getSessionIDFromContext 从 context 中提取 session_id
-func (a *EinoAgentAdapter) getSessionIDFromContext(ctx context.Context) string {
-	return ctx.Value("session_id").(string)
 }
 
 func (a *EinoAgentAdapter) buildOutputAttributes(msg *eino_schema.Message, usage ChatUsage) []attribute.KeyValue {

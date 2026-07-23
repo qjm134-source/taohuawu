@@ -14,6 +14,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+
+	"github.com/watertown/guide/pkg/logging"
 )
 
 type LangfuseConfig struct {
@@ -38,9 +40,12 @@ type ObservabilityConfig struct {
 //   - "stdout"：将 Trace 以 JSON 格式打印到标准输出，适合开发调试
 //
 // 同时支持将 Trace 导出到 Langfuse（通过 OTLP）
-func InitTracing(cfg ObservabilityConfig) (*sdktrace.TracerProvider, error) {
+func InitTracing(cfg ObservabilityConfig, logger logging.Logger) (*sdktrace.TracerProvider, error) {
 	if !cfg.Enabled {
 		return nil, nil
+	}
+	if logger == nil {
+		return nil, fmt.Errorf("logger is nil")
 	}
 
 	ctx := context.Background()
@@ -70,7 +75,7 @@ func InitTracing(cfg ObservabilityConfig) (*sdktrace.TracerProvider, error) {
 			return nil, fmt.Errorf("create stdout exporter: %w", err)
 		}
 		exporters = append(exporters, exporter)
-		fmt.Fprintln(os.Stderr, "[OTel] Using stdout exporter — traces will be printed to console/logs")
+		logger.Info("OTel using stdout exporter — traces will be printed to console/logs")
 
 	default: // "otlp" 或空
 		endpoint := cfg.Endpoint
@@ -86,7 +91,7 @@ func InitTracing(cfg ObservabilityConfig) (*sdktrace.TracerProvider, error) {
 			return nil, fmt.Errorf("create otlp exporter: %w", err)
 		}
 		exporters = append(exporters, exporter)
-		fmt.Fprintf(os.Stderr, "[OTel] Using OTLP/HTTP exporter — sending traces to %s\n", cfg.Endpoint)
+		logger.Info("OTel using OTLP/HTTP exporter", "endpoint", cfg.Endpoint)
 	}
 
 	// 如果启用了 Langfuse，添加 Langfuse OTLP exporter
@@ -118,8 +123,8 @@ func InitTracing(cfg ObservabilityConfig) (*sdktrace.TracerProvider, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create langfuse otlp exporter: %w", err)
 		}
-		exporters = append(exporters, &debugExporter{delegate: langfuseExporter, name: "langfuse"})
-		fmt.Fprintf(os.Stderr, "[OTel] Using Langfuse OTLP exporter — sending traces to %s\n", langfuseEndpoint)
+		exporters = append(exporters, &debugExporter{delegate: langfuseExporter, name: "langfuse", logger: logger})
+		logger.Info("OTel using Langfuse OTLP exporter", "endpoint", langfuseEndpoint)
 	}
 
 	if len(exporters) == 0 {
@@ -145,12 +150,13 @@ func InitTracing(cfg ObservabilityConfig) (*sdktrace.TracerProvider, error) {
 type debugExporter struct {
 	delegate sdktrace.SpanExporter
 	name     string
+	logger   logging.Logger
 }
 
 func (d *debugExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	err := d.delegate.ExportSpans(ctx, spans)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[OTel] [%s] Export failed: %v\n", d.name, err)
+		d.logger.Error("OTel exporter export failed", "name", d.name, "error", err)
 	}
 	return err
 }

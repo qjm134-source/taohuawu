@@ -353,14 +353,6 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 
 	}
 
-	optimizer := cost.NewOptimizer(
-		s.config.Cost.CacheTTL.Duration,
-		s.config.Cost.MaxHistoryMessages,
-		s.config.Cost.MaxHistoryTokens,
-		embeddingAPI,
-		s.logger,
-	)
-
 	// 初始化 LLM 摘要器
 	if s.config.Cost.SummaryTimeout.Duration == 0 {
 		s.config.Cost.SummaryTimeout.Duration = 15 * time.Second
@@ -375,13 +367,22 @@ func (s *Server) initAgentComponents(kb interface{}) error {
 			}
 		}
 	}
-	if summaryModel != "" {
-		llmSummarizer := cost.NewLLMSummarizer(llmAdapter, summaryModel, s.config.Cost.SummaryTimeout.Duration, s.logger)
-		cost.SetSummarizer(llmSummarizer)
 
+	var summarizer cost.Summarizer
+	if summaryModel != "" {
+		summarizer = cost.NewLLMSummarizer(llmAdapter, summaryModel, s.config.Cost.SummaryTimeout.Duration, s.logger)
 	} else {
 		s.logger.Warn("No model available for summarizer, LLM summarization disabled")
 	}
+
+	optimizer := cost.NewOptimizer(
+		s.config.Cost.CacheTTL.Duration,
+		s.config.Cost.MaxHistoryMessages,
+		s.config.Cost.MaxHistoryTokens,
+		embeddingAPI,
+		summarizer,
+		s.logger,
+	)
 
 	// 创建情绪检测器
 	emotionDetector := emotion.NewRuleBasedDetector()
