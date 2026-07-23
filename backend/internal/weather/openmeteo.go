@@ -22,14 +22,7 @@ func NewOpenMeteoService(cfg OpenMeteoConfig, logger logging.Logger) Service {
 	return &openMeteoService{
 		maxRetries: cfg.MaxRetries,
 		logger:     logger,
-		client: &http.Client{
-			Timeout: cfg.Timeout,
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				MaxIdleConnsPerHost: 5,
-				IdleConnTimeout:     30 * time.Second,
-			},
-		},
+		client:     newWeatherHTTPClient(cfg.Timeout),
 	}
 }
 
@@ -71,7 +64,7 @@ func (s *openMeteoService) geocode(ctx context.Context, city string) (float64, f
 		lastErr = err
 		s.logger.Errorf("[Weather] [OpenMeteo] [Geocode] Attempt %d failed: city=%s, error=%v", attempt, city, err)
 		if attempt < s.maxRetries {
-			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			time.Sleep(retryDelay(attempt))
 		}
 	}
 
@@ -135,7 +128,7 @@ func (s *openMeteoService) queryWeather(ctx context.Context, lat, lon float64) (
 		lastErr = err
 		s.logger.Errorf("[Weather] [OpenMeteo] [Query] Attempt %d failed: lat=%.4f, lon=%.4f, error=%v", attempt, lat, lon, err)
 		if attempt < s.maxRetries {
-			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			time.Sleep(retryDelay(attempt))
 		}
 	}
 

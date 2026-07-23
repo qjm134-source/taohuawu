@@ -5,32 +5,33 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
-// Category 问题分类
+// Category 问题分类。
 type Category struct {
 	Name      string     `json:"name"`
 	Questions []Question `json:"questions"`
 }
 
-// Question 问题
+// Question 知识库中的问答对。
 type Question struct {
 	Q    string   `json:"q"`
 	A    string   `json:"a"`
 	Tags []string `json:"tags"`
 }
 
-// KnowledgeBase 知识库
+// KnowledgeBase 知识库。
 type KnowledgeBase struct {
 	Categories []Category `json:"categories"`
 }
 
-// FAQ 游戏FAQ
+// FAQ 游戏 FAQ。
 type FAQ struct {
 	Categories []Category
 }
 
-// GameRules 游戏规则
+// GameRules 游戏规则。
 type GameRules struct {
 	Rules []struct {
 		Name        string `json:"name"`
@@ -38,7 +39,7 @@ type GameRules struct {
 	} `json:"rules"`
 }
 
-// ScenarioDesc 场景描述
+// ScenarioDesc 场景描述。
 type ScenarioDesc struct {
 	Background string `json:"background"`
 	NPC        struct {
@@ -51,93 +52,80 @@ type ScenarioDesc struct {
 	} `json:"npc"`
 }
 
-// Load 加载知识库
+// Load 从 path 目录加载 FAQ 并构建 KnowledgeBase。
 func Load(path string) (*KnowledgeBase, error) {
-	kb := &KnowledgeBase{}
-
-	// 加载 FAQ
-	faqFile := filepath.Join(path, "game_faq.json")
-	faqData, err := os.ReadFile(faqFile)
+	faq, err := GetFAQ(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read faq: %w", err)
+		return nil, fmt.Errorf("load knowledge base: %w", err)
 	}
 
-	var faq FAQ
-	if err := json.Unmarshal(faqData, &faq); err != nil {
-		return nil, fmt.Errorf("failed to parse faq: %w", err)
-	}
-	kb.Categories = faq.Categories
-
-	return kb, nil
+	return &KnowledgeBase{Categories: faq.Categories}, nil
 }
 
-// GetFAQ 加载FAQ
+// GetFAQ 从 path 目录加载 game_faq.json。
 func GetFAQ(path string) (*FAQ, error) {
 	file := filepath.Join(path, "game_faq.json")
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read faq: %w", err)
+		return nil, fmt.Errorf("read faq file %s: %w", file, err)
 	}
 
 	var faq FAQ
 	if err := json.Unmarshal(data, &faq); err != nil {
-		return nil, fmt.Errorf("failed to parse faq: %w", err)
+		return nil, fmt.Errorf("parse faq file %s: %w", file, err)
 	}
 	return &faq, nil
 }
 
-// GetGameRules 加载游戏规则
+// GetGameRules 从 path 目录加载 game_rules.json。
 func GetGameRules(path string) (*GameRules, error) {
 	file := filepath.Join(path, "game_rules.json")
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read game rules: %w", err)
+		return nil, fmt.Errorf("read game rules file %s: %w", file, err)
 	}
 
 	var rules GameRules
 	if err := json.Unmarshal(data, &rules); err != nil {
-		return nil, fmt.Errorf("failed to parse game rules: %w", err)
+		return nil, fmt.Errorf("parse game rules file %s: %w", file, err)
 	}
 	return &rules, nil
 }
 
-// GetScenarioDesc 加载场景描述
+// GetScenarioDesc 从 path 目录加载 scenario_desc.json。
 func GetScenarioDesc(path string) (*ScenarioDesc, error) {
 	file := filepath.Join(path, "scenario_desc.json")
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read scenario desc: %w", err)
+		return nil, fmt.Errorf("read scenario desc file %s: %w", file, err)
 	}
 
 	var desc ScenarioDesc
 	if err := json.Unmarshal(data, &desc); err != nil {
-		return nil, fmt.Errorf("failed to parse scenario desc: %w", err)
+		return nil, fmt.Errorf("parse scenario desc file %s: %w", file, err)
 	}
 	return &desc, nil
 }
 
-// FindQuestion 查找问题
+// FindQuestion 根据问题文本查找对应的问答对。
 func (kb *KnowledgeBase) FindQuestion(query string) *Question {
-	for _, cat := range kb.Categories {
-		for _, q := range cat.Questions {
-			if q.Q == query {
-				return &q
+	for i := range kb.Categories {
+		for j := range kb.Categories[i].Questions {
+			if kb.Categories[i].Questions[j].Q == query {
+				return &kb.Categories[i].Questions[j]
 			}
 		}
 	}
 	return nil
 }
 
-// FindByTag 根据标签查找问题
+// FindByTag 根据标签查找所有匹配的问答对。
 func (kb *KnowledgeBase) FindByTag(tag string) []Question {
 	var results []Question
 	for _, cat := range kb.Categories {
 		for _, q := range cat.Questions {
-			for _, t := range q.Tags {
-				if t == tag {
-					results = append(results, q)
-					break
-				}
+			if slices.Contains(q.Tags, tag) {
+				results = append(results, q)
 			}
 		}
 	}

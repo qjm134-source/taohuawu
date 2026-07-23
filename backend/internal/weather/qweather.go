@@ -27,14 +27,7 @@ func NewQWeatherService(cfg QWeatherConfig, logger logging.Logger) Service {
 		baseURL:    cfg.BaseURL,
 		maxRetries: cfg.MaxRetries,
 		logger:     logger,
-		client: &http.Client{
-			Timeout: cfg.Timeout,
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				MaxIdleConnsPerHost: 5,
-				IdleConnTimeout:     30 * time.Second,
-			},
-		},
+		client:     newWeatherHTTPClient(cfg.Timeout),
 	}
 }
 
@@ -76,7 +69,7 @@ func (s *qWeatherService) searchLocation(ctx context.Context, city string) (stri
 		lastErr = err
 		s.logger.Errorf("[Weather] [QWeather] [Search] Attempt %d failed: city=%s, error=%v", attempt, city, err)
 		if attempt < s.maxRetries {
-			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			time.Sleep(retryDelay(attempt))
 		}
 	}
 
@@ -145,7 +138,7 @@ func (s *qWeatherService) getCurrentWeather(ctx context.Context, locationID stri
 		lastErr = err
 		s.logger.Errorf("[Weather] [QWeather] [Now] Attempt %d failed: location_id=%s, error=%v", attempt, locationID, err)
 		if attempt < s.maxRetries {
-			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+			time.Sleep(retryDelay(attempt))
 		}
 	}
 

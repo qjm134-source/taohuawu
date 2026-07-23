@@ -50,14 +50,13 @@ func NewRuleBasedDetector() *RuleBasedDetector {
 	}
 }
 
-// Detect 检测情绪
+// Detect 检测情绪。
+// 规则关键词均为中文或小写英文，直接对原始消息做子串匹配即可，避免不必要的转换。
 func (d *RuleBasedDetector) Detect(message string) Emotion {
-	lowerMsg := strings.ToLower(message)
-
 	scores := make(map[Emotion]int)
 	for emotion, keywords := range d.rules {
 		for _, kw := range keywords {
-			if strings.Contains(lowerMsg, kw) {
+			if strings.Contains(message, kw) {
 				scores[emotion]++
 			}
 		}

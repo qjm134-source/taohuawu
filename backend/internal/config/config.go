@@ -210,64 +210,75 @@ func (d timeDuration) MarshalYAML() (interface{}, error) {
 	return d.Duration.String(), nil
 }
 
-// Load 加载配置
+// Load 加载配置。
+// 依次从 YAML 文件读取基础配置，再通过环境变量覆盖敏感字段。
 func Load() (*Config, error) {
-	// 加载 .env 文件（如果存在），Render 等环境通过环境变量直接注入
 	_ = godotenv.Load()
 
-	cfg := &Config{}
-
-	// 从 YAML 文件加载基础配置
-	configFile := os.Getenv("CONFIG_FILE")
-	if configFile == "" {
-		configFile = "configs/config.yaml"
+	cfg, err := loadFromFile(configFilePath())
+	if err != nil {
+		return nil, err
 	}
 
-	data, err := os.ReadFile(configFile)
+	cfg.resolveModelAPIKeys()
+	cfg.resolveLangfuseKeys()
+	cfg.resolveDatabase()
+	cfg.resolveObservability()
+	cfg.resolveWeatherAndEmbedding()
+
+	return cfg, nil
+}
+
+func configFilePath() string {
+	if path := os.Getenv("CONFIG_FILE"); path != "" {
+		return path
+	}
+	return "configs/config.yaml"
+}
+
+func loadFromFile(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	cfg := &Config{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
+	return cfg, nil
+}
 
-	// 从环境变量覆盖敏感配置
-	// 处理各个模型的 API Key
+// resolveEnvVar 解析形如 ${ENV_NAME} 的环境变量占位符。
+// 若占位符不包含默认值且环境变量未设置，则返回原始值。
+func resolveEnvVar(value string) string {
+	if !strings.HasPrefix(value, "${") || !strings.HasSuffix(value, "}") {
+		return value
+	}
+
+	envName := value[2 : len(value)-1]
+	if idx := strings.Index(envName, ":"); idx != -1 {
+		envName = envName[:idx]
+	}
+
+	if envValue := os.Getenv(envName); envValue != "" {
+		return envValue
+	}
+	return value
+}
+
+func (cfg *Config) resolveModelAPIKeys() {
 	for i := range cfg.LLM.Models {
-		if strings.HasPrefix(cfg.LLM.Models[i].APIKey, "${") && strings.HasSuffix(cfg.LLM.Models[i].APIKey, "}") {
-			// 提取环境变量名称，例如 ${MIMO_API_KEY} -> MIMO_API_KEY
-			envName := cfg.LLM.Models[i].APIKey[2 : len(cfg.LLM.Models[i].APIKey)-1]
-			if envValue := os.Getenv(envName); envValue != "" {
-				cfg.LLM.Models[i].APIKey = envValue
-			} else {
-				// 环境变量未设置，记录警告
-				fmt.Printf("Warning: environment variable %s is not set for model %s\n", envName, cfg.LLM.Models[i].Name)
-			}
-		}
+		cfg.LLM.Models[i].APIKey = resolveEnvVar(cfg.LLM.Models[i].APIKey)
 	}
+}
 
-	// 处理 Langfuse 配置的环境变量
-	if strings.HasPrefix(cfg.Observability.Langfuse.PublicKey, "${") && strings.HasSuffix(cfg.Observability.Langfuse.PublicKey, "}") {
-		envName := cfg.Observability.Langfuse.PublicKey[2 : len(cfg.Observability.Langfuse.PublicKey)-1]
-		if idx := strings.Index(envName, ":"); idx != -1 {
-			envName = envName[:idx]
-		}
-		if envValue := os.Getenv(envName); envValue != "" {
-			cfg.Observability.Langfuse.PublicKey = envValue
-		}
-	}
-	if strings.HasPrefix(cfg.Observability.Langfuse.SecretKey, "${") && strings.HasSuffix(cfg.Observability.Langfuse.SecretKey, "}") {
-		envName := cfg.Observability.Langfuse.SecretKey[2 : len(cfg.Observability.Langfuse.SecretKey)-1]
-		if idx := strings.Index(envName, ":"); idx != -1 {
-			envName = envName[:idx]
-		}
-		if envValue := os.Getenv(envName); envValue != "" {
-			cfg.Observability.Langfuse.SecretKey = envValue
-		}
-	}
+func (cfg *Config) resolveLangfuseKeys() {
+	cfg.Observability.Langfuse.PublicKey = resolveEnvVar(cfg.Observability.Langfuse.PublicKey)
+	cfg.Observability.Langfuse.SecretKey = resolveEnvVar(cfg.Observability.Langfuse.SecretKey)
+}
 
-	// 数据库配置环境变量覆盖
+func (cfg *Config) resolveDatabase() {
 	if dbPass := os.Getenv("DB_PASSWORD"); dbPass != "" {
 		cfg.Database.Password = dbPass
 	}
@@ -285,8 +296,9 @@ func Load() (*Config, error) {
 	if dbName := os.Getenv("DB_NAME"); dbName != "" {
 		cfg.Database.Name = dbName
 	}
+}
 
-	// 可观测性配置环境变量覆盖
+func (cfg *Config) resolveObservability() {
 	if obsEnabled := os.Getenv("OBSERVABILITY_ENABLED"); obsEnabled != "" {
 		if enabled, err := strconv.ParseBool(obsEnabled); err == nil {
 			cfg.Observability.Enabled = enabled
@@ -303,22 +315,11 @@ func Load() (*Config, error) {
 			cfg.Observability.Prometheus = enabled
 		}
 	}
+}
 
-	if strings.HasPrefix(cfg.Weather.QWeather.APIKey, "${") && strings.HasSuffix(cfg.Weather.QWeather.APIKey, "}") {
-		envName := cfg.Weather.QWeather.APIKey[2 : len(cfg.Weather.QWeather.APIKey)-1]
-		cfg.Weather.QWeather.APIKey = os.Getenv(envName)
-	}
-
-	if strings.HasPrefix(cfg.Cost.Embedding.APIKey, "${") && strings.HasSuffix(cfg.Cost.Embedding.APIKey, "}") {
-		envName := cfg.Cost.Embedding.APIKey[2 : len(cfg.Cost.Embedding.APIKey)-1]
-		if envValue := os.Getenv(envName); envValue != "" {
-			cfg.Cost.Embedding.APIKey = envValue
-		} else {
-			fmt.Printf("Warning: environment variable %s is not set for embedding API key\n", envName)
-		}
-	}
-
-	return cfg, nil
+func (cfg *Config) resolveWeatherAndEmbedding() {
+	cfg.Weather.QWeather.APIKey = resolveEnvVar(cfg.Weather.QWeather.APIKey)
+	cfg.Cost.Embedding.APIKey = resolveEnvVar(cfg.Cost.Embedding.APIKey)
 }
 
 // GetDSN 获取数据库连接字符串
