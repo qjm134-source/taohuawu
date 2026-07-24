@@ -432,6 +432,8 @@ func (a *EinoAgentAdapter) buildOutputAttributes(msg *eino_schema.Message, usage
 type adkEventStream struct {
 	streamChan <-chan *StreamResult
 	done       chan struct{}
+	mu         sync.Mutex
+	closed     bool
 }
 
 func (s *adkEventStream) Recv() (*StreamEvent, error) {
@@ -446,6 +448,12 @@ func (s *adkEventStream) Recv() (*StreamEvent, error) {
 }
 
 func (s *adkEventStream) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
 	close(s.done)
 }
 

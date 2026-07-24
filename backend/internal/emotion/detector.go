@@ -31,7 +31,7 @@ func NewRuleBasedDetector() *RuleBasedDetector {
 	return &RuleBasedDetector{
 		rules: map[Emotion][]string{
 			EmotionHappy: {
-				"开心", "快乐", "高兴", "喜欢", "爱", "棒", "好", "太好了", "哈哈", "谢谢", "感谢",
+				"开心", "快乐", "高兴", "喜欢", "爱", "棒", "太好了", "哈哈", "谢谢", "感谢",
 				"好玩", "有趣", "棒极了", "赞", "漂亮", "美丽", "可爱",
 			},
 			EmotionSad: {

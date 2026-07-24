@@ -7,6 +7,13 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	// sessionTTL 会话超时时间，超过此时间未活跃的会话将被自动清理。
+	sessionTTL = 30 * time.Minute
+	// sessionCleanupInterval 会话清理任务执行间隔。
+	sessionCleanupInterval = 5 * time.Minute
+)
+
 // Session 会话
 type Session struct {
 	ID           string
@@ -39,15 +46,33 @@ type ToolCall struct {
 
 // SessionManager 会话管理器
 type SessionManager struct {
-	sessions map[string]*Session
-	mu       sync.RWMutex
+	sessions    map[string]*Session
+	mu          sync.RWMutex
+	stopCleanup chan struct{}
+	cleanupWg   sync.WaitGroup
+	sessionTTL  time.Duration
 }
 
 // NewSessionManager 创建会话管理器
 func NewSessionManager() *SessionManager {
-	return &SessionManager{
-		sessions: make(map[string]*Session),
+	return NewSessionManagerWithTTL(sessionTTL)
+}
+
+// NewSessionManagerWithTTL 使用自定义超时时间创建会话管理器
+func NewSessionManagerWithTTL(ttl time.Duration) *SessionManager {
+	sm := &SessionManager{
+		sessions:    make(map[string]*Session),
+		sessionTTL:  ttl,
+		stopCleanup: make(chan struct{}),
 	}
+
+	sm.cleanupWg.Add(1)
+	go func() {
+		defer sm.cleanupWg.Done()
+		sm.cleanupExpired()
+	}()
+
+	return sm
 }
 
 // GetOrCreate 获取或创建会话
@@ -138,4 +163,32 @@ func (s *Session) UpdateNickname(nickname string) {
 	defer s.mu.Unlock()
 
 	s.Nickname = nickname
+}
+
+// cleanupExpired 定期清理过期会话。
+func (sm *SessionManager) cleanupExpired() {
+	ticker := time.NewTicker(sessionCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			sm.mu.Lock()
+			now := time.Now()
+			for id, session := range sm.sessions {
+				if now.Sub(session.LastActive) > sm.sessionTTL {
+					delete(sm.sessions, id)
+				}
+			}
+			sm.mu.Unlock()
+		case <-sm.stopCleanup:
+			return
+		}
+	}
+}
+
+// Stop 优雅停止会话管理器，等待清理任务退出。
+func (sm *SessionManager) Stop() {
+	close(sm.stopCleanup)
+	sm.cleanupWg.Wait()
 }

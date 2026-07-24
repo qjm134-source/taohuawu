@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 
 	eino_schema "github.com/cloudwego/eino/schema"
 )
@@ -55,6 +56,8 @@ func (a *FallbackAdapter) Chat(ctx context.Context, messages []*eino_schema.Mess
 type fallbackEventStream struct {
 	streamChan <-chan *StreamResult
 	done       chan struct{}
+	mu         sync.Mutex
+	closed     bool
 }
 
 func (s *fallbackEventStream) Recv() (*StreamEvent, error) {
@@ -69,6 +72,12 @@ func (s *fallbackEventStream) Recv() (*StreamEvent, error) {
 }
 
 func (s *fallbackEventStream) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
 	close(s.done)
 }
 

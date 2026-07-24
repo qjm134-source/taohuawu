@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/watertown/guide/pkg/logging"
-	"github.com/watertown/guide/pkg/utils"
 )
 
 // WorkerPool 工作池（按租户隔离）
@@ -37,19 +36,17 @@ func (p *WorkerPool) GetPool(tenantID string, size int) chan struct{} {
 	return pool
 }
 
-// Acquire 获取资源
-func (p *WorkerPool) Acquire(tenantID string, size int) context.CancelFunc {
+// Acquire 获取资源（同步方式），返回释放函数。
+// 如果 ctx 在获取资源前取消，返回空函数。
+func (p *WorkerPool) Acquire(ctx context.Context, tenantID string, size int) func() {
 	pool := p.GetPool(tenantID, size)
-	ctx, cancel := context.WithCancel(context.Background())
 
-	go func() {
-		defer utils.RecoverWithCustomLogger("WorkerPool", p.logger)
-		pool <- struct{}{}
-		<-ctx.Done()
-		<-pool
-	}()
-
-	return cancel
+	select {
+	case pool <- struct{}{}:
+		return func() { <-pool }
+	case <-ctx.Done():
+		return func() {}
+	}
 }
 
 // GetSize 获取租户工作池大小

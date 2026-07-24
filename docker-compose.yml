@@ -161,6 +161,7 @@ services:
       CLICKHOUSE_PASSWORD: langfuse
     volumes:
       - langfuse_clickhouse:/var/lib/clickhouse
+      - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/numa.xml:ro
       - /etc/localtime:/etc/localtime:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query=SELECT 1"]

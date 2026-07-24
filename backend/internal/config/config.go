@@ -31,12 +31,14 @@ type ServerConfig struct {
 }
 
 type DatabaseConfig struct {
+	Type     string `yaml:"type"` // mysql, sqlite, postgres
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
 	Name     string `yaml:"name"`
 	User     string `yaml:"user"`
 	Password string `yaml:"password"`
 	SSLMode  string `yaml:"ssl_mode"`
+	Path     string `yaml:"path"` // SQLite 数据库文件路径
 }
 
 type WebSocketConfig struct {

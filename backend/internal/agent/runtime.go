@@ -155,6 +155,9 @@ func (r *Runtime) Stop() {
 	if r.optimizer != nil {
 		r.optimizer.Stop()
 	}
+	if r.sessionManager != nil {
+		r.sessionManager.Stop()
+	}
 }
 
 // HandleWelcome 处理欢迎

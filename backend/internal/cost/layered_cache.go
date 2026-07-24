@@ -12,6 +12,8 @@ import (
 const (
 	// cacheCleanupInterval 是缓存过期条目定期清理的间隔。
 	cacheCleanupInterval = 5 * time.Minute
+	// maxSemanticIndexWorkers 限制并发构建语义索引的 goroutine 数量。
+	maxSemanticIndexWorkers = 3
 )
 
 // LayeredCache 多层缓存实现
@@ -30,20 +32,24 @@ type LayeredCache struct {
 	stopCleanup chan struct{}
 	// cleanupWg 等待 cleanup goroutine 优雅退出。
 	cleanupWg sync.WaitGroup
+
+	// semanticIndexWorker 限制并发构建语义索引的 goroutine 数量。
+	semanticIndexWorker chan struct{}
 }
 
 // NewLayeredCache 创建多层缓存，并启动后台清理任务。
 // 调用方应在服务关闭时调用 Stop() 以释放资源。
 func NewLayeredCache(config CacheConfig, embeddingAPI EmbeddingAPI, logger logging.Logger) *LayeredCache {
 	c := &LayeredCache{
-		config:        config,
-		exactCache:    make(map[string]*CacheEntry),
-		semanticCache: make(map[string]*CacheEntry),
-		toolCache:     make(map[string]interface{}),
-		embeddingAPI:  embeddingAPI,
-		ttl:           config.TTL,
-		logger:        logger,
-		stopCleanup:   make(chan struct{}),
+		config:              config,
+		exactCache:          make(map[string]*CacheEntry),
+		semanticCache:       make(map[string]*CacheEntry),
+		toolCache:           make(map[string]interface{}),
+		embeddingAPI:        embeddingAPI,
+		ttl:                 config.TTL,
+		logger:              logger,
+		stopCleanup:         make(chan struct{}),
+		semanticIndexWorker: make(chan struct{}, maxSemanticIndexWorkers),
 	}
 
 	c.cleanupWg.Add(1)
@@ -128,10 +134,12 @@ func (c *LayeredCache) Set(ctx context.Context, question string, answer string, 
 	}
 
 	// 如果有 Embedding API，在独立 goroutine 中构建语义索引。
-	// buildSemanticIndex 本身是同步的，是否并发由调用方决定。
+	// 使用 semaphore 限制并发数量，避免过度调用 Embedding API。
 	if c.embeddingAPI != nil {
 		go func() {
 			defer utils.RecoverWithCustomLogger("LayeredCache.buildSemanticIndex", c.logger)
+			c.semanticIndexWorker <- struct{}{}
+			defer func() { <-c.semanticIndexWorker }()
 			c.buildSemanticIndex(ctx, question, answer, model, tokensSaved)
 		}()
 	}

@@ -4,11 +4,13 @@ server:
   write_timeout: 30s
 
 database:
+  type: mysql           # mysql, sqlite, postgres
   host: localhost
   port: 3306
   name: water_town
   user: root
   password: ${DB_PASSWORD:-password123}
+  path: data/database/water_town.db  # SQLite 数据库文件路径（MySQL 连接失败时 fallback 使用）
 
 websocket:
   path: /ws/game
