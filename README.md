@@ -253,9 +253,13 @@ taohuawu/
 │   ├── css/
 │   ├── assets/
 │   └── README.md
-├── docker-compose.yml                # 本地一键启动
-├── render.yaml                       # Render 部署配置
-├── RENDER_DEPLOY.md                  # Render 部署指南
+├── deploy/                           # 部署配置
+│   ├── docker-compose.yml            # 本地一键启动
+│   ├── render.yaml                   # Render 部署配置
+│   └── RENDER_DEPLOY.md              # Render 部署指南
+├── scripts/                          # 启动脚本
+│   ├── start.sh                      # Linux/Mac 启动脚本
+│   └── start.ps1                     # Windows 启动脚本
 └── README.md                         # 本文件
 ```
 
@@ -370,7 +374,7 @@ Agent.HandleChatStream (主 Span)
 export CLAUDE_API_KEY="your-claude-api-key"
 
 # 启动全部服务（postgres + 后端 + 前端 + Prometheus + Jaeger+ Grafana + LangFuse）
-docker-compose up --build
+cd deploy && docker-compose up --build
 
 # 访问游戏
 open http://localhost:3000
@@ -414,12 +418,12 @@ npm run dev
 
 | 方式 | 文件 | 说明 |
 |------|------|------|
-| Docker Compose | `docker-compose.yml` | 本地开发 / 测试一键启动 |
-| Render 云平台 | `render.yaml` | 免费部署，适合展示 |
+| Docker Compose | `deploy/docker-compose.yml` | 本地开发 / 测试一键启动 |
+| Render 云平台 | `deploy/render.yaml` | 免费部署，适合展示 |
 | 手动部署 | `backend/Dockerfile` + `frontend/nginx.conf` | 生产环境自定义部署 |
 
 详细部署文档见：
-- [Render 部署指南](./RENDER_DEPLOY.md)
+- [Render 部署指南](./deploy/RENDER_DEPLOY.md)
 - [后端 README](./backend/README.md)
 - [前端 README](./frontend/README.md)
 

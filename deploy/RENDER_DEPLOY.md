@@ -13,7 +13,7 @@
 ### 1. 准备代码仓库
 
 1. 将代码推送到 GitHub 仓库
-2. 确保项目根目录包含 `render.yaml` 文件
+2. 确保项目 `deploy/` 目录包含 `render.yaml` 文件
 
 ### 2. 在 Render 上创建服务
 

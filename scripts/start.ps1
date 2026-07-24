@@ -18,6 +18,10 @@ Write-Host ""
 Write-Host "📦 正在启动服务..."
 Write-Host ""
 
+# 切换到 deploy 目录
+$deployDir = Join-Path $PSScriptRoot ".." "deploy"
+Set-Location $deployDir
+
 # 启动所有服务
 docker-compose up -d
 

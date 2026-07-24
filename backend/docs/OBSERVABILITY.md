@@ -291,7 +291,7 @@ observability:
 
 Langfuse v3 需要完整的 6 个组件：PostgreSQL、ClickHouse、Redis、MinIO、langfuse-web、langfuse-worker。
 
-当前项目的 `docker-compose.yml` 已包含完整配置，无需额外添加。
+当前项目的 `deploy/docker-compose.yml` 已包含完整配置，无需额外添加。
 
 配置文件：
 ```yaml
@@ -540,14 +540,14 @@ cache_hits_total{cache_type="semantic"} 25
 
 ### 7.2 Prometheus + Grafana（推荐生产方案）
 
-项目根目录已提供 `prometheus.yml` 和 `docker-compose.yml` 集成。Prometheus 自动每 15 秒从 `backend:8080/metrics` 拉取一次指标，数据持久化到 Docker Volume `prometheus_data`，默认保留 15 天。
+项目 `deploy/` 目录已提供 `prometheus.yml` 和 `docker-compose.yml` 集成。Prometheus 自动每 15 秒从 `backend:8080/metrics` 拉取一次指标，数据持久化到 Docker Volume `prometheus_data`，默认保留 15 天。
 
 ```bash
 # 一键启动（含 Prometheus）
-docker-compose up -d
+cd deploy && docker-compose up -d
 
 # 或者只起 Prometheus
-docker-compose up -d prometheus
+cd deploy && docker-compose up -d prometheus
 ```
 
 **直接在 Prometheus Web UI 中写 PromQL**（无需 Grafana）：
@@ -560,11 +560,11 @@ rate(http_requests_total[1m])
 
 **搭配 Grafana**（如果希望更美观的 Dashboard）：
 
-项目已在 `docker-compose.yml` 中集成 Grafana，启动后自动配置 Prometheus 数据源并导入预置仪表盘：
+项目已在 `deploy/docker-compose.yml` 中集成 Grafana，启动后自动配置 Prometheus 数据源并导入预置仪表盘：
 
 ```bash
 # 启动所有服务（包括 Grafana）
-docker-compose up -d
+cd deploy && docker-compose up -d
 ```
 
 **访问地址：**
@@ -674,7 +674,7 @@ LANGFUSE_SECRET_KEY=your_secret_key_here
 **4. 重启服务**
 
 ```bash
-docker-compose up -d backend
+cd deploy && docker-compose up -d backend
 ```
 
 ### 7.5.2 验证数据

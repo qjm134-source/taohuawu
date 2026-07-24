@@ -21,6 +21,9 @@ echo ""
 echo "📦 正在启动服务..."
 echo ""
 
+# 切换到 deploy 目录
+cd "$(dirname "$0")/../deploy" || exit 1
+
 # 启动所有服务
 docker-compose up -d
 

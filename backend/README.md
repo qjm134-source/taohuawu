@@ -371,13 +371,13 @@ models:
 
 ```bash
 # Linux/Mac
-./start.sh
+./scripts/start.sh
 
 # Windows PowerShell
-.\start.ps1
+.\scripts\start.ps1
 
 # 或手动启动
-docker-compose up -d
+cd deploy && docker-compose up -d
 ```
 
 3. **访问地址**：
@@ -392,7 +392,7 @@ docker-compose up -d
 
 4. **停止服务**：
 ```bash
-docker-compose down
+cd deploy && docker-compose down
 ```
 
 ### Docker 环境架构
