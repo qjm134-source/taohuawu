@@ -160,16 +160,25 @@ if errors.Is(err, ErrNotFound) { ... }
 - 尽可能指定 channel 方向（`<-chan`、`chan<-`）
 - 优先使用同步函数，由调用者决定是否需要并发
 - 发送已关闭的 channel 会导致 panic
-- **Channel 的 size 要么是 1，要么是无缓冲的**：避免任意大小的缓冲 channel，容易导致不可预测的行为
+- **Channel buffer size 必须基于场景设计**：默认使用无缓冲 channel 实现同步；需要解耦或作为信号时使用 size=1；生产者-消费者模型或 worker pool 中，buffer size 应基于利特尔定律（`L = λW`，系统中平均任务数 = 到达率 × 平均处理时间）或 worker 数量设计，禁止随意设置 magic number
 - select 语句中必须包含 default 分支或设置超时（`time.After`），杜绝无限期挂起
 
 ```go
-// Bad
-ch := make(chan int, 100)  // 任意大小容易导致不可预测的行为
+// Bad：随意设置大缓冲，没有根据吞吐量和延迟建模
+ch := make(chan int, 100)
 
-// Good
-ch := make(chan int)     // 无缓冲
-ch := make(chan int, 1)  // 或 size=1，用于解耦生产者和消费者
+// Bad：magic number，无法说明为什么是这个大小
+ch := make(chan int, 10)
+
+// Good：同步通信，调用方明确等待接收方处理
+ch := make(chan int)
+
+// Good：size=1 作为信号或解耦生产者和消费者
+ch := make(chan int, 1)
+
+// Good：基于 worker 数量设计缓冲大小
+const numWorkers = 8
+ch := make(chan Task, numWorkers)
 ```
 
 ### 7.3 Mutex 使用

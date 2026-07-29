@@ -65,7 +65,7 @@ alwaysApply: true
 - [ ] 使用 `context.Context` 管理生命周期（作为第一个参数）
 - [ ] 不在 struct 中存储 context
 - [ ] channel 指定方向（`<-chan`、`chan<-`）
-- [ ] **channel size 要么是 1，要么是无缓冲**，避免任意大小缓冲
+- [ ] **channel buffer size 必须基于场景设计**：默认无缓冲；size=1 用于解耦信号；producer-consumer/worker pool 基于利特尔定律或 worker 数设计，禁止 magic number
 - [ ] **select 语句包含 default 分支或设置超时**（`time.After`），杜绝无限期挂起
 - [ ] **零值 Mutex 直接使用**（`var mu sync.Mutex`），不用 `new(sync.Mutex)`
 - [ ] **强制使用 `defer mu.Unlock()`** 模式，防止死锁
