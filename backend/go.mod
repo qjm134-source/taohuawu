@@ -18,6 +18,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.44.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
+	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.1
 )
 
@@ -52,7 +53,6 @@ require (
 	github.com/yargevad/filepathx v1.0.0 // indirect
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	gorm.io/driver/sqlite v1.6.0 // indirect
 )
 
 require (

@@ -15,6 +15,116 @@
 - **Prometheus** — 指标监控
 - **OpenTelemetry** — 分布式追踪
 
+### 后端架构图
+
+```mermaid
+graph TB
+    classDef handler fill:#e3f2fd,stroke:#1976d2,stroke-width:1px,color:#212529
+    classDef service fill:#e8f5e9,stroke:#388e3c,stroke-width:1px,color:#212529
+    classDef core fill:#fff8e1,stroke:#f57c00,stroke-width:2px,color:#212529
+    classDef iface fill:#fff,stroke:#e65100,stroke-width:1px,stroke-dasharray: 4 3,color:#bf360c
+    classDef infra fill:#eceff1,stroke:#546e7a,stroke-width:1px,color:#212529
+    classDef external fill:#efebe9,stroke:#6d4c41,stroke-width:1px,color:#212529
+
+    subgraph L1["📥 Handler 接入层"]
+        H1[Gin HTTP Handler]
+        H2[WebSocket Handler]
+    end
+
+    subgraph L2["⚙️ Service 业务层（编排）"]
+        S1[ChatService<br/>对话流程 · 持久化 · 审计]
+    end
+
+    subgraph L3["🧠 Core 核心层（业务逻辑）"]
+        C1[AgentRuntime<br/>LLM 编排 · 工具调用]
+        C2[ContextBuilder<br/>上下文构建 · 摘要]
+        C3[SessionManager<br/>会话生命周期]
+        C4[CostCalculator<br/>成本计算]
+    end
+
+    subgraph L4["📋 Interface 接口定义层（依赖倒置）"]
+        I1[LLMService]
+        I2[CacheService]
+        I3[Summarizer]
+        I4[ToolRegistry]
+        I5[EmotionDetector]
+        I6[Repository<br/>Player / Conversation / Audit]
+    end
+
+    subgraph L5["🔧 Infrastructure 基础设施层（接口实现）"]
+        F1[LLM Adapter<br/>主备降级 · 流式]
+        F2[SemanticCache<br/>精确匹配 · Embedding]
+        F3[LLMSummarizer<br/>增量摘要 · 压缩]
+        F4[ToolExecutor<br/>天气 · 知识库 · RAG]
+        F5[Emotion Detector]
+        F6[GORM Repository]
+    end
+
+    subgraph L6["🌩️ External 外部服务"]
+        E1[多模型 LLM<br/>小米 · 通义 · GLM · OpenAI]
+        E2[天气 API]
+        E3[(MySQL)]
+    end
+
+    %% 依赖方向：始终向内
+    H1 --> S1
+    H2 --> S1
+    S1 --> C1
+    S1 --> C3
+    C1 --> C2
+    C1 --> C4
+    C1 --> I1
+    C1 --> I4
+    C1 --> I5
+    C1 --> I2
+    C2 --> I3
+    C2 --> I2
+    C3 --> I6
+
+    %% 接口被基础设施实现（依赖倒置）
+    I1 -.-> F1
+    I2 -.-> F2
+    I3 -.-> F3
+    I4 -.-> F4
+    I5 -.-> F5
+    I6 -.-> F6
+
+    %% 基础设施对接外部
+    F1 --> E1
+    F3 --> E1
+    F4 --> E2
+    F6 --> E3
+
+    class H1,H2 handler
+    class S1 service
+    class C1,C2,C3,C4 core
+    class I1,I2,I3,I4,I5,I6 iface
+    class F1,F2,F3,F4,F5,F6 infra
+    class E1,E2,E3 external
+```
+
+
+```mermaid
+graph TB
+    A[Application Layer<br/>agent.Runtime / WebSocket / REST API] --> B[llm.Adapter 兼容接口]
+    B --> C[RouterAdapter 桥接层]
+    C --> D[Router 策略引擎]
+    D --> E[Fixed]
+    D --> F[Cost]
+    D --> G[Latency EMA]
+    D --> H[Capability]
+    D --> I[Fallback]
+    D --> J[Weighted]
+    D --> K[ModelStats EMA]
+    K --> L[Latency Tracker]
+    K --> M[Error Rate Tracker]
+    K --> N[Score = Latency + ErrorRate*10000]
+    D --> O[Provider 统一接口]
+    O --> P[Claude Provider]
+    O --> Q[OpenAI Provider]
+    O --> R[OpenAI 兼容 Provider<br/>GLM / Qwen / DeepSeek]
+```
+
 ## 项目结构
 
 ```
