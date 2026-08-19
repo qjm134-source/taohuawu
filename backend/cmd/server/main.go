@@ -8,11 +8,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/watertown/guide/internal/adapter/knowledge"
 	"github.com/watertown/guide/internal/config"
-	"github.com/watertown/guide/internal/database"
-	"github.com/watertown/guide/internal/knowledge"
+	"github.com/watertown/guide/internal/handler/http"
 	"github.com/watertown/guide/internal/observability"
-	"github.com/watertown/guide/internal/server"
+	"github.com/watertown/guide/internal/repository"
 	"github.com/watertown/guide/pkg/logging"
 	"github.com/watertown/guide/pkg/utils"
 )
@@ -54,7 +54,7 @@ func main() {
 	logger.Info("Starting Water Town Guide Server...")
 
 	// 初始化数据库
-	db, err := database.Init(cfg.Database)
+	db, err := repository.Init(cfg.Database)
 	if err != nil {
 		logger.Fatal("Failed to initialize database", "error", err)
 	}
@@ -91,7 +91,7 @@ func main() {
 	}
 
 	// 初始化服务器
-	srv, err := server.New(cfg, db, kb, logger)
+	srv, err := http.New(cfg, db, kb, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize server", "error", err)
 	}

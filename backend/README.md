@@ -103,7 +103,6 @@ graph TB
     class E1,E2,E3 external
 ```
 
-
 ```mermaid
 graph TB
     A[Application Layer<br/>agent.Runtime / WebSocket / REST API] --> B[llm.Adapter 兼容接口]
@@ -248,7 +247,7 @@ type Tool interface {
 系统使用 **Eino ReAct Agent** 实现完整的 ReAct 推理循环，工具调用完全由 Agent 内部自动处理：
 
 1. **Reason**：Agent 内部调用 ChatModel，判断是否需要调用工具
-2. **Act**：如果检测到 tool_calls，Agent 自动查找并执行注册的工具
+2. **Act**：如果检测到 tool\_calls，Agent 自动查找并执行注册的工具
 3. **Observe**：工具执行结果自动注入对话上下文
 4. **Respond**：循环直到生成最终自然语言回复
 
@@ -270,7 +269,8 @@ sequenceDiagram
 ```
 
 **关键变化**：
-- ✅ **工具自动执行**：ReAct Agent 内部完成工具调用循环，应用层无需手动解析 tool_calls
+
+- ✅ **工具自动执行**：ReAct Agent 内部完成工具调用循环，应用层无需手动解析 tool\_calls
 - ✅ **统一接口**：`agent.Generate()` / `agent.Stream()` 直接返回最终结果
 - ✅ **回调追踪**：通过 Eino Callbacks 机制实现模型调用和工具调用的 trace 与审计日志
 
@@ -278,19 +278,20 @@ sequenceDiagram
 
 ### 1. 为什么迁移到 Eino ReAct Agent？
 
-| 维度 | Eino ReAct Agent | 自研 ReAct（旧方案） |
-|------|-----------------|-------------------|
-| **维护成本** | 框架维护，跟随社区更新 | 自行维护 ReAct 循环逻辑 |
-| **抽象层级** | 统一 `ChatModel` 接口 + `react.Agent` | 自定义 `Provider` + 手动工具调用 |
-| **工具调用** | Agent 内部自动完成 Reason→Act→Observe→Respond | 应用层手动解析 tool_calls、执行工具、注入结果 |
-| **故障转移** | 内置 `ModelFailoverConfig` | 手动实现降级链 |
-| **重试机制** | 内置 `ModelRetryConfig` | 手动实现重试逻辑 |
-| **流式处理** | 自动处理 SSE 流，支持流式 ReAct | 手动解析 SSE 数据 |
-| **Tool Calling** | 统一工具注册，自动匹配执行 | 各 Provider 不同实现 |
-| **可观测性** | 内置 Callbacks 机制，支持 trace/audit | 应用层手动埋点 |
-| **扩展性** | 通过 OpenAI 兼容接口接入任意模型 | 需为每个 Provider 写适配器 |
+| 维度               | Eino ReAct Agent                        | 自研 ReAct（旧方案）                 |
+| ---------------- | --------------------------------------- | ----------------------------- |
+| **维护成本**         | 框架维护，跟随社区更新                             | 自行维护 ReAct 循环逻辑               |
+| **抽象层级**         | 统一 `ChatModel` 接口 + `react.Agent`       | 自定义 `Provider` + 手动工具调用       |
+| **工具调用**         | Agent 内部自动完成 Reason→Act→Observe→Respond | 应用层手动解析 tool\_calls、执行工具、注入结果 |
+| **故障转移**         | 内置 `ModelFailoverConfig`                | 手动实现降级链                       |
+| **重试机制**         | 内置 `ModelRetryConfig`                   | 手动实现重试逻辑                      |
+| **流式处理**         | 自动处理 SSE 流，支持流式 ReAct                   | 手动解析 SSE 数据                   |
+| **Tool Calling** | 统一工具注册，自动匹配执行                           | 各 Provider 不同实现               |
+| **可观测性**         | 内置 Callbacks 机制，支持 trace/audit          | 应用层手动埋点                       |
+| **扩展性**          | 通过 OpenAI 兼容接口接入任意模型                    | 需为每个 Provider 写适配器            |
 
 **迁移收益**：
+
 - **减少代码量**：移除了大量手动处理工具调用的代码（`runWithToolLoop`、`runStreamWithToolLoop` 等）
 - **工具自动执行**：ReAct Agent 内部自动完成"思考→调用工具→获取结果→继续思考"的完整循环
 - **统一抽象**：所有模型通过同一 OpenAI 兼容接口接入
@@ -322,12 +323,12 @@ Score  = Latency + ErrorRate × 10000
 
 ### 4. 成本控制手段
 
-| 手段 | 说明 |
-|------|------|
-| 相似问题缓存 | 命中缓存直接返回，减少 API 调用 |
-| 历史消息摘要 | 长对话自动压缩，减少 token 消耗 |
-| Token 估算 | 本地估算，无需调用即可预估成本 |
-| Cost 策略 | 自动选择单价最低的模型 |
+| 手段       | 说明                  |
+| -------- | ------------------- |
+| 相似问题缓存   | 命中缓存直接返回，减少 API 调用  |
+| 历史消息摘要   | 长对话自动压缩，减少 token 消耗 |
+| Token 估算 | 本地估算，无需调用即可预估成本     |
+| Cost 策略  | 自动选择单价最低的模型         |
 
 ### 5. 缓存方案（业界最佳实践）
 
@@ -389,23 +390,23 @@ cache:
 
 #### 缓存类型对比
 
-| 缓存类型 | 哈希函数 | 适用场景 | 优缺点 |
-|---------|---------|---------|-------|
-| **精确匹配** | SHA256(question:model) | 重复请求、批量处理 | 简单高效，O(1) 查询，但无法处理语义相似 |
-| **语义缓存** | Embedding 向量 + 余弦相似度 | 相似问题、意图理解 | 智能匹配，但计算成本较高 |
-| **工具结果** | SHA256(tool_name:params) | 外部 API 调用、数据库查询 | 节省外部调用成本，需处理数据时效性 |
-| **对话摘要** | LLM 生成 | 长对话上下文管理 | 减少 token 消耗，可能丢失细节 |
+| 缓存类型     | 哈希函数                      | 适用场景            | 优缺点                    |
+| -------- | ------------------------- | --------------- | ---------------------- |
+| **精确匹配** | SHA256(question:model)    | 重复请求、批量处理       | 简单高效，O(1) 查询，但无法处理语义相似 |
+| **语义缓存** | Embedding 向量 + 余弦相似度      | 相似问题、意图理解       | 智能匹配，但计算成本较高           |
+| **工具结果** | SHA256(tool\_name:params) | 外部 API 调用、数据库查询 | 节省外部调用成本，需处理数据时效性      |
+| **对话摘要** | LLM 生成                    | 长对话上下文管理        | 减少 token 消耗，可能丢失细节     |
 
 #### 缓存统计指标
 
 系统提供完整的缓存统计：
 
-| 指标 | 说明 |
-|------|------|
-| Hits | 缓存命中次数 |
-| Misses | 缓存未命中次数 |
-| HitRate | 缓存命中率 (%) |
-| Entries | 当前缓存条目数 |
+| 指标            | 说明         |
+| ------------- | ---------- |
+| Hits          | 缓存命中次数     |
+| Misses        | 缓存未命中次数    |
+| HitRate       | 缓存命中率 (%)  |
+| Entries       | 当前缓存条目数    |
 | MemoryUsageKB | 内存使用量 (KB) |
 
 #### 业界最佳实践总结
@@ -417,7 +418,7 @@ cache:
 5. **异步构建语义索引**：避免阻塞主流程
 6. **监控与告警**：跟踪缓存命中率，低于阈值时告警
 
----
+***
 
 ## 快速开始
 
@@ -431,14 +432,15 @@ cache:
 
 项目提供两份配置文件，分别用于不同环境：
 
-| 文件 | 用途 | Trace 输出 | Prometheus |
-|------|------|-----------|------------|
-| `configs/config-local.yaml` | 本地开发 | stdout（控制台） | 关闭 |
-| `configs/config-docker.yaml` | Docker 部署 | otlp（Jaeger） | 启用 |
+| 文件                           | 用途        | Trace 输出     | Prometheus |
+| ---------------------------- | --------- | ------------ | ---------- |
+| `configs/config-local.yaml`  | 本地开发      | stdout（控制台）  | 关闭         |
+| `configs/config-docker.yaml` | Docker 部署 | otlp（Jaeger） | 启用         |
 
 ### 方式一：本地开发
 
 1. **配置环境变量**：
+
 ```bash
 # 复制环境变量模板
 cp .env.example .env
@@ -446,7 +448,8 @@ cp .env.example .env
 # 编辑 .env 文件，填入你的 API Key
 ```
 
-2. **启动服务**：
+1. **启动服务**：
+
 ```bash
 cd backend
 go mod download
@@ -460,6 +463,7 @@ go run cmd/server/main.go
 **推荐用于生产环境或快速体验**，包含完整的监控链路：
 
 1. **设置环境变量**（可选）：
+
 ```bash
 # Linux/Mac
 export CLAUDE_API_KEY="your-claude-api-key"
@@ -467,6 +471,7 @@ export CLAUDE_API_KEY="your-claude-api-key"
 # Windows PowerShell
 $env:CLAUDE_API_KEY="your-claude-api-key"
 ```
+
 注意：使用新的模型，需要在 `configs/config-docker.yaml` 中添加对应的模型配置，并移除不需要的模型配置。
 
 ```yaml
@@ -477,7 +482,7 @@ models:
     base_url: "https://www.anthropic.com/claude-code"
 ```
 
-2. **一键启动**：
+1. **一键启动**：
 
 ```bash
 # Linux/Mac
@@ -490,17 +495,18 @@ models:
 cd deploy && docker-compose up -d
 ```
 
-3. **访问地址**：
+1. **访问地址**：
 
-| 服务 | 地址 | 说明 |
-|------|------|------|
-| 前端页面 | http://localhost:3000 | 游戏界面 |
-| 后端 API | http://localhost:8080 | REST API |
-| Prometheus | http://localhost:9090 | 指标监控 |
-| Jaeger UI | http://localhost:16686 | 分布式追踪 |
-| MySQL | localhost:3306 | 数据库 |
+| 服务         | 地址                       | 说明       |
+| ---------- | ------------------------ | -------- |
+| 前端页面       | <http://localhost:3000>  | 游戏界面     |
+| 后端 API     | <http://localhost:8080>  | REST API |
+| Prometheus | <http://localhost:9090>  | 指标监控     |
+| Jaeger UI  | <http://localhost:16686> | 分布式追踪    |
+| MySQL      | localhost:3306           | 数据库      |
 
-4. **停止服务**：
+1. **停止服务**：
+
 ```bash
 cd deploy && docker-compose down
 ```
@@ -529,19 +535,19 @@ cd deploy && docker-compose down
 
 ### 环境变量参考
 
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `CONFIG_FILE` | 配置文件路径 | `configs/config.yaml` |
-| `DB_HOST` | 数据库主机 | `localhost` / `mysql`（Docker） |
-| `DB_PORT` | 数据库端口 | `3306` |
-| `DB_USER` | 数据库用户名 | `root` / `water_town`（Docker） |
-| `DB_PASS` | 数据库密码 | `password123` |
-| `GLM_API_KEY` | GLM API Key | - |
-| `MIMO_API_KEY` | MIMO/Claude API Key | - |
-| `BAILIAN_API_KEY` | 阿里云通义千问 API Key | - |
-| `OBSERVABILITY_ENABLED` | 启用追踪 | `true` |
-| `OBSERVABILITY_TRACER_EXPORTER` | 追踪输出 | `stdout` / `otlp` |
-| `OBSERVABILITY_ENDPOINT` | OTLP 端点 | `http://localhost:4318` / `http://jaeger:4318` |
+| 变量名                             | 说明                  | 默认值                                            |
+| ------------------------------- | ------------------- | ---------------------------------------------- |
+| `CONFIG_FILE`                   | 配置文件路径              | `configs/config.yaml`                          |
+| `DB_HOST`                       | 数据库主机               | `localhost` / `mysql`（Docker）                  |
+| `DB_PORT`                       | 数据库端口               | `3306`                                         |
+| `DB_USER`                       | 数据库用户名              | `root` / `water_town`（Docker）                  |
+| `DB_PASS`                       | 数据库密码               | `password123`                                  |
+| `GLM_API_KEY`                   | GLM API Key         | -                                              |
+| `MIMO_API_KEY`                  | MIMO/Claude API Key | -                                              |
+| `BAILIAN_API_KEY`               | 阿里云通义千问 API Key     | -                                              |
+| `OBSERVABILITY_ENABLED`         | 启用追踪                | `true`                                         |
+| `OBSERVABILITY_TRACER_EXPORTER` | 追踪输出                | `stdout` / `otlp`                              |
+| `OBSERVABILITY_ENDPOINT`        | OTLP 端点             | `http://localhost:4318` / `http://jaeger:4318` |
 
 ## 多模型路由（核心亮点）
 
@@ -549,14 +555,14 @@ cd deploy && docker-compose down
 
 系统支持 6 种路由策略，可根据场景灵活切换：
 
-| 策略 | 说明 | 适用场景 |
-|------|------|---------|
-| **Fixed** | 固定使用指定模型 | 开发调试 |
-| **Cost** | 选择成本最低的模型 | 成本控制 |
-| **Latency** | 选择延迟最低的模型（EMA 跟踪） | 实时对话 |
-| **Capability** | 根据任务类型选模型 | 混合场景 |
-| **Fallback** | 按降级链依次尝试 | **生产推荐** |
-| **Weighted** | 按权重随机选择 | A/B 测试 |
+| 策略             | 说明                | 适用场景     |
+| -------------- | ----------------- | -------- |
+| **Fixed**      | 固定使用指定模型          | 开发调试     |
+| **Cost**       | 选择成本最低的模型         | 成本控制     |
+| **Latency**    | 选择延迟最低的模型（EMA 跟踪） | 实时对话     |
+| **Capability** | 根据任务类型选模型         | 混合场景     |
+| **Fallback**   | 按降级链依次尝试          | **生产推荐** |
+| **Weighted**   | 按权重随机选择           | A/B 测试   |
 
 ### 降级链
 
@@ -584,6 +590,7 @@ Code (代码) > Reasoning (推理) > Chinese (中文) > LongText (长文本) > G
 ```
 
 **分类规则**：
+
 - **Code**：检测代码关键词（`function`、`class`、`def`）、代码块标记、特殊符号占比 > 30%
 - **Reasoning**：检测推理类关键词（`为什么`、`how`、`why`、`分析`、`推导`）
 - **Chinese**：中文字符占比 > 30%
@@ -592,13 +599,13 @@ Code (代码) > Reasoning (推理) > Chinese (中文) > LongText (长文本) > G
 
 **2026年模型能力映射**（基于最新基准测试数据）：
 
-| 任务类型 | 推荐 Provider（按优先级） | 推荐模型 |
-|----------|-------------------------|----------|
-| Code | claude → openai → glm → qwen | Claude 3.5 Sonnet、GPT-4o、GLM-4 Code、Qwen 2.0 Code |
-| Reasoning | claude → openai → gemini → glm → qwen | Claude 3.5 Sonnet、GPT-4o、Gemini 1.5 Pro、GLM-4 |
-| Chinese | glm → qwen → claude → openai | GLM-4、Qwen 2.0、Claude 3.5 Sonnet、GPT-4o |
-| LongText | claude → gemini → qwen → glm → openai | Claude 3.5 Sonnet (200K)、Gemini 1.5 Pro (1M)、Qwen 2.0 |
-| General | claude → openai → glm → qwen → gemini | Claude 3.5 Sonnet、GPT-4o、GLM-4、Qwen 2.0、Gemini 1.5 Flash |
+| 任务类型      | 推荐 Provider（按优先级）                     | 推荐模型                                                     |
+| --------- | ------------------------------------- | -------------------------------------------------------- |
+| Code      | claude → openai → glm → qwen          | Claude 3.5 Sonnet、GPT-4o、GLM-4 Code、Qwen 2.0 Code        |
+| Reasoning | claude → openai → gemini → glm → qwen | Claude 3.5 Sonnet、GPT-4o、Gemini 1.5 Pro、GLM-4            |
+| Chinese   | glm → qwen → claude → openai          | GLM-4、Qwen 2.0、Claude 3.5 Sonnet、GPT-4o                  |
+| LongText  | claude → gemini → qwen → glm → openai | Claude 3.5 Sonnet (200K)、Gemini 1.5 Pro (1M)、Qwen 2.0    |
+| General   | claude → openai → glm → qwen → gemini | Claude 3.5 Sonnet、GPT-4o、GLM-4、Qwen 2.0、Gemini 1.5 Flash |
 
 **Token 估算**：每 4 字符约 1 token，中文按字节估算。
 
@@ -674,6 +681,7 @@ llm:
 ```
 
 系统会根据模型名称自动推断 Provider 类型：
+
 - 名称含 `claude` → Claude Provider
 - 名称含 `gpt`/`o1`/`o3` → OpenAI Provider
 - 其他 → OpenAI 兼容模式（GLM、Qwen 等均支持）
@@ -701,12 +709,12 @@ adapter.SetStrategy(llm.StrategyFallback)
 
 ### 核心功能
 
-| 功能 | 说明 | 配置开关 |
-|------|------|---------|
-| **Prometheus 指标** | HTTP/LLM/WebSocket/缓存指标 | `observability.prometheus` |
-| **OpenTelemetry 追踪** | 分布式链路追踪 | `observability.enabled` |
-| **Langfuse LLM 追踪** | LLM 调用详情（输入/输出/Token/成本） | `observability.langfuse.enabled` |
-| **审计日志** | 操作记录 | 默认启用 |
+| 功能                   | 说明                       | 配置开关                             |
+| -------------------- | ------------------------ | -------------------------------- |
+| **Prometheus 指标**    | HTTP/LLM/WebSocket/缓存指标  | `observability.prometheus`       |
+| **OpenTelemetry 追踪** | 分布式链路追踪                  | `observability.enabled`          |
+| **Langfuse LLM 追踪**  | LLM 调用详情（输入/输出/Token/成本） | `observability.langfuse.enabled` |
+| **审计日志**             | 操作记录                     | 默认启用                             |
 
 ### 配置示例
 
@@ -729,7 +737,7 @@ observability:
 
 详细说明请查看 [可观测性指南](docs/OBSERVABILITY.md)。
 
----
+***
 
 ## 详细文档
 
@@ -746,6 +754,7 @@ observability:
 **URL:** `ws://localhost:8080/ws/game`
 
 **消息格式:**
+
 ```json
 {
   "type": "MESSAGE_TYPE",
@@ -799,6 +808,7 @@ func (t *MyTool) Execute(ctx context.Context, params map[string]interface{}) (in
 ## 依赖
 
 核心第三方依赖（仅 2 个 SDK）：
+
 - `github.com/anthropics/anthropic-sdk-go` — Claude 原生 SDK
 - `github.com/sashabaranov/go-openai` — OpenAI 原生 SDK
 

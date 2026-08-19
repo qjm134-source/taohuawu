@@ -576,7 +576,7 @@ cd deploy && docker-compose up -d
 
 **预置仪表盘：**
 
-项目已配置自动导入仪表盘（`grafana/dashboards/water-town-dashboard.json`），包含：
+项目已配置自动导入仪表盘（`deploy/grafana/dashboards/water-town-dashboard.json`），包含：
 - 核心指标：LLM 成本、缓存命中率、P99 延迟、LLM 调用成功率
 - 趋势图表：缓存命中率趋势、成本趋势、请求量趋势
 - 延迟分布：HTTP 请求 P50/P95/P99 分位数
