@@ -434,19 +434,19 @@ HandleChat() / HandleChatStream()
 
 | 模块 | 文件 | 关键内容 |
 |------|------|---------|
-| 适配器接口 | `internal/llm/adapter.go` | `ChatUsage` 结构体、`Adapter` 接口 |
-| Token 提取 | `internal/llm/eino_agent_adapter.go` | `extractUsage()`、`getCurrentModelName()` |
-| 模型定价 | `internal/cost/optimizer.go` | `modelPricing`、`CalculateCost()` |
-| 摘要压缩 | `internal/cost/optimizer.go` | `Summary.Add()`、`compressWithLLM()` |
-| Token 估算 | `internal/cost/summarizer_llm.go` | `EstimateTokens()` |
-| 上下文构建 | `internal/agent/runtime.go` | `buildContextMessages()`、`tokenThreshold=4096` |
-| 会话管理 | `internal/agent/runtime.go` | `HandleChat()`、`HandleChatStream()` |
+| 适配器接口 | `internal/adapter/llm/adapter.go` | `ChatUsage` 结构体、`Adapter` 接口 |
+| Token 提取 | `internal/adapter/llm/eino_agent.go` | `extractUsage()`、`getCurrentModelName()` |
+| 模型定价 | `internal/core/cost/optimizer.go` | `modelPricing`、`CalculateCost()` |
+| 摘要压缩 | `internal/core/cost/optimizer.go` | `Summary.Add()`、`compressWithLLM()` |
+| Token 估算 | `internal/core/context/summarizer.go` | `EstimateTokens()` |
+| 上下文构建 | `internal/core/agent/agent.go` | `buildContextMessages()`、`tokenThreshold=4096` |
+| 会话管理 | `internal/core/agent/agent.go` | `HandleChat()`、`HandleChatStream()` |
 | 指标定义 | `internal/observability/metrics.go` | Prometheus Token/Cost 指标 |
-| 指标上报 | `internal/agent/runtime.go` | `recordLLMMetrics()` |
+| 指标上报 | `internal/core/agent/agent.go` | `recordLLMMetrics()` |
 | Langfuse 追踪 | `internal/observability/langfuse.go` | `RecordGeneration()` |
-| 数据库模型 | `internal/database/models.go` | `Conversation.LLMTokens`、`Conversation.Cost` |
-| 前端推送 | `internal/websocket/message.go` | `NPCReplyChunkPayload.TotalTokens/Cost` |
-| 服务初始化 | `internal/server/gin_server.go` | `initAgentComponents()` → 初始化 Optimizer |
+| 数据库模型 | `internal/repository/model.go` | `Conversation.LLMTokens`、`Conversation.Cost` |
+| 前端推送 | `internal/handler/ws/message.go` | `NPCReplyChunkPayload.TotalTokens/Cost` |
+| 服务初始化 | `internal/handler/http/gin.go` | `initAgentComponents()` → 初始化 Optimizer |
 
 ---
 
@@ -454,7 +454,7 @@ HandleChat() / HandleChatStream()
 
 ### 添加新模型的定价
 
-在 `internal/cost/optimizer.go` 的 `modelPricing` map 中添加：
+在 `internal/core/cost/optimizer.go` 的 `modelPricing` map 中添加：
 
 ```go
 var modelPricing = map[string]struct {
@@ -468,7 +468,7 @@ var modelPricing = map[string]struct {
 
 ### 调整压缩阈值
 
-修改 `internal/agent/runtime.go` 中的常量：
+修改 `internal/core/agent/agent.go` 中的常量：
 
 ```go
 const tokenThreshold = 4096  // 调整为更大的值以允许更多上下文

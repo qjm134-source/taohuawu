@@ -17,140 +17,173 @@
 
 ### 后端架构图
 
+> 本图为**概念分层**（与目录不是 1:1）。实际 Go 包目录映射：Handler = `internal/handler/*`、Core = `internal/core/*`、Adapter/Repository 接口实现 = `internal/adapter/*` + `internal/repository/*`。完整路径对照见文末「**重构路径映射总表**」。
+
 ```mermaid
 graph TB
-    classDef handler fill:#e3f2fd,stroke:#1976d2,stroke-width:1px,color:#212529
-    classDef service fill:#e8f5e9,stroke:#388e3c,stroke-width:1px,color:#212529
-    classDef core fill:#fff8e1,stroke:#f57c00,stroke-width:2px,color:#212529
-    classDef iface fill:#fff,stroke:#e65100,stroke-width:1px,stroke-dasharray: 4 3,color:#bf360c
-    classDef infra fill:#eceff1,stroke:#546e7a,stroke-width:1px,color:#212529
-    classDef external fill:#efebe9,stroke:#6d4c41,stroke-width:1px,color:#212529
 
-    subgraph L1["📥 Handler 接入层"]
-        H1[Gin HTTP Handler]
-        H2[WebSocket Handler]
+    subgraph L1["Handler 接入层"]
+        H1["Gin HTTP"]
+        H2["WebSocket Hub+Client"]
     end
 
-    subgraph L2["⚙️ Service 业务层（编排）"]
-        S1[ChatService<br/>对话流程 · 持久化 · 审计]
+    subgraph L2["Core 核心层"]
+        C1["AgentRuntime"]
+        C2["ContextBuilder + Summarizer"]
+        C3["SessionManager"]
+        C4["Cost Optimizer"]
+        C5["EmotionDetector"]
     end
 
-    subgraph L3["🧠 Core 核心层（业务逻辑）"]
-        C1[AgentRuntime<br/>LLM 编排 · 工具调用]
-        C2[ContextBuilder<br/>上下文构建 · 摘要]
-        C3[SessionManager<br/>会话生命周期]
-        C4[CostCalculator<br/>成本计算]
+    subgraph L3["Port 接口定义层"]
+        I1["LLM.Adapter"]
+        I2["Cache + EmbeddingAPI"]
+        I3["Summarizer"]
+        I4["Tool / ToolRegistry"]
+        I6["Repository"]
     end
 
-    subgraph L4["📋 Interface 接口定义层（依赖倒置）"]
-        I1[LLMService]
-        I2[CacheService]
-        I3[Summarizer]
-        I4[ToolRegistry]
-        I5[EmotionDetector]
-        I6[Repository<br/>Player / Conversation / Audit]
+    subgraph L4["Adapter / Repository 实现层"]
+        F1["EinoAgentAdapter + Fallback"]
+        F2["LayeredCache + Embedding"]
+        F3["LLMSummarizer"]
+        F4["ToolRegistry + Executor"]
+        F6["GORM Repository"]
     end
 
-    subgraph L5["🔧 Infrastructure 基础设施层（接口实现）"]
-        F1[LLM Adapter<br/>主备降级 · 流式]
-        F2[SemanticCache<br/>精确匹配 · Embedding]
-        F3[LLMSummarizer<br/>增量摘要 · 压缩]
-        F4[ToolExecutor<br/>天气 · 知识库 · RAG]
-        F5[Emotion Detector]
-        F6[GORM Repository]
+    subgraph L5["External 外部服务"]
+        E1["多模型 LLM"]
+        E2["天气 API"]
+        E3["数据库"]
     end
 
-    subgraph L6["🌩️ External 外部服务"]
-        E1[多模型 LLM<br/>小米 · 通义 · GLM · OpenAI]
-        E2[天气 API]
-        E3[(MySQL)]
-    end
+    %% 入站：Handler -> Core（实线箭头 = 调用依赖）
+    H1 --> C1
+    H1 --> C3
+    H2 --> C1
+    H2 --> C3
 
-    %% 依赖方向：始终向内
-    H1 --> S1
-    H2 --> S1
-    S1 --> C1
-    S1 --> C3
+    %% Core 内部协作
     C1 --> C2
+    C1 --> C3
     C1 --> C4
+    C1 --> C5
+
+    %% Core -> Port 接口（实线 = 依赖接口）
     C1 --> I1
-    C1 --> I4
-    C1 --> I5
     C1 --> I2
-    C2 --> I3
+    C1 --> I4
     C2 --> I2
+    C2 --> I3
     C3 --> I6
+    C4 --> I2
 
-    %% 接口被基础设施实现（依赖倒置）
-    I1 -.-> F1
-    I2 -.-> F2
-    I3 -.-> F3
-    I4 -.-> F4
-    I5 -.-> F5
-    I6 -.-> F6
+    %% Port 接口 <- Adapter / Repository（带"实现"标签 = 依赖倒置）
+    I1 -- 实现 --> F1
+    I2 -- 实现 --> F2
+    I3 -- 实现 --> F3
+    I4 -- 实现 --> F4
+    I6 -- 实现 --> F6
 
-    %% 基础设施对接外部
+    %% Adapter -> 外部服务（所有出站 IO）
     F1 --> E1
     F3 --> E1
     F4 --> E2
+    F4 --> F2
     F6 --> E3
-
-    class H1,H2 handler
-    class S1 service
-    class C1,C2,C3,C4 core
-    class I1,I2,I3,I4,I5,I6 iface
-    class F1,F2,F3,F4,F5,F6 infra
-    class E1,E2,E3 external
 ```
+
+> **节点对应代码路径**（上面图里故意不写路径，避免渲染器对特殊字符的解析问题）：
+> - H1 = `handler/http/gin.go` ｜ H2 = `handler/ws/manager.go` + `handler/ws/client.go`
+> - C1 = `core/agent/agent.go` ｜ C2 = `core/agent/*` + `core/context/summarizer.go` ｜ C3 = `core/session/manager.go` ｜ C4 = `core/cost/optimizer.go` ｜ C5 = `core/emotion/detector.go`
+> - I1/I2/I3/I4 接口定义分别位于 F1/F2/F3/F4 包内；I6 Repository 接口定义位于 `repository/*_repo.go` 上的 consumer 侧
+> - F1 = `adapter/llm/eino_agent.go` + `fallback.go` ｜ F2 = `adapter/cache/layered.go` + `embedding.go` ｜ F3 = `core/context/summarizer.go`（概念属 Adapter，物理放在 core/context 减少跨包） ｜ F4 = `adapter/tools/*` + `adapter/weather/*` ｜ F6 = `repository/*.go`
+> - E1 = 小米/通义/GLM/OpenAI/DeepSeek ｜ E2 = QWeather / Open-Meteo ｜ E3 = MySQL / SQLite
+>
+> 完整旧→新路径对照见文末「**重构路径映射总表**」。
+
+---
+
+### 多模型路由结构（基于 Eino）
 
 ```mermaid
 graph TB
-    A[Application Layer<br/>agent.Runtime / WebSocket / REST API] --> B[llm.Adapter 兼容接口]
-    B --> C[RouterAdapter 桥接层]
-    C --> D[Router 策略引擎]
-    D --> E[Fixed]
-    D --> F[Cost]
-    D --> G[Latency EMA]
-    D --> H[Capability]
-    D --> I[Fallback]
-    D --> J[Weighted]
-    D --> K[ModelStats EMA]
-    K --> L[Latency Tracker]
-    K --> M[Error Rate Tracker]
-    K --> N[Score = Latency + ErrorRate*10000]
-    D --> O[Provider 统一接口]
-    O --> P[Claude Provider]
-    O --> Q[OpenAI Provider]
-    O --> R[OpenAI 兼容 Provider<br/>GLM / Qwen / DeepSeek]
+    A["Application Layer"] --> B["llm.Adapter 接口"]
+    B --> C["EinoAgentAdapter 桥接层"]
+    C --> D["Eino ChatModelAgent"]
+    D --> E["Fixed 策略"]
+    D --> F["Cost 策略"]
+    D --> G["Latency EMA 策略"]
+    D --> H["Capability 策略"]
+    D --> I["Fallback + Failover"]
+    D --> J["Weighted 策略"]
+    D --> K["ModelStats EMA"]
+    K --> L["Latency Tracker"]
+    K --> M["Error Rate Tracker"]
+    K --> N["Score = Latency + ErrorRate * 10000"]
+    D --> O["OpenAI 兼容 ChatModel"]
+    O --> P["Anthropic Claude"]
+    O --> Q["OpenAI GPT"]
+    O --> R["GLM / Qwen / DeepSeek / 小米"]
 ```
+
+> 对应代码：
+> - A = `core/agent.Runtime` + `handler/ws` + `handler/http`
+> - B = `internal/adapter/llm/adapter.go` ｜ C = `adapter/llm/eino_agent.go`
+> - D～N = 全部由 Eino ChatModelAgent 内置实现（无需本项目代码维护路由策略）
+> - O～R = 通过 Eino OpenAI 兼容 ChatModel 接入各大模型
 
 ## 项目结构
 
+后端采用**清洁架构（Clean Architecture）**分层，依赖方向**始终向内**：接入层 → 核心层 ← 适配层。
+
 ```
 backend/
-├── cmd/server/              # 程序入口
+├── cmd/server/              # 程序入口（最小化，仅 DI 组装 + 启动）
 ├── internal/
-│   ├── config/              # 配置管理
-│   ├── server/              # HTTP 服务器
-│   ├── websocket/           # WebSocket 处理
-│   ├── agent/               # Agent 运行时
-│   ├── llm/                 # ★ 多模型路由系统（基于 Eino）
-│   │   ├── adapter.go          # Adapter 接口定义
-│   │   ├── eino_agent_adapter.go  # ★ EinoAgentAdapter 实现
-│   │   └── fallback_adapter.go     # 兜底适配器
-│   ├── cost/                # 成本优化
-│   ├── emotion/             # 情绪检测
-│   ├── database/            # 数据库层
-│   ├── knowledge/           # 知识库
-│   └── observability/       # 可观测性
-├── pkg/                     # 工具包
-├── examples/                # 使用示例
-├── docs/                    # 详细文档
+│   ├── adapter/             # ★ 外部依赖适配层（所有 IO 边界在这一层）
+│   │   ├── cache/           #   分层缓存 LayeredCache + Embedding 客户端
+│   │   ├── knowledge/       #   知识库 JSON 加载 + FindQuestion/FindByTag
+│   │   ├── llm/             #   LLM 适配（EinoAgentAdapter + FallbackAdapter 兜底）
+│   │   │   ├── adapter.go       # llm.Adapter 接口 + Message 定义
+│   │   │   ├── eino_agent.go    # ★ Eino ReAct Agent 桥接实现
+│   │   │   └── fallback.go      # 兜底预设回复（无 API Key 也能演示）
+│   │   ├── tools/           #   Tool 接口 + ToolRegistry + 天气/游戏/RAG 工具
+│   │   └── weather/         #   天气 API 适配（QWeather / Open-Meteo）
+│   ├── core/                # ★ 业务核心层（纯 Go 逻辑、无 IO、可单独测试）
+│   │   ├── agent/           #   Agent Runtime + Prompts（对话编排核心）
+│   │   ├── context/         #   上下文构建 + LLMSummarizer 增量摘要
+│   │   ├── cost/            #   Optimizer 成本优化（相似缓存 + 历史摘要 + Token 估算）
+│   │   ├── emotion/         #   规则情绪检测（关键词 + 表情符号识别）
+│   │   └── session/         #   SessionManager 会话生命周期 + 消息栈
+│   ├── handler/             # ★ 接入层（协议与传输、无业务逻辑）
+│   │   ├── http/            #   Gin HTTP 路由（健康检查、审计、WS 升级）
+│   │   └── ws/              #   WebSocket Hub + Client 连接池 + 消息协议
+│   ├── repository/          # ★ 数据持久层（GORM 实现，接口由核心层消费）
+│   │   ├── db.go            #   数据库初始化 + 自动迁移
+│   │   ├── model.go         #   Player / Conversation / Audit 实体模型
+│   │   ├── player.go        #   玩家仓储
+│   │   ├── conversation.go  #   会话记录仓储
+│   │   └── audit.go         #   审计日志仓储
+│   ├── config/              # 配置管理（YAML + 环境变量覆盖 + 常量校验）
+│   └── observability/       # 可观测性（Prometheus 指标 + OTel 追踪 + 中间件）
+├── pkg/                     # 通用工具包（可供外部项目引用）
+│   ├── contextutil/         #   context 扩展（SessionID 读写）
+│   ├── logging/             #   结构化日志（Zap 封装，Console + File 双输出）
+│   └── utils/               #   重试、超时、Panic 恢复（支持 Logger 注入）
+├── docs/                    # 后端专题文档
 │   ├── MULTI_MODEL_ROUTER.md
 │   ├── MEMORY_SYSTEM.md
-│   └ OBSERVABILITY.md
+│   ├── CACHE_SYSTEM.md
+│   └── OBSERVABILITY.md
 ├── configs/                 # 配置文件
-├── MODEL_CONFIG.md          # 多模型配置说明
+│   ├── config.yaml          #   本地开发配置
+│   └── config-docker.yaml   #   Docker Compose 配置
+├── data/                    # 运行时数据（.gitignore 忽略 db 文件本身，仅提交迁移和知识库）
+│   ├── migrations/          #   SQL 初始化脚本
+│   └── knowledge/           #   知识库 JSON（FAQ/游戏规则/场景描述）
+├── MODEL_CONFIG.md          # 多模型配置详细说明
+├── Dockerfile               # 后端镜像构建（多阶段、基于 distroless）
 └── README.md                # 本文档
 ```
 
@@ -813,6 +846,50 @@ func (t *MyTool) Execute(ctx context.Context, params map[string]interface{}) (in
 - `github.com/sashabaranov/go-openai` — OpenAI 原生 SDK
 
 **不使用 LangChain**，以标准库为主，保持轻量。
+
+---
+
+## 重构路径映射总表（旧 → 新）
+
+> **提示**：2026-08 后端完成了"清洁架构分层"重构。若在 `backend/docs/*.md`、早期实施计划、日志或旧笔记中看到旧路径，可按此表快速定位新位置。**导入路径同步变更**，旧 `import github.com/watertown/guide/internal/cost` 需改为 `.../internal/core/cost` 等。
+
+### 分层重构（backend/internal/）
+
+| 旧路径 | 新路径 | 说明 |
+|--------|--------|------|
+| `internal/server/gin_server.go` | `internal/handler/http/gin.go` | Gin HTTP Server 从 `server` 包移入 `handler/http` |
+| `internal/server/websocket_handler.go` | `internal/handler/http/gin.go` + `internal/handler/ws/*` | WebSocket 升级在 http，处理逻辑移 ws 包 |
+| `internal/websocket/manager.go` | `internal/handler/ws/manager.go` | WebSocket Hub 移入接入层 ws |
+| `internal/websocket/message.go` | `internal/handler/ws/message.go` | 消息协议类型 |
+| `internal/websocket/client.go` | `internal/handler/ws/client.go` | 客户端连接封装 |
+| `internal/agent/runtime.go` | `internal/core/agent/agent.go` | Agent Runtime 移入核心层 core/agent |
+| `internal/agent/session.go` | `internal/core/session/manager.go` | 会话生命周期独立为 core/session 包 |
+| `internal/agent/tools.go` | `internal/adapter/tools/registry.go` | 工具实现属于 IO 边界，移 adapter/tools |
+| `internal/agent/prompts.go` | `internal/core/agent/prompts.go` | Prompt 模板属纯数据，留 core/agent |
+| `internal/llm/adapter.go` | `internal/adapter/llm/adapter.go` | LLM 接口属于 IO 边界，移 adapter/llm |
+| `internal/llm/eino_agent_adapter.go` | `internal/adapter/llm/eino_agent.go` | Eino 适配实现 + 文件名去冗余后缀 `_adapter` |
+| `internal/llm/fallback_adapter.go` | `internal/adapter/llm/fallback.go` | Fallback 实现 |
+| `internal/llm/eino_handler.go` | `internal/adapter/llm/eino_handler.go` | Eino Callbacks Handler |
+| `internal/llm/context.go` | `pkg/contextutil/contextutil.go` | 通用 context 工具，上升至 pkg |
+| `internal/llm/context_test.go` | `pkg/contextutil/contextutil_test.go` | 同上对应测试 |
+| `internal/cost/optimizer.go` | `internal/core/cost/optimizer.go` | 成本优化核心逻辑移 core/cost |
+| `internal/cost/summarizer_llm.go` | `internal/core/context/summarizer.go` | 摘要实现（构建上下文一部分）移 core/context |
+| `internal/cost/cache.go` | `internal/adapter/cache/cache.go` | 缓存接口定义属于 IO 边界，移 adapter/cache |
+| `internal/cost/layered_cache.go` | `internal/adapter/cache/layered.go` | 缓存具体实现 |
+| `internal/cost/embedding.go` | `internal/adapter/cache/embedding.go` | Embedding API 客户端 |
+| `internal/emotion/*` | `internal/core/emotion/*` | 纯规则检测，属于核心层 |
+| `internal/knowledge/*` | `internal/adapter/knowledge/*` | 外部 JSON 加载 + 查询，属于 IO 适配 |
+| `internal/weather/*` | `internal/adapter/weather/*` | 外部 HTTP API 调用，属于 IO 适配 |
+| `internal/database/models.go` | `internal/repository/model.go` | 数据模型 + GORM 实现合并为 repository 层 |
+| `internal/database/*_repo.go` | `internal/repository/*.go` | Player/Conversation/Audit 仓储 |
+
+### 部署目录
+
+| 旧路径 | 新路径 | 说明 |
+|--------|--------|------|
+| `grafana/`（项目根目录） | `deploy/grafana/` | Grafana 与 prometheus.yml 聚合到 deploy 目录 |
+
+---
 
 ## 许可证
 

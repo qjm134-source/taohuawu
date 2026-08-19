@@ -286,9 +286,9 @@ Level 2: [S1][S2][S3] ──► Final=[整体摘要]
 ### 4.1 文件结构
 
 ```
-backend/internal/cost/
+backend/internal/core/cost/
 ├── optimizer.go          # 成本优化器主文件
-│   ├── Cache            # 相似问题缓存
+│   ├── Cache            # 相似问题缓存（通过 adapter/cache 包注入实现）
 │   ├── Summary          # 历史消息摘要
 │   └── CalculateCost    # 成本计算
 ```
