@@ -369,7 +369,13 @@ Agent.HandleChatStream (主 Span)
 ```
 
 #### 输出效果（Jaeger Trace）
+input、output、latency、token：
+![LangFuse prompt](./backend/docs/images/langfuse_token.png)
 
+trace：
+![LangFuse trace](./backend/docs/images/langfuse_trace.png)
+
+jaeger：
 ![Jaeger Trace 瀑布图](./backend/docs/images/trace.png)
 
 ***
