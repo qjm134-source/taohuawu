@@ -388,17 +388,17 @@ cd deploy && docker compose -p taohuawu up --build
 # 访问游戏
 open http://localhost:3000
 
-# Prometheus UI（PromQL 查询指标）
-open http://localhost:9090
-
-# Jaeger UI（分布式追踪）
-open http://localhost:16686
+# Langfuse 追踪（首次访问点击 Sign up 注册账户）
+open http://localhost:3002
 
 # Grafana 仪表盘（用户名：admin，密码：admin123）
 open http://localhost:3001
 
-# Langfuse 追踪（首次访问点击 Sign up 注册账户）
-open http://localhost:3002
+# Jaeger UI（分布式追踪）
+open http://localhost:16686
+
+# Prometheus UI（PromQL 查询指标）
+open http://localhost:9090
 ```
 
 ### 2. 后端单独启动
