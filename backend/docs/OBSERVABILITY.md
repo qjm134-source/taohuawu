@@ -306,7 +306,7 @@ observability:
 **创建项目和 API Key：**
 
 1. 访问 Langfuse UI：http://localhost:3002
-2. 完成注册流程（首次访问）
+2. 完成注册流程（首次访问）。业务账号：7，密码：123456789
 3. 创建项目并在项目设置中生成 API Key
 4. 更新上述配置文件中的 `public_key` 和 `secret_key`
 

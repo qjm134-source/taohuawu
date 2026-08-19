@@ -4,7 +4,8 @@ FROM golang:1.25-alpine AS builder
 WORKDIR /app
 
 # 安装依赖
-RUN apk add --no-cache git
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories \
+    && apk add --no-cache git
 
 # 设置 Go 代理为国内镜像
 ENV GOPROXY=https://goproxy.cn,direct
