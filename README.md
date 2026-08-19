@@ -202,46 +202,74 @@ flowchart LR
 
 ```
 taohuawu/
-├── backend/                          # Go 后端服务
-│   ├── cmd/server/main.go            # 程序入口
+├── backend/                          # Go 后端服务（清洁架构分层）
+│   ├── cmd/server/main.go            # 程序入口（最小化，仅负责启动）
 │   ├── internal/
-│   │   ├── server/                   # Gin HTTP + WebSocket 服务
-│   │   ├── agent/                    # Agent 运行时、会话、工具、Prompt
-│   │   ├── llm/                      # 多模型路由层（基于 Eino）
-│   │   │   ├── model/                # 统一数据模型
-│   │   │   ├── router/               # 路由策略引擎
-│   │   │   ├── multi_model_adapter.go  # EinoAdapter 实现
-│   │   │   ├── adapter.go            # Adapter 接口定义
-│   │   │   └── fallback_adapter.go   # FallbackAdapter 兜底实现
-│   │   ├── cost/                     # 成本优化
-│   │   ├── emotion/                  # 情绪检测
-│   │   ├── database/                 # 数据库层
-│   │   ├── knowledge/                # 知识库
-│   │   ├── observability/            # 可观测性
-│   │   └── config/                   # 配置管理
-│   ├── pkg/                          # 工具包
-│   ├── docs/                         # 后端文档
-│   ├── configs/                      # 配置文件
-│   └── README.md
-├── frontend/                         # 前端游戏
+│   │   ├── adapter/                  # ★ 外部依赖适配层（所有 IO 边界）
+│   │   │   ├── cache/                #   分层缓存 + Embedding 客户端
+│   │   │   ├── knowledge/            #   知识库 JSON 加载 + 查询
+│   │   │   ├── llm/                  #   多模型 LLM 适配（Eino + Fallback 兜底）
+│   │   │   ├── tools/                #   工具注册表 + 天气/游戏/RAG 工具
+│   │   │   └── weather/              #   天气 API 适配（和风天气 / Open-Meteo）
+│   │   ├── core/                     # ★ 业务核心层（纯逻辑、无 IO）
+│   │   │   ├── agent/                #   Agent Runtime、Prompts（编排核心）
+│   │   │   ├── context/              #   上下文构建 + LLM 增量摘要
+│   │   │   ├── cost/                 #   成本优化器（缓存 + 摘要 + Token 估算）
+│   │   │   ├── emotion/              #   规则情绪检测
+│   │   │   └── session/              #   会话生命周期管理
+│   │   ├── handler/                  # ★ 接入层（协议与传输）
+│   │   │   ├── http/                 #   Gin HTTP 路由
+│   │   │   └── ws/                   #   WebSocket Hub + Client + 消息
+│   │   ├── repository/               # ★ 数据持久层（GORM 实现）
+│   │   │   ├── db.go                 #   数据库初始化 + 迁移
+│   │   │   ├── model.go              #   GORM 实体模型
+│   │   │   ├── player.go             #   玩家仓储
+│   │   │   ├── conversation.go       #   会话记录仓储
+│   │   │   └── audit.go              #   审计日志仓储
+│   │   ├── config/                   # 配置管理（环境变量 + YAML 解析）
+│   │   └── observability/            # 可观测性（Prometheus + OTel + 中间件）
+│   ├── pkg/                          # 通用工具包（可供外部使用）
+│   │   ├── contextutil/              #   context 扩展（SessionID 传递）
+│   │   ├── logging/                  #   结构化日志（Console + File）
+│   │   └── utils/                    #   重试、超时、Panic 恢复
+│   ├── docs/                         # 后端专题文档
+│   │   ├── OBSERVABILITY.md          #   可观测性完整指南
+│   │   ├── MEMORY_SYSTEM.md          #   Memory / 成本优化方案
+│   │   ├── MULTI_MODEL_ROUTER.md     #   多模型路由设计
+│   │   └── CACHE_SYSTEM.md           #   缓存架构详解
+│   ├── configs/                      # 配置文件（本地 / Docker 两套）
+│   ├── data/                         # 运行时数据（数据库文件 + 迁移脚本）
+│   ├── Dockerfile                    # 后端镜像构建
+│   ├── MODEL_CONFIG.md               # 多模型配置说明
+│   └── README.md                     # 后端独立文档（本文档引用）
+├── frontend/                         # 前端游戏（Phaser 3 2D 像素水乡）
 │   ├── index.html
 │   ├── js/                           # 游戏逻辑
-│   │   ├── main.js
-│   │   ├── scenes/                   # Phaser 场景
-│   │   ├── entities/                 # NPC / Player
-│   │   ├── ui/                       # 对话框、输入框、打字机
-│   │   ├── network/                  # WebSocket 客户端
-│   │   └── utils/                    # 常量配置
-│   ├── css/
-│   ├── assets/
+│   │   ├── app.js                    #   主入口 + 场景初始化
+│   │   ├── websocket.js              #   WS 客户端
+│   │   ├── typewriter.js             #   打字机效果
+│   │   └── utils/                    #   常量配置
+│   ├── css/style.css
+│   ├── assets/images/                #   背景、头像等资源
+│   ├── nginx.conf
 │   └── README.md
-├── deploy/                           # 部署配置
-│   ├── docker-compose.yml            # 本地一键启动
-│   ├── render.yaml                   # Render 部署配置
+├── deploy/                           # 部署配置（一键启动 + 监控）
+│   ├── docker-compose.yml            # 全部服务编排
+│   ├── prometheus.yml                # Prometheus 抓取配置
+│   ├── clickhouse-config.xml         # ClickHouse NUMA 配置（Langfuse 用）
+│   ├── grafana/                      # ★ Grafana 仪表盘（与 prometheus 同目录聚合）
+│   │   ├── dashboards/               #   预置大盘 JSON
+│   │   └── provisioning/             #   自动导入配置（datasource + dashboards）
+│   ├── render.yaml                   # Render 云平台部署配置
 │   └── RENDER_DEPLOY.md              # Render 部署指南
 ├── scripts/                          # 启动脚本
-│   ├── start.sh                      # Linux/Mac 启动脚本
-│   └── start.ps1                     # Windows 启动脚本
+│   ├── start.sh                      # Linux/Mac 一键部署
+│   └── start.ps1                     # Windows 一键部署
+├── docs/                             # 项目级文档
+│   ├── ARCHITECTURE.md               # 架构设计文档
+│   ├── plans/                        # 实施计划
+│   ├── images/                       # 文档插图
+│   └── prompt/                       # 项目 Prompt 模板
 └── README.md                         # 本文件
 ```
 

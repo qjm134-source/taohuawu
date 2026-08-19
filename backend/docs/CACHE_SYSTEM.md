@@ -325,10 +325,10 @@ type CacheEntry struct {
 
 | 文件 | 说明 |
 |------|------|
-| `internal/cost/cache.go` | 缓存接口定义 |
-| `internal/cost/layered_cache.go` | 多层缓存实现 |
-| `internal/cost/embedding.go` | Embedding API 客户端 |
-| `internal/cost/optimizer.go` | 缓存管理器 |
+| `internal/adapter/cache/cache.go` | 缓存接口定义（Cache / EmbeddingAPI / SemanticIndex） |
+| `internal/adapter/cache/layered.go` | 多层缓存实现（精确匹配 + 语义匹配 + TTL 清理 goroutine 优雅关闭） |
+| `internal/adapter/cache/embedding.go` | Embedding API 客户端（本地伪向量 + 远程 HTTP 两种） |
+| `internal/core/cost/optimizer.go` | 成本优化器，通过 Cache 接口调用缓存（调用方不关心实现） |
 | `internal/observability/metrics.go` | 缓存指标定义 |
 
 ---

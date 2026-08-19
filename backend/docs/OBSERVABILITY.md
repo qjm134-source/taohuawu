@@ -576,7 +576,7 @@ cd deploy && docker-compose up -d
 
 **预置仪表盘：**
 
-项目已配置自动导入仪表盘（`grafana/dashboards/water-town-dashboard.json`），包含：
+项目已配置自动导入仪表盘（`deploy/grafana/dashboards/water-town-dashboard.json`），包含：
 - 核心指标：LLM 成本、缓存命中率、P99 延迟、LLM 调用成功率
 - 趋势图表：缓存命中率趋势、成本趋势、请求量趋势
 - 延迟分布：HTTP 请求 P50/P95/P99 分位数
@@ -746,12 +746,12 @@ sum by (cache_type) (rate(cache_hits_total[5m]))
 | `internal/observability/telemetry.go` | TracerProvider 初始化，支持 OTLP/HTTP 和 Stdout 两种导出器 |
 | `internal/observability/tracer.go` | `StartSpan`、`RecordError`、`AddEvent` 等辅助函数 |
 | `internal/observability/langfuse.go` | Langfuse LLM 专项追踪集成 |
-| `internal/server/gin_server.go` | 注册 `/metrics` 端点与中间件（可配置关闭） |
-| `internal/agent/runtime.go` | Agent 方法内埋点 + 记录 LLM 指标 |
-| `internal/cost/optimizer.go` | 缓存系统 + 成本优化 |
-| `internal/cost/layered_cache.go` | 多层缓存实现（精确匹配 + 语义匹配） |
-| `internal/cost/embedding.go` | Embedding API 客户端（支持本地和远程） |
-| `internal/llm/eino_handler.go` | Eino Callbacks Handler，实现模型调用、工具调用、Graph 执行等组件的 trace/audit 日志 |
+| `internal/handler/http/gin.go` | 注册 `/metrics` 端点与中间件（可配置关闭） |
+| `internal/core/agent/agent.go` | Agent 方法内埋点 + 记录 LLM 指标 |
+| `internal/core/cost/optimizer.go` | 缓存系统 + 成本优化 |
+| `internal/adapter/cache/layered.go` | 多层缓存实现（精确匹配 + 语义匹配） |
+| `internal/adapter/cache/embedding.go` | Embedding API 客户端（支持本地和远程） |
+| `internal/adapter/llm/eino_handler.go` | Eino Callbacks Handler，实现模型调用、工具调用、Graph 执行等组件的 trace/audit 日志 |
 
 ---
 
