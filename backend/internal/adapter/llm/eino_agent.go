@@ -770,14 +770,28 @@ func (s *streamState) finish(out chan<- *StreamResult, done <-chan struct{}) {
 	s.span.SetAttributes(outputAttrs...)
 }
 
+// runStream 是 EinoAgentAdapter 流式对话的核心事件循环。
+//
+// 设计要点：
+//   - 以 select + default 抢占式轮询 ctx.Done() 与 done，避免在迭代器卡住时无法响应取消/结束信号。
+//   - 通过 streamState 统一管理本次流的生命周期（trace 子 span、模型名、用量、首/次模型调用标记），
+//     退出时由 defer 统一收尾，保证 span 与 channel 必被关闭，杜绝泄漏。
+//   - 迭代器事件分派：非流式助手消息走 handleAssistantMessage，流式块走 handleStreamingMessage；
+//     工具结果消息（Role==Tool）由框架内部消化，不向下游转发，避免前端收到空回复。
+//   - iter.Next() 返回 false 表示 ReAct 循环结束，调用 state.finish 发送 exit 动作并落库统计。
+//
+// 返回即代表本次流式对话彻底结束，out channel 随之关闭。
 func (a *EinoAgentAdapter) runStream(ctx context.Context, span trace.Span, iter adkIterator, out chan<- *StreamResult, done <-chan struct{}) {
+	// defer 顺序与执行顺序相反：先关 trace span，最后关 out channel，确保消费方读到 EOF 后再令 span 结束
 	defer close(out)
 	defer span.End()
 
+	// 构建本次流的共享状态（trace 子 span、模型名、用量、首/次模型调用标记等），退出时统一收尾
 	state := newStreamState(a, ctx, span)
 	defer state.closeSpans()
 
 	for {
+		// 抢占式取消检查：每轮迭代优先消费 ctx.Done()/done 信号，避免 iter.Next() 阻塞时无法响应取消
 		select {
 		case <-ctx.Done():
 			return
@@ -786,25 +800,31 @@ func (a *EinoAgentAdapter) runStream(ctx context.Context, span trace.Span, iter 
 		default:
 		}
 
+		// 拉取下一个 ReAct 事件；ok==false 表示整条 Agent 链路迭代完毕
 		event, ok := iter.Next()
 		if !ok {
+			// 正常结束：发送 exit 动作、落库统计、补齐用量与 Output 属性
 			state.finish(out, done)
 			return
 		}
 
+		// 框架内部错误事件静默丢弃，交由后续事件继续推进，避免单点错误中断整条流
 		if event.Err != nil {
 			continue
 		}
 
+		// 过滤无消息载荷的事件（如纯状态变更），不影响下游
 		if event.Output == nil || event.Output.MessageOutput == nil {
 			continue
 		}
 
 		msgVariant := event.Output.MessageOutput
+		// 工具结果消息（Role==Tool）由框架内部 ReAct 循环消化，不转发给前端，避免出现空回复
 		if msgVariant.Role == eino_schema.Tool {
 			continue
 		}
 
+		// 非流式助手消息：一次性完整回复（如 fallback 或非流式模型），直接转发整条消息
 		if msgVariant.Message != nil && msgVariant.Message.Role == eino_schema.Assistant && !msgVariant.IsStreaming {
 			if !state.handleAssistantMessage(msgVariant.Message, out, done) {
 				return
@@ -812,6 +832,7 @@ func (a *EinoAgentAdapter) runStream(ctx context.Context, span trace.Span, iter 
 			continue
 		}
 
+		// 流式助手消息：逐 chunk 转发，handleStreamingMessage 内部会循环 Recv 直到 EOF
 		if msgVariant.IsStreaming && msgVariant.MessageStream != nil {
 			if !state.handleStreamingMessage(msgVariant.MessageStream, out, done) {
 				return
