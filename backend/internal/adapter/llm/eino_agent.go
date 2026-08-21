@@ -47,12 +47,14 @@ const (
 )
 
 var defaultHTTPClient = &http.Client{
-	Timeout: 60 * time.Second,
+	// 建TCP连接 → TLS握手 → 发送请求 → 等待响应头 → 读取响应体
+	// └───── http.Client.Timeout 管这一整段 ───────┘
+	// Timeout: 60 * time.Second, // Timeout 会在超时后取消正在进行的流式响应，流式场景应改用 context.WithTimeout 控制整体会话，或干脆不设超时由上层兜底
 	Transport: &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
+			Timeout:   30 * time.Second, // TCP 建连
+			KeepAlive: 30 * time.Second, // TCP 层 keepalive 探测间隔
 			DualStack: true,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
@@ -60,6 +62,7 @@ var defaultHTTPClient = &http.Client{
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second, // 等响应头最多 30 秒。首token。生产中应根据目标服务的 P99 首 token 延迟来设，通常给到 30~60 秒。设 0（不设）：没有任何保护，服务端假死时请求永久挂起，goroutine 和连接持续堆积——这是更常见的生产事故来源。
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
