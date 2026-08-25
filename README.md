@@ -74,47 +74,43 @@
 ```mermaid
 graph TB
     subgraph Client["浏览器客户端"]
-        A[Phaser 3 游戏场景]
-        B[WebSocket 客户端]
-        C[UI 对话框 / 输入框]
+        A[UI 对话框 / 输入框]
     end
 
-    subgraph Backend["后端服务 Go + Gin"]
-        D[WebSocket Handler]
+    subgraph Backend["后端服务"]
+        D[API网关<br/>路由 · 协议转换· 限流 · 会话管理]
         E[Agent Runtime]
-        F[EinoAdapter 路由层]
-        G[成本优化器]
-        H[情绪检测器]
+        F[模型网关<br/>多模型适配 · 路由 · 降级]
+        G[情绪检测]
+        H[记忆管理]
         I[知识库 / 工具注册表]
-        J[Eino ModelFailover / 流式降级]
-        L[Prometheus / OpenTelemetry]
+        J[可观测<br/>监控Prometheus+Grafana、链路追踪OTel+Langfuse]
     end
 
-    subgraph 外部服务["外部服务"]
+    subgraph 依赖服务["依赖服务"]
         subgraph LLM["大模型服务层"]
-            M[小米模型]
-            N[阿里通义千问]
-            O[智谱GLM / DeepSeek / OpenAI]
+            M[DeepSeek]
+            N[千问]
+            O[智谱GLM]
         end
 
-        subgraph 数据库["数据库"]
+        subgraph 数据层["数据层"]
             K[(MySQL 数据库)]
+            P[缓存]
         end
     end
 
-    A --> B
-    B --> D
+    A --> D
     D --> E
     E --> F
     E --> G
     E --> H
     E --> I
-    E --> L
-    F --> J
+    E --> J
 
-    J -.-> M
-    J -.-> N
-    J -.-> O
+    F -.-> M
+    F -.-> N
+    F -.-> O
     D -.-> K
 ```
 
