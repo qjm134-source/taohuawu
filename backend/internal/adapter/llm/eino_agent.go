@@ -500,6 +500,7 @@ type streamState struct {
 	usage            *ChatUsage
 	finalMsg         *eino_schema.Message
 	isFirstModelCall bool
+	toolPhaseDone    bool
 	toolCallSpan     trace.Span
 	secondModelSpan  trace.Span
 	secondModelOut   strings.Builder
@@ -565,8 +566,28 @@ func (s *streamState) ensureToolCallSpan(tcs []eino_schema.ToolCall) {
 	s.ctx, s.toolCallSpan = observability.StartChildSpan(s.ctx, "Eino.Tool."+strings.Join(toolNames, "."))
 	s.toolCallSpan.SetAttributes(
 		attribute.String("tool.names", strings.Join(toolNames, ",")),
-		attribute.Int("tool.count", len(toolNames)),
+		attribute.Int("tool.count", len(tcs)),
 	)
+}
+
+// handleToolResult 处理工具结果消息（Role==Tool）：收尾 toolCallSpan 并标记工具阶段结束。
+//
+// 工具结果消息由 ADK ReAct 循环内部消化、不转发前端，但其到达时间是
+// 「工具执行完毕」的唯一可观测信号：据此结束 toolCallSpan，把工具调用耗时
+// 精确收敛到「模型决策→工具结果」区间（方案 c），并置 toolPhaseDone，
+// 供第二次模型首条消息到达时即建 secondModelSpan（方案 b），不再等 content。
+func (s *streamState) handleToolResult(msg *eino_schema.Message) {
+	if s.toolCallSpan == nil {
+		return
+	}
+	if msg != nil {
+		s.toolCallSpan.SetAttributes(
+			attribute.Int("tool.result.content_len", len(msg.Content)),
+		)
+	}
+	s.toolCallSpan.End()
+	s.toolCallSpan = nil
+	s.toolPhaseDone = true
 }
 
 func (s *streamState) startSecondModelSpan() {
@@ -581,10 +602,11 @@ func (s *streamState) startSecondModelSpan() {
 }
 
 func (s *streamState) recordSecondModelOutput(content string, msg *eino_schema.Message) {
-	if s.isFirstModelCall {
+	// 仅记录工具结果到达后的输出（即第二次模型），避免第一次模型的 tool-call
+	// chunk 内容泄漏进 secondModelOut，造成 span 输出与时间窗口错位
+	if !s.toolPhaseDone {
 		return
 	}
-	s.startSecondModelSpan()
 	s.secondModelOut.WriteString(content)
 	s.secondModelFinal = msg
 }
@@ -615,6 +637,11 @@ func (s *streamState) handleAssistantMessage(msg *eino_schema.Message, out chan<
 	s.setModelName(msg)
 	s.finalMsg = msg
 	s.setUsage(msg)
+
+	// 工具阶段结束后到达的首条非流式 assistant 消息即第二次模型调用起点，立即建 span（方案 b）
+	if s.toolPhaseDone {
+		s.startSecondModelSpan()
+	}
 
 	s.ensureToolCallSpan(msg.ToolCalls)
 
@@ -649,6 +676,12 @@ func (s *streamState) handleAssistantMessage(msg *eino_schema.Message, out chan<
 
 func (s *streamState) handleStreamingMessage(stream *eino_schema.StreamReader[*eino_schema.Message], out chan<- *StreamResult, done <-chan struct{}) bool {
 	defer stream.Close()
+
+	// 工具阶段结束后进入的下一个流即为第二次模型调用：在消费 chunk 前先建 span，
+	// 避免原先等 content 非空才建导致首个 chunk 仅 reasoning 时漏计思考时间（方案 b）
+	if s.toolPhaseDone {
+		s.startSecondModelSpan()
+	}
 
 	for {
 		select {
@@ -780,7 +813,7 @@ func (s *streamState) finish(out chan<- *StreamResult, done <-chan struct{}) {
 //   - 通过 streamState 统一管理本次流的生命周期（trace 子 span、模型名、用量、首/次模型调用标记），
 //     退出时由 defer 统一收尾，保证 span 与 channel 必被关闭，杜绝泄漏。
 //   - 迭代器事件分派：非流式助手消息走 handleAssistantMessage，流式块走 handleStreamingMessage；
-//     工具结果消息（Role==Tool）由框架内部消化，不向下游转发，避免前端收到空回复。
+//     工具结果消息（Role==Tool）由框架内部消化、不向下游转发，但据此收尾 toolCallSpan 以精确记录工具调用耗时。
 //   - iter.Next() 返回 false 表示 ReAct 循环结束，调用 state.finish 发送 exit 动作并落库统计。
 //
 // 返回即代表本次流式对话彻底结束，out channel 随之关闭。
@@ -822,8 +855,10 @@ func (a *EinoAgentAdapter) runStream(ctx context.Context, span trace.Span, iter 
 		}
 
 		msgVariant := event.Output.MessageOutput
-		// 工具结果消息（Role==Tool）由框架内部 ReAct 循环消化，不转发给前端，避免出现空回复
+		// 工具结果消息（Role==Tool）由框架内部消化、不转发前端，但其到达是
+		// 「工具执行完毕」的可观测信号：据此收尾 toolCallSpan 并标记工具阶段结束（方案 a/c）
 		if msgVariant.Role == eino_schema.Tool {
+			state.handleToolResult(msgVariant.Message)
 			continue
 		}
 
