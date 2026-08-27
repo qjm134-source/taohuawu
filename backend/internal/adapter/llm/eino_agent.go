@@ -470,8 +470,11 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 	runOpts := a.buildRunOptions(chatOpts)
 	inputAttrs := a.buildInputAttributes(ctx, messages)
 
-	ctx, span := observability.StartLLMSpan(ctx, a.primaryModelName, inputAttrs...)
-	span.SetAttributes(
+	// origCtx 保存 StartLLMSpan 之前的 ctx（仅含 LLM.StreamChat），
+	// 用于创建工具 span 和第二次 llm.chat span，避免后续 span 挂在已 End 的第一个 llm.chat 下
+	origCtx := ctx
+	ctx, firstLLMSpan := observability.StartLLMSpan(ctx, a.primaryModelName, inputAttrs...)
+	firstLLMSpan.SetAttributes(
 		observability.GenAIRequestMaxTokens.Int(chatOpts.MaxTokens),
 		observability.GenAIRequestTemperature.Float64(float64(chatOpts.Temperature)),
 	)
@@ -481,7 +484,7 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 	streamChan := make(chan *StreamResult, streamResultBuffer)
 	done := make(chan struct{})
 
-	go a.runStream(ctx, span, iter, streamChan, done)
+	go a.runStream(origCtx, firstLLMSpan, iter, streamChan, done)
 
 	return &adkEventStream{streamChan: streamChan, done: done}, nil
 }
@@ -495,11 +498,13 @@ type adkIterator interface {
 type streamState struct {
 	adapter          *EinoAgentAdapter
 	ctx              context.Context
-	span             trace.Span
+	origCtx          context.Context // 仅含 LLM.StreamChat 的原始 ctx，用于创建工具/第二次模型 span
+	firstLLMSpan     trace.Span      // 第一次 llm.chat，拿到 tool_calls 后立即 End
 	modelName        string
 	usage            *ChatUsage
 	finalMsg         *eino_schema.Message
 	isFirstModelCall bool
+	firstLLMEnded    bool // 标记 firstLLMSpan 是否已 End
 	toolPhaseDone    bool
 	toolCallSpan     trace.Span
 	secondModelSpan  trace.Span
@@ -508,22 +513,35 @@ type streamState struct {
 	startTime        time.Time
 }
 
-func newStreamState(a *EinoAgentAdapter, ctx context.Context, span trace.Span) *streamState {
+func newStreamState(a *EinoAgentAdapter, origCtx context.Context, firstLLMSpan trace.Span) *streamState {
 	return &streamState{
 		adapter:          a,
-		ctx:              ctx,
-		span:             span,
+		ctx:              origCtx, // 初始 ctx 就是 origCtx，后续 ensureToolCallSpan/startSecondModelSpan 会基于它更新
+		origCtx:          origCtx,
+		firstLLMSpan:     firstLLMSpan,
 		isFirstModelCall: true,
 		startTime:        time.Now(),
 	}
 }
 
-// closeSpans 统一关闭 toolCallSpan 与 secondModelSpan，防止 goroutine 各分支重复处理。
+// closeSpans 统一兜底关闭未及时 End 的 span，防止 goroutine 各分支重复处理。
 func (s *streamState) closeSpans() {
+	s.endFirstLLMSpan()
 	if s.toolCallSpan != nil {
 		s.toolCallSpan.End()
+		s.toolCallSpan = nil
 	}
 	s.endSecondModelSpan()
+}
+
+// endFirstLLMSpan 结束第一次 llm.chat span（拿 tool_calls 时调用一次，closeSpans 兜底）。
+func (s *streamState) endFirstLLMSpan() {
+	if s.firstLLMEnded || s.firstLLMSpan == nil {
+		return
+	}
+	s.firstLLMSpan.End()
+	s.firstLLMSpan = nil
+	s.firstLLMEnded = true
 }
 
 func (s *streamState) endSecondModelSpan() {
@@ -542,6 +560,7 @@ func (s *streamState) endSecondModelSpan() {
 		s.secondModelSpan.SetAttributes(attrs...)
 	}
 	s.secondModelSpan.End()
+	s.secondModelSpan = nil
 }
 
 func (s *streamState) setModelName(msg *eino_schema.Message) {
@@ -563,7 +582,8 @@ func (s *streamState) ensureToolCallSpan(tcs []eino_schema.ToolCall) {
 	if len(toolNames) == 0 {
 		return
 	}
-	s.ctx, s.toolCallSpan = observability.StartChildSpan(s.ctx, "Eino.Tool."+strings.Join(toolNames, "."))
+	// 用 origCtx 创建，确保工具 span 直接挂在 LLM.StreamChat 下，不受已 End 的 firstLLMSpan 影响
+	_, s.toolCallSpan = observability.StartChildSpan(s.origCtx, "Eino.Tool."+strings.Join(toolNames, "."))
 	s.toolCallSpan.SetAttributes(
 		attribute.String("tool.names", strings.Join(toolNames, ",")),
 		attribute.Int("tool.count", len(tcs)),
@@ -595,7 +615,8 @@ func (s *streamState) startSecondModelSpan() {
 		return
 	}
 	inputText := "[user] tool result summary"
-	s.ctx, s.secondModelSpan = observability.StartLLMSpan(s.ctx, s.modelName,
+	// 用 origCtx 创建，确保 secondModelSpan 直接挂在 LLM.StreamChat 下
+	_, s.secondModelSpan = observability.StartLLMSpan(s.origCtx, s.modelName,
 		observability.GenAIPrompt.String(inputText),
 		observability.LangfuseObservationInput.String(inputText),
 	)
@@ -647,6 +668,8 @@ func (s *streamState) handleAssistantMessage(msg *eino_schema.Message, out chan<
 
 	if s.isFirstModelCall && len(msg.ToolCalls) > 0 {
 		s.isFirstModelCall = false
+		// 第一次模型输出 tool_calls → firstLLMSpan 到此结束，不再覆盖后续工具/第二次模型耗时
+		s.endFirstLLMSpan()
 	}
 
 	if msg.ReasoningContent != "" {
@@ -713,6 +736,11 @@ func (s *streamState) handleStreamEOF(chunk *eino_schema.Message, out chan<- *St
 		s.setModelName(chunk)
 	}
 
+	// 第二次模型流结束 → End secondModelSpan（第一次模型流的 EOF 由 closeSpans 兜底）
+	if s.toolPhaseDone && s.secondModelSpan != nil {
+		s.endSecondModelSpan()
+	}
+
 	var finishReason string
 	if chunk != nil && chunk.ResponseMeta != nil {
 		finishReason = chunk.ResponseMeta.FinishReason
@@ -735,6 +763,8 @@ func (s *streamState) handleStreamChunk(chunk *eino_schema.Message, out chan<- *
 
 	if s.isFirstModelCall && len(chunk.ToolCalls) > 0 {
 		s.isFirstModelCall = false
+		// 第一次模型输出 tool_calls → firstLLMSpan 到此结束
+		s.endFirstLLMSpan()
 	}
 
 	isThinking := chunk.ReasoningContent != "" && chunk.Content == ""
@@ -803,7 +833,13 @@ func (s *streamState) finish(out chan<- *StreamResult, done <-chan struct{}) {
 			observability.LangfuseObservationOutput.String("[tool_call] " + strings.Join(toolNames, ", ")),
 		}
 	}
-	s.span.SetAttributes(outputAttrs...)
+
+	// 根据场景选择 span 设置 Output：有 secondModelSpan 说明是二次模型调用，否则是首次模型直接回复
+	if s.secondModelSpan != nil {
+		s.secondModelSpan.SetAttributes(outputAttrs...)
+	} else if s.firstLLMSpan != nil {
+		s.firstLLMSpan.SetAttributes(outputAttrs...)
+	}
 }
 
 // runStream 是 EinoAgentAdapter 流式对话的核心事件循环。
@@ -815,21 +851,22 @@ func (s *streamState) finish(out chan<- *StreamResult, done <-chan struct{}) {
 //   - 迭代器事件分派：非流式助手消息走 handleAssistantMessage，流式块走 handleStreamingMessage；
 //     工具结果消息（Role==Tool）由框架内部消化、不向下游转发，但据此收尾 toolCallSpan 以精确记录工具调用耗时。
 //   - iter.Next() 返回 false 表示 ReAct 循环结束，调用 state.finish 发送 exit 动作并落库统计。
+//   - firstLLMSpan 在第一次模型输出 tool_calls 时 End（endFirstLLMSpan），secondModelSpan 在第二次模型流 EOF 时 End，
+//     closeSpans 作为兜底。origCtx 仅含 LLM.StreamChat，用于创建工具/第二次模型 span，避免挂在已 End 的 firstLLMSpan 下。
 //
 // 返回即代表本次流式对话彻底结束，out channel 随之关闭。
-func (a *EinoAgentAdapter) runStream(ctx context.Context, span trace.Span, iter adkIterator, out chan<- *StreamResult, done <-chan struct{}) {
-	// defer 顺序与执行顺序相反：先关 trace span，最后关 out channel，确保消费方读到 EOF 后再令 span 结束
-	defer close(out)
-	defer span.End()
+func (a *EinoAgentAdapter) runStream(origCtx context.Context, firstLLMSpan trace.Span, iter adkIterator, out chan<- *StreamResult, done <-chan struct{}) {
+	// 构建本次流的共享状态（span 生命周期由 streamState 管理，origCtx 用于后续 span 创建）
+	state := newStreamState(a, origCtx, firstLLMSpan)
 
-	// 构建本次流的共享状态（trace 子 span、模型名、用量、首/次模型调用标记等），退出时统一收尾
-	state := newStreamState(a, ctx, span)
+	// defer 顺序与执行顺序相反：先 closeSpans 兜底未 End 的 span，最后关 out channel，确保消费方读到 EOF 后再收尾
 	defer state.closeSpans()
+	defer close(out)
 
 	for {
 		// 抢占式取消检查：每轮迭代优先消费 ctx.Done()/done 信号，避免 iter.Next() 阻塞时无法响应取消
 		select {
-		case <-ctx.Done():
+		case <-origCtx.Done():
 			return
 		case <-done:
 			return
