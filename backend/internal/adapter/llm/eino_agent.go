@@ -499,12 +499,13 @@ type streamState struct {
 	adapter          *EinoAgentAdapter
 	ctx              context.Context
 	origCtx          context.Context // 仅含 LLM.StreamChat 的原始 ctx，用于创建工具/第二次模型 span
-	firstLLMSpan     trace.Span      // 第一次 llm.chat，拿到 tool_calls 后立即 End
+	firstLLMSpan     trace.Span      // 第一次 llm.chat，工具结果到达（第一次调用真正结束）时 End
 	modelName        string
 	usage            *ChatUsage
 	finalMsg         *eino_schema.Message
 	isFirstModelCall bool
-	firstLLMEnded    bool // 标记 firstLLMSpan 是否已 End
+	firstLLMEnded    bool                   // 标记 firstLLMSpan 是否已 End
+	firstModelTCs    []eino_schema.ToolCall // 流式 tool_calls 增量分片的累积结果，End 时写完整 Output
 	toolPhaseDone    bool
 	toolCallSpan     trace.Span
 	secondModelSpan  trace.Span
@@ -526,7 +527,7 @@ func newStreamState(a *EinoAgentAdapter, origCtx context.Context, firstLLMSpan t
 
 // closeSpans 统一兜底关闭未及时 End 的 span，防止 goroutine 各分支重复处理。
 func (s *streamState) closeSpans() {
-	s.endFirstLLMSpan()
+	s.endFirstLLMSpan(s.firstModelTCs)
 	if s.toolCallSpan != nil {
 		s.toolCallSpan.End()
 		s.toolCallSpan = nil
@@ -534,14 +535,47 @@ func (s *streamState) closeSpans() {
 	s.endSecondModelSpan()
 }
 
-// endFirstLLMSpan 结束第一次 llm.chat span（拿 tool_calls 时调用一次，closeSpans 兜底）。
-func (s *streamState) endFirstLLMSpan() {
+// endFirstLLMSpan 结束第一次 llm.chat span（工具结果到达时调用一次，closeSpans 兜底）。
+// 用累积完整的 firstModelTCs 写 Output，保证流式分片的 arguments 已拼接完整。
+func (s *streamState) endFirstLLMSpan(tcs []eino_schema.ToolCall) {
 	if s.firstLLMEnded || s.firstLLMSpan == nil {
 		return
+	}
+	if out := formatToolCallOutput(tcs); out != "" {
+		s.firstLLMSpan.SetAttributes(
+			observability.GenAICompletion.String(out),
+			observability.LangfuseObservationOutput.String(out),
+		)
 	}
 	s.firstLLMSpan.End()
 	s.firstLLMSpan = nil
 	s.firstLLMEnded = true
+}
+
+// accumulateFirstModelToolCalls 累积第一次模型调用的 tool_calls。
+//
+// OpenAI 流式协议下 arguments 按增量分片传输（首个 delta 只有 index/name，
+// 后续 delta 才逐段补齐 JSON），必须等全部 delta 到齐参数才完整，
+// 因此 End firstLLMSpan 延迟到工具结果到达时统一进行。
+func (s *streamState) accumulateFirstModelToolCalls(deltas []eino_schema.ToolCall) {
+	for _, d := range deltas {
+		// Index 为指针，缺失时默认并入第 0 个工具调用
+		idx := 0
+		if d.Index != nil {
+			idx = *d.Index
+		}
+		for len(s.firstModelTCs) <= idx {
+			s.firstModelTCs = append(s.firstModelTCs, eino_schema.ToolCall{})
+		}
+		tc := &s.firstModelTCs[idx]
+		if tc.ID == "" {
+			tc.ID = d.ID
+		}
+		if tc.Function.Name == "" {
+			tc.Function.Name = d.Function.Name
+		}
+		tc.Function.Arguments += d.Function.Arguments
+	}
 }
 
 func (s *streamState) endSecondModelSpan() {
@@ -597,6 +631,11 @@ func (s *streamState) ensureToolCallSpan(tcs []eino_schema.ToolCall) {
 // 精确收敛到「模型决策→工具结果」区间（方案 c），并置 toolPhaseDone，
 // 供第二次模型首条消息到达时即建 secondModelSpan（方案 b），不再等 content。
 func (s *streamState) handleToolResult(msg *eino_schema.Message) {
+	// 工具结果到达 = 第一次模型调用（含 tool_calls 增量分片）真正结束：
+	// 此时累积的 arguments 已完整，收尾 firstLLMSpan 并写入完整工具决策 Output。
+	// 必须在 toolCallSpan 判空之前执行，避免兜底路径漏 End。
+	s.endFirstLLMSpan(s.firstModelTCs)
+
 	if s.toolCallSpan == nil {
 		return
 	}
@@ -666,10 +705,11 @@ func (s *streamState) handleAssistantMessage(msg *eino_schema.Message, out chan<
 
 	s.ensureToolCallSpan(msg.ToolCalls)
 
-	if s.isFirstModelCall && len(msg.ToolCalls) > 0 {
+	// 第一次模型调用阶段的 ToolCalls（含后续 arguments 增量 delta）全部累积；
+	// toolPhaseDone 之后到达的属于下一次模型调用，不再并入
+	if len(msg.ToolCalls) > 0 && !s.toolPhaseDone {
 		s.isFirstModelCall = false
-		// 第一次模型输出 tool_calls → firstLLMSpan 到此结束，不再覆盖后续工具/第二次模型耗时
-		s.endFirstLLMSpan()
+		s.accumulateFirstModelToolCalls(msg.ToolCalls)
 	}
 
 	if msg.ReasoningContent != "" {
@@ -761,10 +801,11 @@ func (s *streamState) handleStreamChunk(chunk *eino_schema.Message, out chan<- *
 
 	s.ensureToolCallSpan(chunk.ToolCalls)
 
-	if s.isFirstModelCall && len(chunk.ToolCalls) > 0 {
+	// 流式 tool_calls 分多次 delta 到达：首个含 name，其余只带 arguments 片段，
+	// 全部累积后才完整；End 延迟到工具结果到达时统一进行（见 handleToolResult）
+	if len(chunk.ToolCalls) > 0 && !s.toolPhaseDone {
 		s.isFirstModelCall = false
-		// 第一次模型输出 tool_calls → firstLLMSpan 到此结束
-		s.endFirstLLMSpan()
+		s.accumulateFirstModelToolCalls(chunk.ToolCalls)
 	}
 
 	isThinking := chunk.ReasoningContent != "" && chunk.Content == ""
@@ -924,6 +965,21 @@ func collectToolNames(tcs []eino_schema.ToolCall) []string {
 		}
 	}
 	return names
+}
+
+// formatToolCallOutput 将第一次模型调用的工具决策格式化为 Output 文本，
+// 如 `[tool_call] get_weather({"city":"北京"})`，多工具以分号分隔。
+// 模型返回的 Arguments 本身就是 JSON 字符串，原样展示即可还原参数细节。
+func formatToolCallOutput(tcs []eino_schema.ToolCall) string {
+	if len(tcs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("[tool_call]")
+	for _, tc := range tcs {
+		b.WriteString(" " + tc.Function.Name + "(" + strings.TrimSpace(tc.Function.Arguments) + ");")
+	}
+	return strings.TrimSuffix(b.String(), ";")
 }
 
 func buildToolCalls(tcs []eino_schema.ToolCall) []ToolCall {
