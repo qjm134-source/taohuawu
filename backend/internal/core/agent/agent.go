@@ -48,6 +48,7 @@ const (
 type LLMStats struct {
 	Model        string
 	LatencyMs    int64
+	TTFTMs       int64 // 首 token 延迟：从发起 streamChat 到首个流式 chunk 到达
 	InputTokens  int
 	OutputTokens int
 	TotalTokens  int
@@ -420,13 +421,15 @@ func (r *Runtime) HandleChatStream(ctx context.Context, sess *session.Session, m
 	messages := r.buildContextMessagesWithSpan(ctx, sess, message, emotionStr)
 
 	llmCtx, llmSpan := observability.StartChildSpan(ctx, "LLM.StreamChat")
+	// llmStart 作为 TTFT 计时起点：从发起 streamChat 到首个流式 chunk 到达
+	llmStart := time.Now()
 	stream, err := r.llm.streamChat(llmCtx, messages, defaultTemperature, chatMaxTokens)
 	if err != nil {
 		return r.handleLLMError(ctx, span, llmSpan, err)
 	}
 
 	return r.processStreamAsync(ctx, span, llmSpan,
-		stream, sess, message, emotionStr, cacheKey, startTime)
+		stream, sess, message, emotionStr, cacheKey, startTime, llmStart)
 }
 
 func (r *Runtime) detectEmotion(ctx context.Context, message string) string {
@@ -484,7 +487,7 @@ func (r *Runtime) handleLLMError(ctx context.Context, span, llmSpan trace.Span, 
 }
 
 func (r *Runtime) processStreamAsync(ctx context.Context, span, llmSpan trace.Span,
-	stream llm.EventStream, sess *session.Session, message, emotionStr, cacheKey string, startTime time.Time) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
+	stream llm.EventStream, sess *session.Session, message, emotionStr, cacheKey string, startTime, llmStart time.Time) (<-chan *llm.StreamEvent, <-chan *LLMStats, error) {
 
 	eventChan := make(chan *llm.StreamEvent, streamEventBuffer)
 	statsChan := make(chan *LLMStats, statsBufferSize)
@@ -497,7 +500,7 @@ func (r *Runtime) processStreamAsync(ctx context.Context, span, llmSpan trace.Sp
 		defer observability.EndSpanWithDuration(ctx, span)
 
 		r.processStream(ctx, stream, eventChan, statsChan,
-			sess, message, emotionStr, cacheKey, startTime, span, llmSpan)
+			sess, message, emotionStr, cacheKey, startTime, span, llmSpan, llmStart)
 	}()
 
 	return eventChan, statsChan, nil
@@ -505,13 +508,15 @@ func (r *Runtime) processStreamAsync(ctx context.Context, span, llmSpan trace.Sp
 
 func (r *Runtime) processStream(ctx context.Context, stream llm.EventStream,
 	eventChan chan<- *llm.StreamEvent, statsChan chan<- *LLMStats,
-	sess *session.Session, message, emotionStr, cacheKey string, startTime time.Time, span, llmSpan trace.Span) {
+	sess *session.Session, message, emotionStr, cacheKey string, startTime time.Time, span, llmSpan trace.Span, llmStart time.Time) {
 
 	var fullReply strings.Builder
 	stats := &LLMStats{CacheHit: false}
 
 	setSpanInput(span, message)
-	finishReason, chunkCount := r.consumeStream(ctx, stream, eventChan, &fullReply, stats)
+	// LLM.StreamChat 面板同样展示 Input（Langfuse 仅从专用提取属性生成 Preview）
+	setSpanInput(llmSpan, message)
+	finishReason, chunkCount := r.consumeStream(ctx, stream, eventChan, &fullReply, stats, llmSpan, llmStart)
 	r.finalizeStream(ctx, span, llmSpan, eventChan, stats, startTime, chunkCount, finishReason, fullReply.String(), sess, message, emotionStr, cacheKey)
 
 	statsChan <- stats
@@ -519,7 +524,7 @@ func (r *Runtime) processStream(ctx context.Context, stream llm.EventStream,
 }
 
 func (r *Runtime) consumeStream(ctx context.Context, stream llm.EventStream,
-	eventChan chan<- *llm.StreamEvent, fullReply *strings.Builder, stats *LLMStats) (string, int) {
+	eventChan chan<- *llm.StreamEvent, fullReply *strings.Builder, stats *LLMStats, llmSpan trace.Span, llmStart time.Time) (string, int) {
 
 	chunkCount := 0
 	var finishReason string
@@ -546,6 +551,9 @@ func (r *Runtime) consumeStream(ctx context.Context, stream llm.EventStream,
 			if chunkCount == 0 {
 				_, streamSpan = observability.StartChildSpan(ctx, "LLM.TokenStreaming")
 				defer observability.EndChildSpan(ctx, streamSpan)
+				// TTFT：从发起 streamChat 到首个流式 chunk 到达的等待时间，挂到 LLM.StreamChat 便于 Langfuse 展示
+				stats.TTFTMs = time.Since(llmStart).Milliseconds()
+				llmSpan.SetAttributes(attribute.Int("llm.ttft_ms", int(stats.TTFTMs)))
 			}
 			chunkCount++
 			if reason := r.updateStatsFromChunk(event, fullReply, stats); reason != "" {
@@ -574,6 +582,8 @@ func (r *Runtime) finalizeStream(ctx context.Context, span, llmSpan trace.Span, 
 	r.updateSession(ctx, sess, message, emotionStr, reply)
 	r.writeCache(ctx, cacheKey, reply)
 	setSpanOutput(span, reply)
+	// LLM.StreamChat 同步设置 Output；此处仍在 goroutine 内、早于 defer EndChildSpan(llmSpan)，属性不会丢失
+	setSpanOutput(llmSpan, reply)
 }
 
 func (r *Runtime) updateStatsFromChunk(event *llm.StreamEvent, fullReply *strings.Builder, stats *LLMStats) string {
