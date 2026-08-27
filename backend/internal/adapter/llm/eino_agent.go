@@ -535,7 +535,7 @@ func (s *streamState) closeSpans() {
 	s.endSecondModelSpan()
 }
 
-// endFirstLLMSpan 结束第一次 llm.chat span（工具结果到达时调用一次，closeSpans 兜底）。
+// endFirstLLMSpan 结束第一次 llm.chat span（finish_reason=tool_calls 到达时调用，handleToolResult/closeSpans 兜底）。
 // 用累积完整的 firstModelTCs 写 Output，保证流式分片的 arguments 已拼接完整。
 func (s *streamState) endFirstLLMSpan(tcs []eino_schema.ToolCall) {
 	if s.firstLLMEnded || s.firstLLMSpan == nil {
@@ -555,8 +555,9 @@ func (s *streamState) endFirstLLMSpan(tcs []eino_schema.ToolCall) {
 // accumulateFirstModelToolCalls 累积第一次模型调用的 tool_calls。
 //
 // OpenAI 流式协议下 arguments 按增量分片传输（首个 delta 只有 index/name，
-// 后续 delta 才逐段补齐 JSON），必须等全部 delta 到齐参数才完整，
-// 因此 End firstLLMSpan 延迟到工具结果到达时统一进行。
+// 后续 delta 才逐段补齐 JSON），必须等全部 delta 到齐参数才完整。
+// 收尾时机由 finish_reason=tool_calls 触发（handleStreamChunk/handleAssistantMessage），
+// handleToolResult/closeSpans 仅作兜底。
 func (s *streamState) accumulateFirstModelToolCalls(deltas []eino_schema.ToolCall) {
 	for _, d := range deltas {
 		// Index 为指针，缺失时默认并入第 0 个工具调用
@@ -631,6 +632,10 @@ func (s *streamState) ensureToolCallSpan(tcs []eino_schema.ToolCall) {
 // 精确收敛到「模型决策→工具结果」区间（方案 c），并置 toolPhaseDone，
 // 供第二次模型首条消息到达时即建 secondModelSpan（方案 b），不再等 content。
 func (s *streamState) handleToolResult(msg *eino_schema.Message) {
+	// 兜底：provider 未回传 finish_reason 时，finish_reason 分支不会创建工具 span，
+	// 此处补建（内部幂等；正常路径 toolCallSpan 已存在则直接跳过）
+	s.ensureToolCallSpan(s.firstModelTCs)
+
 	// 工具结果到达 = 第一次模型调用（含 tool_calls 增量分片）真正结束：
 	// 此时累积的 arguments 已完整，收尾 firstLLMSpan 并写入完整工具决策 Output。
 	// 必须在 toolCallSpan 判空之前执行，避免兜底路径漏 End。
@@ -703,13 +708,19 @@ func (s *streamState) handleAssistantMessage(msg *eino_schema.Message, out chan<
 		s.startSecondModelSpan()
 	}
 
-	s.ensureToolCallSpan(msg.ToolCalls)
-
 	// 第一次模型调用阶段的 ToolCalls（含后续 arguments 增量 delta）全部累积；
 	// toolPhaseDone 之后到达的属于下一次模型调用，不再并入
 	if len(msg.ToolCalls) > 0 && !s.toolPhaseDone {
 		s.isFirstModelCall = false
 		s.accumulateFirstModelToolCalls(msg.ToolCalls)
+	}
+
+	// 非流式消息一次性完整：finish_reason=tool_calls 即参数到齐，立即收尾
+	// firstLLMSpan 并创建工具 span，二者无缝衔接、耗时互不重叠
+	if s.firstLLMSpan != nil && len(s.firstModelTCs) > 0 &&
+		msg.ResponseMeta != nil && msg.ResponseMeta.FinishReason == "tool_calls" {
+		s.endFirstLLMSpan(s.firstModelTCs)
+		s.ensureToolCallSpan(s.firstModelTCs)
 	}
 
 	if msg.ReasoningContent != "" {
@@ -799,13 +810,22 @@ func (s *streamState) handleStreamChunk(chunk *eino_schema.Message, out chan<- *
 	s.setModelName(chunk)
 	s.setUsage(chunk)
 
-	s.ensureToolCallSpan(chunk.ToolCalls)
-
 	// 流式 tool_calls 分多次 delta 到达：首个含 name，其余只带 arguments 片段，
-	// 全部累积后才完整；End 延迟到工具结果到达时统一进行（见 handleToolResult）
+	// 累积至 finish_reason=tool_calls 后参数完整（下方判断处统一收尾）
 	if len(chunk.ToolCalls) > 0 && !s.toolPhaseDone {
 		s.isFirstModelCall = false
 		s.accumulateFirstModelToolCalls(chunk.ToolCalls)
+	}
+
+	// finish_reason=tool_calls 到达表示第一次模型输出结束、所有 arguments 分片已传完：
+	// 1) 立即收尾 firstLLMSpan，耗时精确等于「模型决策」，不再覆盖后续工具执行；
+	// 2) 此刻才创建工具 span——与 llm.chat 的 End 无缝衔接、零重叠
+	//    （若在首个 delta 就建，会把「模型吐参数的尾巴」算进工具耗时）。
+	// 注意必须在下方 Content=="" 提前返回之前判断（tool_calls 的 chunk 通常无文本内容）
+	if s.firstLLMSpan != nil && len(s.firstModelTCs) > 0 &&
+		chunk.ResponseMeta != nil && chunk.ResponseMeta.FinishReason == "tool_calls" {
+		s.endFirstLLMSpan(s.firstModelTCs)
+		s.ensureToolCallSpan(s.firstModelTCs)
 	}
 
 	isThinking := chunk.ReasoningContent != "" && chunk.Content == ""
