@@ -137,21 +137,23 @@ observability:
 ```
 Agent.HandleChatStream (主 Span)
 ├── Emotion.Detect          情绪检测
-├── Cache.Check             缓存查询（含精确缓存查询 + Embedding 调用）
+├── Cache.Check             缓存查询（精确匹配 + 语义匹配）
 ├── Context.Build           构建上下文消息（会话历史 + 摘要压缩）
 ├── LLM.HealthCheck         LLM 健康检查
-└── LLM.StreamChat          LLM 流式调用（主要耗时来源，包含嵌套子 Span）
-    ├── Eino.Graph.WaterTownReActAgent   Eino ReAct Agent 执行图
-    │   ├── Eino.ChatModel.ChatModel.1   模型调用（决策阶段，判断是否调用工具）
-    │   ├── Eino.ToolNode.Tools          工具调用节点
-    │   │   └── Eino.Tool.get_weather    具体工具执行
-    │   └── Eino.ChatModel.ChatModel.2   模型调用（响应阶段，基于工具结果生成回复）
-    ├── LLM.TokenStreaming              Token 流传输（打字机效果）
-    ├── LLM.StatsAndMetrics             统计指标记录与成本计算
-    │   └── LLM.FallbackNonStream       降级非流式调用（可选）
-    ├── LLM.SessionUpdate               会话消息更新
-    └── LLM.CacheWrite                  缓存写入（精确匹配 + 语义索引）
+└── LLM.StreamChat          LLM 流式调用（主要耗时来源；携带 llm.ttft_ms 首字延迟属性）
+    ├── llm.chat              第一次模型调用（决策阶段，Output 为 [tool_call] 工具名(参数)）
+    ├── Eino.Tool.get_weather 具体工具执行（按需出现，名称随实际工具）
+    ├── llm.chat              第二次模型调用（响应阶段，基于工具结果生成回复）
+    ├── LLM.TokenStreaming    流式接收窗口（首个 chunk → 流结束，含工具静默期）
+    ├── LLM.StatsAndMetrics   统计指标记录与成本计算
+    │   └── LLM.FallbackNonStream 降级非流式调用（可选）
+    ├── LLM.SessionUpdate     会话消息更新
+    └── LLM.CacheWrite        缓存写入（精确匹配 + 语义索引）
 ```
+
+> **说明**：两次 `llm.chat` 是兄弟 Span（串行的先后关系）而非嵌套关系——parent-child 仅表达时间包含。
+> 第一次 `llm.chat` 在工具结果到达时收尾，因此其耗时精确等于「模型决策」本身；
+> Eino 框架内部（`Eino.Graph.*` 等）因 ADK Lambda 节点默认不触发回调，一般不生成子 Span。
 
 
 #### 输出效果（Jaeger Trace）
@@ -162,13 +164,12 @@ Agent.HandleChatStream (主 Span)
 
 | Span 名称 | 典型耗时 | 说明 |
 |-----------|----------|------|
-| `LLM.StreamChat` | 几秒 ~ 几十秒 | **主要耗时来源**，包含 Eino ReAct Agent 执行、模型调用、工具调用 |
-| `Eino.Graph.WaterTownReActAgent` | 几秒 ~ 几十秒 | Eino 框架执行图，包含模型和工具调用的完整生命周期 |
-| `Eino.ChatModel.ChatModel.N` | 几秒 ~ 十几秒 | 单个模型调用（决策阶段或最终响应阶段） |
-| `LLM.TokenStreaming` | 几百毫秒 ~ 几秒 | Token 流传输，受输出长度和网络影响 |
-| `Cache.SimilarityCheck` | 几十毫秒 ~ 几百毫秒 | 语义缓存查询（包含 Embedding API 调用） |
+| `LLM.StreamChat` | 几秒 ~ 几十秒 | **主要耗时来源**，包含模型调用、工具调用；属性 `llm.ttft_ms` 记录首字延迟 |
+| `llm.chat` | 几百毫秒 ~ 十几秒 | 单次模型调用，出现 2 次（决策阶段 + 最终响应阶段）；Output 分别为工具决策与回复文本 |
+| `LLM.TokenStreaming` | 几百毫秒 ~ 几秒 | 流式接收窗口（首个 chunk → 流结束），含工具调用静默期，受输出长度和网络影响 |
+| `Cache.Check` | 几毫秒 ~ 几百毫秒 | 流式路径缓存查询（精确匹配 + 语义匹配，含 Embedding 调用） |
 | `Context.Build` | 几毫秒 ~ 几十毫秒 | 构建上下文消息（会话历史越多越慢） |
-| `Cache.ExactCheck` | 几毫秒 | 精确缓存查询（内存查找） |
+| `Cache.ExactCheck` / `Cache.SimilarityCheck` | 几毫秒 ~ 几百毫秒 | 非流式路径的缓存查询（Exact 为内存查找，Similarity 含 Embedding API 调用） |
 | `Emotion.Detect` | < 1 毫秒 | 情绪检测（本地计算） |
 | `LLM.HealthCheck` | < 1 毫秒 | 健康检查 |
 | `LLM.StatsAndMetrics` | < 1 毫秒 | 统计指标计算 |
@@ -183,19 +184,17 @@ Agent.HandleChatStream:  10111ms ███████████████�
 ├── Cache.Check:             50ms ▏  1%
 ├── Context.Build:           15ms ▏  0%
 ├── LLM.HealthCheck:          3ms ▏  0%
-└── LLM.StreamChat:        9850ms ████████████████████████████████████  97%
-    ├── Eino.Graph.WaterTownReActAgent:  9500ms ████████████████████  94%
-    │   ├── Eino.ChatModel.ChatModel.1:  2000ms ████████  20%  (工具决策)
-    │   ├── Eino.ToolNode.Tools:        1500ms ██████  15%    (工具调用)
-    │   │   └── Eino.Tool.get_weather:  1200ms █████  12%
-    │   └── Eino.ChatModel.ChatModel.2:  5500ms ████████████  54%  (最终响应)
-    ├── LLM.TokenStreaming:             200ms ▏  2%
-    ├── LLM.StatsAndMetrics:             10ms ▏  0%
-    ├── LLM.SessionUpdate:                5ms ▏  0%
-    └── LLM.CacheWrite:                  10ms ▏  0%
+└── LLM.StreamChat:        9850ms ████████████████████████████████████  97%  (llm.ttft_ms=672)
+    ├── llm.chat:              2000ms ████████  20%  (第一次调用·工具决策)
+    ├── Eino.Tool.get_weather: 1500ms ██████  15%    (工具执行)
+    ├── llm.chat:              5500ms ████████████  54%  (第二次调用·最终响应)
+    ├── LLM.TokenStreaming:     200ms ▏  2%
+    ├── LLM.StatsAndMetrics:     10ms ▏  0%
+    ├── LLM.SessionUpdate:        5ms ▏  0%
+    └── LLM.CacheWrite:          10ms ▏  0%
 ```
 
-> **关键洞察**：LLM 调用占总耗时的 **97%+**，其中 Eino ReAct Agent 执行占大部分。如果需要优化，应该从模型选择、网络延迟、缓存命中率等方面入手。
+> **关键洞察**：LLM 调用占总耗时的 **97%+**，其中两次 `llm.chat` 模型调用占大部分。如果需要优化，应该从模型选择、网络延迟、缓存命中率等方面入手。
 
 ### 3.4 链路关联
 

@@ -175,23 +175,6 @@ flowchart TD
     M --> R[返回ChatResponse]
 ```
 
-### 3. 服务启动流程
-
-```mermaid
-flowchart LR
-    A[main.go] --> B[加载配置]
-    B --> C[初始化日志]
-    C --> D[连接 MySQL]
-    D --> E[加载知识库]
-    E --> F[初始化 OpenTelemetry]
-    F --> G[创建 Gin Server]
-    G --> H[初始化 Agent Runtime]
-    H --> I[注册 WebSocket Handler]
-    I --> J[启动 HTTP 服务]
-    J --> K[等待退出信号]
-    K --> L[优雅关闭]
-```
-
 ***
 
 ## 项目结构
@@ -330,53 +313,59 @@ taohuawu/
 
 ## 2. OpenTelemetry 分布式追踪
 
-### 2.1 已接入的 Span
+### 2.1 细粒度链路追踪（HandleChatStream）
 
-| 位置              | Span 名称                    | 说明                                       |
-| --------------- | -------------------------- | ---------------------------------------- |
-| `middleware.go` | `GET /path` / `POST /path` | 每个 HTTP 请求自动创建 Server Span               |
-| `runtime.go`    | `HandleWelcome`            | 欢迎消息处理                                   |
-| `runtime.go`    | `HandleChat`               | 普通对话处理                                   |
-| `runtime.go`    | `HandleChatStream`         | 流式对话处理（包含 5 个顶层子 Span + Eino 框架嵌套子 Span） |
-
-### 2.2 细粒度链路追踪（HandleChatStream）
-
-为实现**全链路耗时透明化**，我们为 `HandleChatStream` 添加了 **5 个顶层细粒度子 Span**，其中 `LLM.StreamChat` 内部还包含 **4-5 个嵌套子 Span**，可以清晰看到每个步骤的耗时分布，便于定位性能瓶颈：
+为实现**全链路耗时透明化**，为流式对话 `HandleChatStream` 添加了 **5 个顶层细粒度子 Span**，其中 `LLM.StreamChat` 内部还包含 **4-5 个嵌套子 Span**，可以清晰看到每个步骤的耗时分布，便于定位性能瓶颈：
 
 #### 完整 Span 层级结构
 
 ```
 Agent.HandleChatStream (主 Span)
 ├── Emotion.Detect          情绪检测
-├── Cache.Check             缓存查询（含精确缓存查询 + Embedding 调用）
+├── Cache.Check             缓存查询（精确匹配 + 语义匹配）
 ├── Context.Build           构建上下文消息（会话历史 + 摘要压缩）
 ├── LLM.HealthCheck         LLM 健康检查
-└── LLM.StreamChat          LLM 流式调用（主要耗时来源，包含嵌套子 Span）
-    ├── Eino.Graph.WaterTownReActAgent   Eino ReAct Agent 执行图
-    │   ├── Eino.ChatModel.ChatModel.1   模型调用（决策阶段，判断是否调用工具）
-    │   ├── Eino.ToolNode.Tools          工具调用节点
-    │   │   └── Eino.Tool.get_weather    具体工具执行
-    │   └── Eino.ChatModel.ChatModel.2   模型调用（响应阶段，基于工具结果生成回复）
-    ├── LLM.TokenStreaming              Token 流传输（打字机效果）
-    ├── LLM.StatsAndMetrics             统计指标记录与成本计算
-    │   └── LLM.FallbackNonStream       降级非流式调用（可选）
-    ├── LLM.SessionUpdate               会话消息更新
-    └── LLM.CacheWrite                  缓存写入（精确匹配 + 语义索引）
+└── LLM.StreamChat          LLM 流式调用（主要耗时来源；携带 llm.ttft_ms 首字延迟属性）
+    ├── llm.chat              第一次模型调用（决策阶段，Output 为 [tool_call] 工具名(参数)）
+    ├── Eino.Tool.get_weather 具体工具执行（按需出现，名称随实际工具）
+    ├── llm.chat              第二次模型调用（响应阶段，基于工具结果生成回复）
+    ├── LLM.TokenStreaming    流式接收窗口（首个 chunk → 流结束，含工具静默期）
+    ├── LLM.StatsAndMetrics   统计指标记录与成本计算
+    │   └── LLM.FallbackNonStream 降级非流式调用（可选）
+    ├── LLM.SessionUpdate     会话消息更新
+    └── LLM.CacheWrite        缓存写入（精确匹配 + 语义索引）
 ```
 
 #### 输出效果（Jaeger Trace）
-input、output、latency、token：
+Langfuse展示输入prompt、输出output、延迟latency、输入输出token、成本cost：
 ![LangFuse prompt](./backend/docs/images/langfuse_token.png)
 
-trace：
+Langfuse trace，模型、工具调用耗时：
 ![LangFuse trace](./backend/docs/images/langfuse_trace.png)
 
-jaeger：
+jaeger 瀑布图：
 ![Jaeger Trace 瀑布图](./backend/docs/images/trace.png)
 
 ***
 
 ## 快速开始
+
+### 服务启动流程
+
+```mermaid
+flowchart LR
+    A[main.go] --> B[加载配置]
+    B --> C[初始化日志]
+    C --> D[连接 MySQL]
+    D --> E[加载知识库]
+    E --> F[初始化 OpenTelemetry]
+    F --> G[创建 Gin Server]
+    G --> H[初始化 Agent Runtime]
+    H --> I[注册 WebSocket Handler]
+    I --> J[启动 HTTP 服务]
+    J --> K[等待退出信号]
+    K --> L[优雅关闭]
+```
 
 ### 1. 本地 Docker 启动（推荐）
 
