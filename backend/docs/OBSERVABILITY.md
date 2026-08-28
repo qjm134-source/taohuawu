@@ -86,9 +86,11 @@
 
 | 指标名称 | 类型 | 标签 | 说明 |
 |---|---|---|---|
-| `cache_hits_total` | Counter | `cache_type` | 缓存命中次数（精确匹配/语义匹配） |
-| `cache_misses_total` | Counter | `tenant_id` | 缓存未命中次数 |
-| `cache_hit_ratio` | Gauge | `tenant_id` | 缓存命中率 |
+| `cache_hits_total` | Counter | `cache_type` | 缓存命中次数：`exact`（精确命中）/ `similarity`（语义命中）/ `check`（流式路径命中） |
+| `cache_misses_total` | Counter | `cache_type` | 缓存未命中次数，标签统一为 `miss`（每次请求只记一次最终结果） |
+
+> 缓存命中率不单独暴露指标，由 PromQL 实时计算：
+> `rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))`
 
 以下是使用 Grafana 展示的指标大盘效果：
 
@@ -404,70 +406,70 @@ cost:
 
 ```promql
 # 缓存命中率
-cache_hits_total / (cache_hits_total + cache_misses_total)
+rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))
 
 # 各类型缓存命中次数
-sum by (cache_type) (cache_hits_total)
+sum by (cache_type) (rate(cache_hits_total[5m]))
 
-# 缓存未命中次数（按租户）
-sum by (tenant_id) (cache_misses_total)
+# 缓存未命中次数（按类型）
+sum by (cache_type) (rate(cache_misses_total[5m]))
 ```
 
 ### 5.4 缓存指标实现
 
-缓存指标定义在 `internal/observability/metrics.go`，并在 `internal/agent/runtime.go` 中的 `HandleChat` 和 `HandleChatStream` 方法中使用：
+缓存指标定义在 `internal/observability/metrics.go`，并在 `internal/core/agent/agent.go` 中使用：
 
 **指标定义：**
 
 ```go
-// 缓存命中次数（区分精确匹配和语义匹配）
+// 缓存命中次数（区分命中类型）
 CacheHitsTotal = promauto.NewCounterVec(
     prometheus.CounterOpts{
         Name: "cache_hits_total",
         Help: "Total number of cache hits",
     },
-    []string{"cache_type"},  // exact | similarity
+    []string{"cache_type"},  // exact | similarity | check
 )
 
-// 缓存未命中次数
+// 缓存未命中次数（每次请求只记一次最终未命中，标签统一为 miss）
 CacheMissesTotal = promauto.NewCounterVec(
     prometheus.CounterOpts{
         Name: "cache_misses_total",
         Help: "Total number of cache misses",
     },
-    []string{"tenant_id"},
-)
-
-// 缓存命中率（通过 PromQL 计算，代码中不直接更新）
-CacheHitRatio = promauto.NewGaugeVec(
-    prometheus.CounterOpts{
-        Name: "cache_hit_ratio",
-        Help: "Cache hit ratio",
-    },
-    []string{"tenant_id"},
+    []string{"cache_type"},  // miss
 )
 ```
 
-**指标使用（`runtime.go`）：**
+**指标使用（`internal/core/agent/agent.go`）：**
 
 ```go
-// 精确缓存命中
-if cached, hit := r.optimizer.GetCache(cacheKey); hit {
-    observability.CacheHitsTotal.WithLabelValues("exact").Inc()
+// 同步路径：级联检查 exact → similarity，只在最终未命中时记一次 miss
+func (r *Runtime) lookupCache(...) (string, bool) {
+    if cached, hit := r.checkExactCache(...); hit {
+        observability.CacheHitsTotal.WithLabelValues("exact").Inc()  // exact 命中
+        return cached, true
+    }
+    if cached, hit := r.checkSimilarityCache(...); hit {
+        observability.CacheHitsTotal.WithLabelValues("similarity").Inc()  // similarity 命中
+        return cached, true
+    }
+    observability.CacheMissesTotal.WithLabelValues("miss").Inc()  // 最终未命中，只记一次
+    return "", false
 }
 
-// 语义缓存命中
-if cached, hit := r.optimizer.CheckSimilarity(ctx, message, 0.85); hit {
-    observability.CacheHitsTotal.WithLabelValues("similarity").Inc()
+// 流式路径：只查 exact，未命中即记一次 miss
+func (r *Runtime) buildContextMessagesWithSpan(...) []*eino_schema.Message {
+    observability.CacheMissesTotal.WithLabelValues("miss").Inc()
+    ...
 }
-
-// 缓存未命中（精确和语义缓存都未命中时）
-observability.CacheMissesTotal.WithLabelValues(session.ID).Inc()
 ```
+
+**统计语义：** `cache_hits_total + cache_misses_total = 请求总数`，因此 PromQL 计算的缓存命中率反映的是**请求级命中率**，而非检查级命中率。
 
 **说明：**
 
-- `cache_hit_ratio` 指标虽然已定义，但**不在代码中直接更新**，而是通过 PromQL 查询实时计算：
+- 缓存命中率不单独暴露指标，通过 PromQL 查询实时计算：
   ```promql
   rate(cache_hits_total[5m]) / (rate(cache_hits_total[5m]) + rate(cache_misses_total[5m]))
   ```
@@ -575,11 +577,19 @@ cd deploy && docker-compose up -d
 
 **预置仪表盘：**
 
-项目已配置自动导入仪表盘（`deploy/grafana/dashboards/water-town-dashboard.json`），包含：
-- 核心指标：LLM 成本、缓存命中率、P99 延迟、LLM 调用成功率
-- 趋势图表：缓存命中率趋势、成本趋势、请求量趋势
-- 延迟分布：HTTP 请求 P50/P95/P99 分位数
-- 辅助指标：在线连接数、缓存命中类型分布、HTTP 状态码分布
+项目已配置自动导入仪表盘（`deploy/grafana/dashboards/water-town-dashboard.json`），按六层信息架构组织，自上而下回答不同问题：
+
+| 层级 | 内容 | 说明 |
+|---|---|---|
+| **L1 核心指标** | QPS、LLM 成本（$/h）、HTTP P99 延迟、LLM 调用成功率、缓存命中率 | 5 秒规则，一眼看到系统死活 |
+| **L2 成本归因** | 各模型成本占比饼图、成本趋势（按模型）、Token 消耗趋势（input/output） | 回答"钱花在哪儿" |
+| **L3 延迟拆解** | HTTP P50/P95/P99 趋势、各模型平均延迟对比 | 区分网络延迟和模型推理延迟 |
+| **L4 流量与缓存** | 请求量趋势、缓存命中率趋势、缓存命中类型分布 | 容量规划 |
+| **L5 Agent 行为** | Agent 请求成功率、请求量分布（按 action） | 业务健康度 |
+| **L6 基础设施** | HTTP 状态码分布、在线连接数 | 传统运维视角 |
+
+
+> **二期规划**（需补充埋点后启用）：TTFT 分布（`llm.ttft_ms` 目前仅上报 Langfuse span 属性，未暴露 Prometheus 指标）、cached tokens 分色、按用户/租户成本归因（`cost_total` 需增加维度标签）、Agent 工具调用成功率 / 迭代次数分布 / 重试率 / Fallback 率（需新增 `agent_tool_calls_total` 等指标）、错误日志采样（需接入 Loki）。
 
 登录 Grafana 后，仪表盘会自动出现在 **Dashboards** 页面，无需手动配置。
 

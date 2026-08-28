@@ -304,7 +304,14 @@ func (r *Runtime) lookupCache(ctx context.Context, span trace.Span, cacheKey, me
 	if cached, hit := r.checkExactCache(ctx, span, cacheKey); hit {
 		return cached, true
 	}
-	return r.checkSimilarityCache(ctx, span, message)
+	if cached, hit := r.checkSimilarityCache(ctx, span, message); hit {
+		return cached, true
+	}
+
+	// 级联检查全部未命中，记一次 miss（不在各 checkXxx 函数中记中间 miss，
+	// 避免分母膨胀导致缓存命中率被低估）
+	observability.CacheMissesTotal.WithLabelValues("miss").Inc()
+	return "", false
 }
 
 func (r *Runtime) checkExactCache(ctx context.Context, span trace.Span, cacheKey string) (string, bool) {
@@ -317,7 +324,6 @@ func (r *Runtime) checkExactCache(ctx context.Context, span trace.Span, cacheKey
 		return cached, true
 	}
 
-	observability.CacheMissesTotal.WithLabelValues("exact").Inc()
 	return "", false
 }
 
@@ -331,7 +337,6 @@ func (r *Runtime) checkSimilarityCache(ctx context.Context, span trace.Span, mes
 		return cached, true
 	}
 
-	observability.CacheMissesTotal.WithLabelValues("similarity").Inc()
 	return "", false
 }
 
@@ -473,7 +478,8 @@ func (r *Runtime) handleCacheHit(ctx context.Context, span trace.Span, cached st
 func (r *Runtime) buildContextMessagesWithSpan(ctx context.Context, sess *session.Session, message, emotionStr string) []*eino_schema.Message {
 	_, span := observability.StartChildSpan(ctx, "Context.Build")
 	defer observability.EndChildSpan(ctx, span)
-	observability.CacheMissesTotal.WithLabelValues("check").Inc()
+	// 流式路径未命中（只查 exact，未命中即最终未命中），记一次 miss
+	observability.CacheMissesTotal.WithLabelValues("miss").Inc()
 	return r.buildContextMessages(sess, message, emotionStr)
 }
 

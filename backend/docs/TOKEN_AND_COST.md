@@ -321,7 +321,6 @@ func CalculateCost(model string, inputTokens, outputTokens int) float64 {
 | `cost_total` | Counter | `model` | LLM 调用总成本（$） |
 | `cache_hits_total` | Counter | `cache_type` | 缓存命中次数 |
 | `cache_misses_total` | Counter | `cache_type` | 缓存未命中次数 |
-| `cache_hit_ratio` | Gauge | - | 缓存命中率 |
 
 上报入口在 `internal/agent/runtime.go` 的 `recordLLMMetrics()`：
 

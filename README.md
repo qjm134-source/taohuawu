@@ -252,6 +252,7 @@ taohuawu/
 └── README.md                         # 本文件
 ```
 
+
 ***
 
 ## 可观测性指南
@@ -263,55 +264,24 @@ taohuawu/
 - **LLM 专项可观测（Langfuse）**：告诉你"每次 LLM 调用的完整细节"，包括输入 Prompt、输出内容、Token 数、成本、用户反馈。
 - **Logs**：审计日志记录谁在什么时间做了什么操作，已在 `/api/v1/audit` 提供查询。
 
-## 1. Prometheus 指标清单
+## 1. 监控指标 Prometheus 
 
-### 1.1 HTTP 层指标（中间件自动采集）
+| 层级 | 内容 | 说明 |
+|---|---|---|
+| **L1 核心指标** | QPS、LLM 成本（$/h）、HTTP P99 延迟、LLM 调用成功率、缓存命中率 | 5 秒规则，一眼看到系统死活 |
+| **L2 成本归因** | 各模型成本占比饼图、成本趋势（按模型）、Token 消耗趋势（input/output） | 回答"钱花在哪儿" |
+| **L3 延迟拆解** | HTTP P50/P95/P99 趋势、各模型平均延迟对比 | 区分网络延迟和模型推理延迟 |
+| **L4 流量与缓存** | 请求量趋势、缓存命中率趋势、缓存命中类型分布 | 容量规划 |
+| **L5 Agent 行为** | Agent 请求成功率、请求量分布（按 action） | 业务健康度 |
+| **L6 基础设施** | HTTP 状态码分布、在线连接数 | 传统运维视角 |
 
-| 指标名称                            | 类型        | 标签                         | 说明               |
-| ------------------------------- | --------- | -------------------------- | ---------------- |
-| `http_requests_total`           | Counter   | `method`, `path`, `status` | HTTP 请求总数        |
-| `http_request_duration_seconds` | Histogram | `method`, `path`           | HTTP 请求耗时分布      |
-| `http_requests_in_flight`       | Gauge     | -                          | 当前正在处理的 HTTP 请求数 |
-
-### 1.2 Agent 层指标
-
-| 指标名称                             | 类型        | 标签                 | 说明                                                      |
-| -------------------------------- | --------- | ------------------ | ------------------------------------------------------- |
-| `agent_requests_total`           | Counter   | `action`, `status` | Agent 调用次数：`action=welcome/chat`，`status=success/error` |
-| `agent_request_duration_seconds` | Histogram | `action`           | Agent 处理耗时                                              |
-
-### 1.3 LLM 层指标
-
-| 指标名称                           | 类型        | 标签                | 说明               |
-| ------------------------------ | --------- | ----------------- | ---------------- |
-| `llm_requests_total`           | Counter   | `model`, `status` | 每个模型的调用次数与状态     |
-| `llm_request_duration_seconds` | Histogram | `model`           | 每个模型的调用耗时        |
-| `llm_request_tokens_total`     | Counter   | `model`           | 每个模型的输入 Token 累计 |
-| `llm_completion_tokens_total`  | Counter   | `model`           | 每个模型的输出 Token 累计 |
-| `cost_total`                   | Counter   | `model`           | 每个模型的累计成本（美元）    |
-
-### 1.4 WebSocket 层指标
-
-| 指标名称                       | 类型      | 标签                  | 说明                                |
-| -------------------------- | ------- | ------------------- | --------------------------------- |
-| `websocket_connections`    | Gauge   | `tenant_id`         | 每个租户的当前活跃连接数                      |
-| `websocket_messages_total` | Counter | `type`, `direction` | WebSocket 消息总数：`direction=in/out` |
-
-### 1.5 缓存层指标
-
-| 指标名称                 | 类型      | 标签           | 说明                |
-| -------------------- | ------- | ------------ | ----------------- |
-| `cache_hits_total`   | Counter | `cache_type` | 缓存命中次数（精确匹配/语义匹配） |
-| `cache_misses_total` | Counter | `tenant_id`  | 缓存未命中次数           |
-| `cache_hit_ratio`    | Gauge   | `tenant_id`  | 缓存命中率             |
-
-以下是使用 Grafana 展示的指标大盘效果：
+Grafana 指标大盘：
 
 ![Grafana 仪表盘](backend/docs/images/grafana.png)
 
 ***
 
-## 2. OpenTelemetry 分布式追踪
+## 2. 分布式追踪 OpenTelemetry
 
 ### 2.1 细粒度链路追踪（HandleChatStream）
 
@@ -326,7 +296,7 @@ Agent.HandleChatStream (主 Span)
 ├── Context.Build           构建上下文消息（会话历史 + 摘要压缩）
 ├── LLM.HealthCheck         LLM 健康检查
 └── LLM.StreamChat          LLM 流式调用（主要耗时来源；携带 llm.ttft_ms 首字延迟属性）
-    ├── llm.chat              第一次模型调用（决策阶段，Output 为 [tool_call] 工具名(参数)）
+    ├── llm.chat              第一次模型调用（决策阶段，Output为[tool_call]工具名(参数)）
     ├── Eino.Tool.get_weather 具体工具执行（按需出现，名称随实际工具）
     ├── llm.chat              第二次模型调用（响应阶段，基于工具结果生成回复）
     ├── LLM.TokenStreaming    流式接收窗口（首个 chunk → 流结束，含工具静默期）
@@ -336,8 +306,8 @@ Agent.HandleChatStream (主 Span)
     └── LLM.CacheWrite        缓存写入（精确匹配 + 语义索引）
 ```
 
-#### 输出效果（Jaeger Trace）
-Langfuse展示输入prompt、输出output、延迟latency、输入输出token、成本cost：
+#### 输出效果（Langfuse + Jaeger）
+Langfuse 展示输入prompt、输出output、延迟latency、输入输出token、成本cost：
 ![LangFuse prompt](./backend/docs/images/langfuse_token.png)
 
 Langfuse trace，模型、工具调用耗时：
