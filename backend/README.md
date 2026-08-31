@@ -17,6 +17,104 @@
 
 ### 后端架构图
 
+**系统全景架构图**（自顶向下：客户端 → 接入层 → 编排层 → 模型网关层 → 工具调用层 → 基础设施层 → 外部大模型服务）：
+
+```mermaid
+graph TB
+
+    subgraph Client["客户端 / 浏览器 / Phaser 3 前端"]
+        K1["2D 水乡场景 / NPC 导游小牌"]
+        K2["对话 UI - 打字机/流式显示"]
+        K3["WebSocket 实时通信 (心跳重连)"]
+    end
+
+    subgraph Sys["本系统 - 智能导游 (Go)"]
+        subgraph LA["接入层 / 通信与协议转换"]
+            A1["HTTP 路由服务 (Gin)"]
+            A2["WebSocket 网关 / 连接管理 / 消息分发"]
+            A3["鉴权 / 租户隔离 / 消息编解码"]
+        end
+
+        subgraph LB["编排层 / Agent 运行时"]
+            B1["对话编排 / Prompt 管理"]
+            B2["会话管理 (记忆/情感摘要压缩)"]
+            B3["模型策略 / 成本优化"]
+        end
+
+        subgraph LC["模型网关层 / 多模型路由"]
+            C1["统一模型接入 (OpenAI 兼容接口)"]
+            C2["策略编排引擎 (成本/延迟/能力)"]
+            C3["任务分类 (代码/推理/中文/长文本)"]
+            C4["故障转移 / 指数退避 / 熔断降级"]
+        end
+
+        subgraph LD["工具调用层 / ReAct 与外部集成"]
+            D1["函数调用 / ReAct 工具链路"]
+            D2["知识库 / RAG 检索"]
+            D3["天气预报 API 适配"]
+            D4["相似问题缓存 / 语义匹配"]
+        end
+
+        subgraph LE["基础设施层 / 资源支撑"]
+            E1["监控指标 (Prometheus)"]
+            E2["链路追踪 (OpenTelemetry)"]
+            E3["LLM 调用观测 (Langfuse)"]
+            E4["数据持久化 (MySQL)"]
+            E5["缓存存储"]
+            E6["日志 / 审计"]
+        end
+    end
+
+    subgraph Ext["外部大模型服务"]
+        X1["Claude / GPT / GLM / Qwen / Gemini / DeepSeek"]
+    end
+
+    %% 客户端：UI 依赖 WebSocket 通道，经其连到接入层网关
+    K1 --> K3
+    K2 --> K3
+    K3 --> A2
+
+    %% 接入层 → 编排层：请求统一汇入对话编排
+    A1 --> B1
+    A2 --> B1
+
+    %% 编排层内部协作
+    B1 --> B2
+    B1 --> B3
+
+    %% 编排层 → 模型网关层：编排发起模型调用，策略层对接编排引擎
+    B1 --> C1
+    B3 --> C2
+
+    %% 模型网关层内部流转：统一接入 → 策略引擎 → 任务分类 / 故障转移
+    C1 --> C2
+    C2 --> C3
+    C2 --> C4
+
+    %% 模型网关 → 外部大模型服务
+    C1 --> X1
+
+    %% 编排层 → 工具调用层：ReAct 循环发起函数调用
+    B1 --> D1
+
+    %% 工具调用层内部流转
+    D1 --> D2
+    D1 --> D3
+    D1 --> D4
+
+    %% 工具调用层 → 基础设施层（实线 = 数据读写）
+    D2 --> E4
+    D4 --> E5
+
+    %% 观测与审计（虚线 = 旁路观测，不参与主链路）
+    A3 -.-> E6
+    C2 -.-> E1
+    C2 -.-> E2
+    C1 -.-> E3
+    B1 -.-> E3
+    D3 -.-> E6
+```
+
 > 本图为**概念分层**（与目录不是 1:1）。实际 Go 包目录映射：Handler = `internal/handler/*`、Core = `internal/core/*`、Adapter/Repository 接口实现 = `internal/adapter/*` + `internal/repository/*`。完整路径对照见文末「**重构路径映射总表**」。
 
 ```mermaid
@@ -614,6 +712,111 @@ newEMA = 0.3 × currentSample + 0.7 × previousEMA
 
 Router 用 EMA 平滑跟踪每个 provider 的延迟和错误率，避免单次异常影响路由决策。
 
+### 熔断降级（Circuit Breaker）
+
+EMA 采集的是"慢"的信号（延迟），熔断器采集的是"不可用"的信号（失败/配额耗尽）。两者共同构成模型健康度的完整画像，并在选型、降级、请求入口三处驱动决策。
+
+#### 方案选型：failsafe-go
+
+选用 [`failsafe-go`](https://github.com/failsafe-go/failsafe-go) 的 `circuitbreaker` 子包而非 `gobreaker`，核心差异：
+
+| 维度 | gobreaker | failsafe-go（本项目） |
+|---|---|---|
+| 状态机 | Closed/Open/HalfOpen 三态 | 同三态，但支持时间片滑动窗口 |
+| 失败计数 | 环形计数器，无时间衰减 | `WithFailureThresholdPeriod` 时间窗口，旧失败自动过期 |
+| 半开探测 | 固定 `MaxRequests` 并发 | `WithSuccessThreshold` 控制连续成功数 + permit 容量 |
+| 状态回调 | `OnStateChange` 单一钩子 | `OnStateChanged` 携带 `OldState`/`NewState`/`RemainingDelay` |
+| 与错误关联 | 无（状态迁移拿不到触发错误） | 状态迁移可读错误（standalone 用法下 DelayFunc 受限，故 hard 冷却在 wrapper 层实现，见下文） |
+
+时间窗口是关键差异：provider 偶发 5xx 会在 10 分钟窗口内自然衰减，而 gobreaker 的环形计数器无时间维度，"昨天 3 次失败"与"刚才 3 次失败"权重相同，不适合长周期运行的 LLM 网关。
+
+#### 错误分类
+
+底层 provider 错误经 ADK 包装为 `NodeRunError`，但其 `Error()` 字符串保留了原始状态码与响应体（如 `status code: 403 ... Free quota exhausted`）。基于小写子串匹配分类是可靠的：
+
+| 分类 | 触发条件（小写子串匹配） | 处理策略 | 示例 |
+|---|---|---|---|
+| `classExcluded` | `nil` 成功 / `context.Canceled` | 不计入统计 | 用户断连、主动取消 |
+| `classSoft` | 默认（5xx / 网络错误 / 超时 / 空响应 / 429） | 滑动窗口累计，满阈值开闸 | `500 Internal`、`connection refused`、`DeadlineExceeded` |
+| `classHard` | `401`/`unauthorized`/`invalid api key`/`quota`/`exhausted`/`arrearage`/`billing` | **单次即熔断** + 长冷却期 | 百炼 `AllocationQuota.FreeTierOnly`、Key 失效 |
+
+> 注意：`context.DeadlineExceeded` 归为 `classSoft` 而非 `classExcluded`——模型响应过慢导致的超时是真实的质量信号，不应与用户主动取消混为一谈。
+
+#### 状态机与阈值
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open: soft 失败达 max_failures / 任一 hard 错误
+    Open --> HalfOpen: 恢复时间过后 TryAcquirePermit
+    HalfOpen --> Closed: 连续 half_open_limit 次探测成功
+    HalfOpen --> Open: 探测失败（soft 继续 / hard 重 trip）
+```
+
+| 参数 | 配置项 | 默认 | 含义 |
+|---|---|---|---|
+| `max_failures` | `circuit.max_failures` | 3 | 窗口内 soft 失败达此数开闸 |
+| `failure_window` | `circuit.failure_window` | `10m` | soft 失败的时间窗口（旧失败自动过期） |
+| `recovery_time` | `circuit.recovery_time` | `30s` | Open → HalfOpen 的基础恢复时间 |
+| `half_open_limit` | `circuit.half_open_limit` | 1 | HalfOpen 需连续成功次数（=半开并发探测上限） |
+
+#### hard 冷却与指数退避
+
+failsafe 的 `WithDelay` 是固定值，状态迁移回调拿不到触发错误，无法按类别区分延迟。因此 hard 类（配额/鉴权）的冷却在 wrapper 层（`modelCircuit.hardUntil`）实现，独立于 breaker 的 `recovery_time`：
+
+- **首次 hard 熔断**：冷却期 = `recovery_time × hardBaseMul(6)`。配额问题不会在几分钟内自愈，基础恢复时间（30s）太短会导致无效探测。
+- **连续 hard 失败**：退避倍数翻倍（6 → 12 → 24 → ...），封顶 `hardMaxMul(64)`，防止冷却期无限增长。
+- **探测成功**：`hardUntil` 清零、倍数重置为 `hardBaseMul`，breaker 走 `WithSuccessThreshold` 关闭。
+- **探测失败**：若仍是 hard 错误，重新 trip + 倍数翻倍；若转为 soft，breaker 自身窗口计数。
+
+#### 接线点
+
+熔断器在 7 处接入请求生命周期，构成"选型 → 调用 → 记录"的闭环：
+
+| 位置 | 文件:行 | 作用 |
+|---|---|---|
+| 构造期 `registerKeys` | `eino_agent.go:169` | 预注册全部模型 key，使 `AllUnavailable` 能感知未被调用过的备用模型 |
+| `selectPrimaryModel` | `eino_agent.go:313` | 选主时 `Available()` 跳过熔断模型（候选扫描，不消耗探测 permit） |
+| `getFailoverModel` | `eino_agent.go:277` | ADK failover 链跳过熔断候选 |
+| `ensureLatencyAgent` | `eino_agent.go:381` | Latency 策略切主时排除熔断模型 |
+| `Chat` 入口 | `eino_agent.go:447` | `AllUnavailable()` 快速失败，省掉必然失败的 LLM 调用 |
+| `StreamChat` 入口 | `eino_agent.go:662` | 同上，流式场景对称处理 |
+| `recordStats` | `eino_agent.go:1272` | 调用结束 `Record(model, err)` 更新熔断器状态 |
+
+**`Available` vs `Allow` 的区分**：`Available` 仅查询不消耗探测 permit（用于候选扫描），`Allow` 会消耗 permit（用于实际发起请求）。半开探测由 failsafe 惰性完成——`Open` 且 `RemainingDelay` 为 0 时，下一次 `TryAcquirePermit` 自动转入半开放行。
+
+#### AllUnavailable 快速失败
+
+备用模型从未被调用时，其熔断器处于 Closed 但 `breakers` map 中无记录。若仅统计"被 Record 过"的模型，会误判"全部不可用"而拒绝可降级的请求。`registerKeys` 在构造期预注册全部模型 key 解决此问题：
+
+```
+主模型熔断（Open） + 备用模型无记录（Closed，但未 Record 过）
+  └─ AllUnavailable 扫描 breakers → 备用模型 Available()=true → 返回 false → 允许降级
+```
+
+#### Prometheus 指标
+
+| 指标 | 类型 | 标签 | 含义 |
+|---|---|---|---|
+| `llm_circuit_state` | Gauge | `model` | 当前状态（0=closed 1=open 2=half-open） |
+| `llm_circuit_transitions_total` | Counter | `model`,`from`,`to` | 状态迁移累计次数 |
+
+通过 `OnStateChanged` 钩子在状态迁移时推送，可用于告警（如某模型 1 分钟内迁移 > N 次说明抖动严重）。
+
+#### 配置示例
+
+```yaml
+llm:
+  circuit:
+    enabled: true
+    max_failures: 3           # 窗口内 soft 失败达此数开闸
+    failure_window: 10m      # soft 失败的时间窗口
+    recovery_time: 30s       # Open → HalfOpen 基础恢复时间
+    half_open_limit: 1       # 半开连续成功次数（=并发探测上限）
+```
+
+`enabled: false` 或任一关键字段 ≤ 0 时，管理器整体禁用：`Allow` 恒放行、`Record` 忽略、`AllUnavailable` 恒 false，行为与接入前完全一致，可安全灰度回滚。
+
 ### 任务分类
 
 根据消息内容自动识别任务类型，按优先级匹配最适合的模型：
@@ -641,6 +844,69 @@ Code (代码) > Reasoning (推理) > Chinese (中文) > LongText (长文本) > G
 | General   | claude → openai → glm → qwen → gemini | Claude 3.5 Sonnet、GPT-4o、GLM-4、Qwen 2.0、Gemini 1.5 Flash |
 
 **Token 估算**：每 4 字符约 1 token，中文按字节估算。
+
+### 模型初始化与 HTTP 连接池
+
+#### 启动期实例化（Eager Init）
+
+进程启动时，`NewEinoAgentAdapter` 构造函数会**一次性**遍历 `llm.models` 配置中所有 `enabled: true` 的条目，为每个模型：
+
+1. 调用 `eino_openai.NewChatModel` 创建一个独立的 `ToolCallingChatModel` 实例（封装 model 名、API key、baseURL、拦截器等 provider 级参数）
+2. 注册到 `adapter.models` / `adapter.stats` / `adapter.fallback` 三个集合里
+3. 根据路由策略选出 primary，并基于 primary 构建 ADK Agent + Runner
+
+```
+NewEinoAgentAdapter(cfg)
+│
+├─ for mc in cfg.Models { if enabled → NewChatModel() }   ← 全部 enabled 模型都建实例
+│     ├─ model A  ──*ToolCallingChatModel{ name, APIKey, baseURL, HTTPClient }*
+│     ├─ model B  ──*ToolCallingChatModel{ name, APIKey, baseURL, HTTPClient }*
+│     └─ model C  ──*ToolCallingChatModel{ name, APIKey, baseURL, HTTPClient }*
+│
+├─ selectPrimaryModel() → 选定 modelEntry[primaryIndex]
+└─ buildADKAgent() → ChatModelAgent + Runner（绑定 primary 的模型实例）
+```
+
+**失败处理**：单个模型 `NewChatModel` 出错不会阻塞进程启动，只记 `Error` 日志并 `continue` 跳过。运维侧需要观察启动日志，避免误配凭证导致"配置写了 3 个但实际只有 2 个可用"。
+
+#### 共享连接池设计（关键架构约束）
+
+连接池的真实载体是 `net/http.Transport`（而不是 `http.Client`）。项目通过包级共享的 `defaultHTTPClient` 让**所有模型实例共用同一套 Transport**：
+
+```go
+// internal/adapter/llm/eino_agent.go — 包级变量，进程内唯一一份
+var defaultHTTPClient = &http.Client{
+    Transport: &http.Transport{
+        MaxIdleConns:          100,   // 全局所有 host 总空闲连接上限
+        MaxIdleConnsPerHost:   20,    // 单个 host:port 的空闲连接上限
+        IdleConnTimeout:       90 * time.Second,
+        ForceAttemptHTTP2:     true,  // 同 host 多请求在一条 TCP 上并发跑
+        ...
+    },
+}
+
+// 每个模型实例化时 —— 都传同一个 defaultHTTPClient
+eino_openai.NewChatModel(ctx, &eino_openai.ChatModelConfig{
+    Model:      mc.Name,
+    APIKey:     mc.APIKey,
+    HTTPClient: defaultHTTPClient,   // ← 共享指针，不做深拷贝
+})
+```
+
+资源共享矩阵：
+
+| 资源 | 是否共享 | 说明 |
+|---|---|---|
+| `*http.Transport`（连接池，TCP/TLS 长连接） | ✅ 共享 | 进程内唯一 |
+| `*http.Client` 包装体（超时/重定向策略等） | ✅ 共享 | 同一份指针 |
+| `eino_openai.ChatModel` 实例 | ❌ 独立 | 各自封装 model 名 / API key / baseURL |
+| HTTP/2 多路复用 | ✅ 自动生效 | 对同一 host 的并发请求复用单条 TCP |
+
+#### 连接复用的收益与边界
+
+- **同一 provider 多模型**（如百炼注册了 `qwen3.5-27b` 和 `qwen-plus`，两者 `base_url` 相同）：HTTP/2 多路复用 + 空闲连接池生效，节省重复 TLS 握手与 TCP 建连开销。
+- **跨 provider 不共享连接**：Transport 以 `host:port` 为 key 维护独立连接池；百炼、DashScope、OpenAI 各有各的连接集合，互不影响。
+- **连接池参数边界**：`MaxIdleConns=100`、`MaxIdleConnsPerHost=20` 是当前配置。生产侧若接入 10+ 不同 provider，总量约束 `MaxIdleConns` 可能先于 per-host 约束触发，导致部分 host 的空闲连接被强关；届时需要按实际 host 数量调大。
 
 ## 核心特性
 

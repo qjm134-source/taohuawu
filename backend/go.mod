@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/cloudwego/eino v0.9.9
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
+	github.com/failsafe-go/failsafe-go v0.9.7
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
@@ -25,6 +26,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
+	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect

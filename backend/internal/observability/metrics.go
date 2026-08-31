@@ -42,6 +42,23 @@ var (
 		[]string{"model"},
 	)
 
+	// 熔断器指标：state 取值对应 failsafe-go 枚举 0=closed 1=open 2=half-open
+	LLMCircuitState = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "llm_circuit_state",
+			Help: "LLM circuit breaker state per model (0=closed 1=open 2=half-open)",
+		},
+		[]string{"model"},
+	)
+
+	LLMCircuitTransitions = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "llm_circuit_transitions_total",
+			Help: "Total number of LLM circuit breaker state transitions",
+		},
+		[]string{"model", "from", "to"},
+	)
+
 	// WebSocket 连接指标
 	WebSocketConnections = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{

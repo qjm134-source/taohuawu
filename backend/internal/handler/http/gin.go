@@ -355,7 +355,7 @@ func (s *Server) initToolRegistry(kb *knowledge.KnowledgeBase, weatherSvc weathe
 }
 
 func (s *Server) initLLMAdapters(registry *tools.ToolRegistry) (llm.Adapter, llm.Adapter) {
-	primary := llm.NewEinoAgentAdapter(s.logger, s.config.LLM, registry.List())
+	primary := llm.NewEinoAgentAdapter(s.logger, s.config.LLM, s.config.Circuit, registry.List())
 	fallback := llm.NewFallbackAdapter()
 	return primary, fallback
 }

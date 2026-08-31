@@ -63,7 +63,7 @@
 | **实时工具调用**             | 支持 Function Calling，例如询问天气时自动调用 `get_weather` 工具                                                           |
 | **成本优化**               | 相似问题缓存、历史消息摘要、Token 估算、成本计算                                                                                |
 | **可用性**                | Eino ModelFailover + 流式降级 + FallbackAdapter 兜底                                                             |
-| **可观测性**               | Prometheus 指标 + OpenTelemetry 分布式追踪 + 审计日志 + Langfuse（LLM 专项），详见 [可观测性指南](./backend/docs/OBSERVABILITY.md) |
+| **可观测性**               | Prometheus 指标 + OpenTelemetry 分布式追踪 + Langfuse（LLM 专项） + 审计日志|
 
 ***
 

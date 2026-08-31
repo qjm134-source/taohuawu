@@ -81,6 +81,20 @@ type modelStats struct {
 	totalLatency time.Duration
 	requestCount int
 	errorCount   int
+	emaLatency   time.Duration // 延迟指数移动平均，零值表示尚无采样数据
+}
+
+// emaAlpha EMA 平滑系数：新样本所占权重，越大对新样本越敏感。
+// 0.3 兼顾对延迟变化的响应速度与抖动平滑，是延迟路由的常用取值。
+const emaAlpha = 0.3
+
+// updateEMA 更新延迟指数移动平均；首个样本直接作为初值，避免从 0 爬升。
+func (s *modelStats) updateEMA(latency time.Duration) {
+	if s.emaLatency <= 0 {
+		s.emaLatency = latency
+		return
+	}
+	s.emaLatency = time.Duration(emaAlpha*float64(latency) + (1-emaAlpha)*float64(s.emaLatency))
 }
 
 type EinoAgentAdapter struct {
@@ -94,24 +108,28 @@ type EinoAgentAdapter struct {
 	weights          map[string]float64
 	logger           logging.Logger
 	stats            map[string]*modelStats
+	nameToKey        map[string]string // 原始模型名 → sanitize 后的 stats key（LLM 响应返回的是原始名）
 	capabilityMap    map[string][]string
 	timeout          time.Duration
 	primaryModelName string
 	primaryIndex     int
 	maxRetries       int
+	tools            []eino_tool.InvokableTool // 保存工具引用，EMA 切换主模型时需重建 agent
+	circuits         *circuitManager           // 每模型熔断器：选型时跳过不可用模型，请求后记录成败
 }
 
-func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []eino_tool.InvokableTool) *EinoAgentAdapter {
-	_ = tools
-
+func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, circuitCfg config.CircuitConfig, tools []eino_tool.InvokableTool) *EinoAgentAdapter {
 	adapter := &EinoAgentAdapter{
 		logger:        logger,
 		strategy:      parseStrategy(cfg.Strategy),
 		weights:       make(map[string]float64),
 		stats:         make(map[string]*modelStats),
+		nameToKey:     make(map[string]string),
 		capabilityMap: make(map[string][]string),
 		timeout:       cfg.Timeout.Duration,
 		maxRetries:    cfg.MaxRetries,
+		tools:         tools,
+		circuits:      newCircuitManager(circuitCfg, logger),
 	}
 
 	for _, mc := range cfg.Models {
@@ -131,6 +149,7 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 		}
 
 		name := sanitizeProviderName(mc.Name)
+		adapter.nameToKey[mc.Name] = name
 		adapter.models = append(adapter.models, modelEntry{
 			name:      name,
 			modelName: mc.Name,
@@ -140,6 +159,14 @@ func NewEinoAgentAdapter(logger logging.Logger, cfg config.LLMConfig, tools []ei
 		adapter.stats[name] = &modelStats{}
 
 	}
+
+	// 预注册全部模型 key：让熔断器感知尚未被调用过的备用模型，
+	// 避免主模型熔断时 AllUnavailable 误判"全部不可用"而拒绝可降级的请求
+	keys := make([]string, 0, len(adapter.models))
+	for _, m := range adapter.models {
+		keys = append(keys, m.name)
+	}
+	adapter.circuits.registerKeys(keys...)
 
 	if len(adapter.models) > 0 {
 		primaryModel := adapter.selectPrimaryModel()
@@ -185,6 +212,16 @@ func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino
 	if len(a.models) > 1 {
 		failoverConfig = &eino_adk.ModelFailoverConfig[*eino_schema.Message]{
 			MaxRetries: uint(a.maxRetries),
+			// ShouldFailover：每轮模型调用结束后由 ADK 回调，判断是否需要进入下一次故障转移。
+			// 返回 true = 继续尝试下一个模型；返回 false = 停止故障转移，把当前结果/错误返回给调用方。
+			//
+			// 判定顺序遵循「越明确的退出信号越先检查」：
+			//  1) ctx 已取消/超时：用户侧主动中断，故障转移无意义，立即停止
+			//     （注意：ADK 对 ctx.Err()!=nil 的情况实际会跳过本函数直接停止，
+			//      这里再次判断是防止将来配置模型级重试时，RetryExhaustedError 包装 context 错误后被误判为需要转移）
+			//  2) 有明确错误：模型返回 transport/auth/rpc 错误等，换模型有概率解决
+			//  3) 输出为空：模型"成功"但内容为空（如 content policy 拒绝、provider 异常返回 200 空 body），
+			//     对业务来说等同于失败，也应切换模型兜底
 			ShouldFailover: func(ctx context.Context, output *eino_schema.Message, err error) bool {
 				if ctx.Err() != nil {
 					return false
@@ -221,22 +258,49 @@ func (a *EinoAgentAdapter) buildADKAgent(tools []eino_tool.InvokableTool) (*eino
 	return agent, nil
 }
 
+// getFailoverModel 是 ADK ModelFailoverConfig 的回调：当主模型（或上一轮备用模型）调用失败时，
+// 由 ADK 内部调用此函数选择下一个用于故障转移的模型。
+//
+// 轮次策略：按配置顺序从主模型向后兜底（主模型失败 → models[primaryIndex+1] → models[primaryIndex+2] …），
+// 利用模运算实现环形排列，但最终用 `idx == primaryIndex` 防止绕一圈回到主模型本身。
+// 已被熔断的候选（open/半开许可耗尽/hard 冷却中）直接跳过，不浪费故障转移次数；
+// 全部候选被跳过时终止故障转移（返回 nil），由上层关键词兜底接管。
+//
+// 返回值语义（与 ADK 约定一致）：
+//   - (nil, nil, nil)：没有可用的备用模型，ADK 将停止故障转移并把当前错误返回给调用方
+//   - (model, msgs, nil)：使用指定模型和输入消息继续尝试；msgs 为 nil 时沿用原始输入
+//   - (_, _, err)：故障转移本身出错，ADK 立即停止并把 err 直接返回给调用方
+//
+// 并发注意：调用方持有 ADK 内部的故障转移上下文，会串行调用本函数；
+// a.primaryIndex 可能在运行时被 EMA 路由修改（写锁保护），但这里仅做读取无需加锁——
+// 即使读到旧值，取模兜底的顺序仍然合法，最多本轮顺序略有偏差，不会引用越界。
 func (a *EinoAgentAdapter) getFailoverModel(ctx context.Context, failoverCtx *eino_adk.FailoverContext[*eino_schema.Message]) (eino_model.BaseModel[*eino_schema.Message], []*eino_schema.Message, error) {
-	attempt := int(failoverCtx.FailoverAttempt)
+	attempt := int(failoverCtx.FailoverAttempt) // 从 1 开始计数，第 N 次故障转移
 	n := len(a.models)
 
+	// 没有可兜底的模型（仅 1 个）或已用尽全部兜底次数，终止故障转移
 	if n <= 1 || attempt >= n {
 		return nil, nil, nil
 	}
 
-	idx := (a.primaryIndex + attempt) % n
-	if idx == a.primaryIndex {
-		return nil, nil, nil
+	// 从主模型位置 + attempt 起扫描候选，跳过被熔断的模型；
+	// 最多扫描 n-1 个（不含主模型本身）。用 Available（无副作用查询）过滤，
+	// 避免扫描期间消耗半开探测 permit：探测机会应留给真正发起调用的那次请求。
+	for i := 0; i < n-1; i++ {
+		idx := (a.primaryIndex + attempt + i) % n
+		if idx == a.primaryIndex {
+			break // 绕回主模型（理论上不会触发），保险地终止
+		}
+		entry := a.models[idx]
+		if !a.circuits.Available(entry.name) {
+			continue
+		}
+		// 输入消息不做转换（不同 provider 间 schema 一致），直接把 ADK 传入的原始输入传下去
+		return entry.model, failoverCtx.InputMessages, nil
 	}
 
-	entry := a.models[idx]
-
-	return entry.model, failoverCtx.InputMessages, nil
+	// 全部备用模型均不可用，终止故障转移
+	return nil, nil, nil
 }
 
 func (a *EinoAgentAdapter) buildRunner(agent *eino_adk.ChatModelAgent) *eino_adk.Runner {
@@ -283,10 +347,109 @@ func (a *EinoAgentAdapter) IsHealthy() bool {
 	return a.agent != nil && a.runner != nil
 }
 
+// emaSwitchMargin 主模型切换迟滞阈值：新模型 EMA 需比当前低此比例才切换，
+// 防止两个延迟接近的模型因统计抖动而来回切换（重建 agent 也有成本）。
+const emaSwitchMargin = 0.15
+
+// latencyBestLocked 返回 EMA 延迟最低且未被熔断的模型及其 EMA 值。
+// 尚无采样数据的模型延迟未知，不参与选择；全部无数据时返回 false。
+// 被熔断（open/半开许可耗尽/hard 冷却中）的模型跳过，避免把流量切向不可用模型。
+// 调用方必须已持有 a.mu（读锁或写锁），方法内不再加锁。
+// 注意锁序固定为 a.mu → circuit 内部锁，与 recordStats 一致，无死锁风险。
+func (a *EinoAgentAdapter) latencyBestLocked() (modelEntry, time.Duration, bool) {
+	best := modelEntry{}
+	bestEMA := time.Duration(0)
+	for _, m := range a.models {
+		if !a.circuits.Available(m.name) {
+			continue
+		}
+		stats, ok := a.stats[m.name]
+		if !ok || stats.emaLatency <= 0 {
+			continue
+		}
+		if bestEMA == 0 || stats.emaLatency < bestEMA {
+			best, bestEMA = m, stats.emaLatency
+		}
+	}
+	return best, bestEMA, bestEMA > 0
+}
+
+// ensureLatencyAgent 在 StrategyLatency 下按各模型 EMA 延迟动态切换主模型。
+//
+// agent 构建时绑定模型，切换需重建 agent/runner；进行中的请求持有旧引用
+// 不受影响，新请求使用新 runner。切换条件加迟滞（emaSwitchMargin）防抖动。
+func (a *EinoAgentAdapter) ensureLatencyAgent() {
+	if a.strategy != StrategyLatency {
+		return
+	}
+
+	// 快路径：读锁下判断是否需要切换，绝大多数请求在此返回
+	a.mu.RLock()
+	best, bestEMA, ok := a.latencyBestLocked()
+	if !ok || best.name == a.models[a.primaryIndex].name {
+		a.mu.RUnlock()
+		return
+	}
+	// 当前主模型必已被请求过（failover 模型有数据意味着主模型先尝试过），
+	// 仅为防御数据异常：currentEMA 无数据时不设迟滞门槛，允许直接切换
+	currentEMA := a.stats[a.models[a.primaryIndex].name].emaLatency
+	needSwitch := currentEMA <= 0 ||
+		bestEMA < time.Duration(float64(currentEMA)*(1-emaSwitchMargin))
+	a.mu.RUnlock()
+	if !needSwitch {
+		return
+	}
+
+	// 慢路径：写锁下双重检查后重建（其他 goroutine 可能已完成切换）
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	best, bestEMA, ok = a.latencyBestLocked()
+	if !ok || best.name == a.models[a.primaryIndex].name {
+		return
+	}
+
+	newIndex := -1
+	for i, m := range a.models {
+		if m.name == best.name {
+			newIndex = i
+			break
+		}
+	}
+	if newIndex < 0 {
+		return
+	}
+
+	// 先记旧值，重建失败时回滚，保证旧 agent 继续服务
+	oldIndex, oldName := a.primaryIndex, a.primaryModelName
+	a.primaryIndex, a.primaryModelName = newIndex, best.modelName
+
+	agent, err := a.buildADKAgent(a.tools)
+	if err != nil {
+		a.primaryIndex, a.primaryModelName = oldIndex, oldName
+		a.logger.Error("[Latency] Failed to rebuild ADK agent", "model", best.modelName, "error", err)
+		return
+	}
+	a.agent = agent
+	a.runner = a.buildRunner(agent)
+	a.logger.Info("[Latency] Switched primary model by EMA",
+		"from", oldName, "to", best.modelName,
+		"old_ema", currentEMA, "new_ema", bestEMA)
+}
+
 func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (*eino_schema.Message, *ChatUsage, error) {
 	if a.agent == nil || a.runner == nil {
 		return nil, nil, errors.New("no ADK agent available")
 	}
+
+	// 所有模型均被熔断时快速失败，省掉一次必然失败的 LLM 调用；
+	// 上层（core/agent）会捕获该错误并走关键词兜底回复
+	if a.circuits.AllUnavailable() {
+		return nil, nil, errors.New("all LLM models are circuit-broken")
+	}
+
+	// Latency 策略：请求前按 EMA 延迟检查是否需要切换主模型
+	a.ensureLatencyAgent()
 
 	chatOpts := a.parseChatOptions(opts)
 	runOpts := a.buildRunOptions(chatOpts)
@@ -305,10 +468,19 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 	latency := time.Since(startTime)
 	modelName := a.getCurrentModelName(finalMsg)
 	usage := a.extractUsage(finalMsg)
-	a.recordStats(modelName, latency, lastErr != nil || finalMsg == nil, &usage)
+	// recordStats 需要真实 error 做熔断分类：无错误但也无响应（空流）视为一次失败
+	statsErr := lastErr
+	if statsErr == nil && finalMsg == nil {
+		statsErr = errors.New("no response from ADK agent")
+	}
+	a.recordStats(modelName, latency, statsErr, &usage)
 
 	if lastErr != nil {
-		a.logger.Error("[Chat] ADK agent run failed", "error", lastErr, "latency", latency)
+		a.logger.Error("[Chat] ADK agent run failed",
+			"error", lastErr,
+			"primary_model", a.primaryModelName,
+			"final_model", modelName, // 通常是失败前实际调到的模型；无 finalMsg 时为 unknownModelName
+			"latency", latency)
 		span.SetAttributes(
 			observability.GenAIErrorType.String("generation_failure"),
 			observability.GenAIErrorMessage.String(lastErr.Error()),
@@ -370,7 +542,14 @@ func (a *EinoAgentAdapter) runADK(ctx context.Context, messages []*eino_schema.M
 		}
 		if event.Err != nil {
 			lastErr = event.Err
-			a.logger.Error("[Chat] ADK event error", "error", event.Err)
+			// ADK 把节点执行错误统一包成 NodeRunError，event 自身携带的 AgentName / RunPath
+			// 能进一步定位错误来源（哪个 agent / 哪条执行路径）。RunPath 对 ChatModelAgent
+			// 通常是 trivial（空切片），但对 AgentTool / 子 agent 场景才有实质内容。
+			a.logger.Error("[Chat] ADK event error",
+				"error", event.Err,
+				"primary_model", a.primaryModelName,
+				"agent_name", event.AgentName,
+				"run_path", formatRunPath(event.RunPath))
 			continue
 		}
 		if event.Output != nil && event.Output.MessageOutput != nil {
@@ -382,6 +561,19 @@ func (a *EinoAgentAdapter) runADK(ctx context.Context, messages []*eino_schema.M
 	}
 
 	return finalMsg, lastErr
+}
+
+// formatRunPath 将 ADK 事件携带的执行路径格式化为字符串，便于日志可读。
+// RunStep.String() 是指针接收者，需要对每个元素取址后调用；空切片返回 "<empty>"。
+func formatRunPath(path []eino_adk.RunStep) string {
+	if len(path) == 0 {
+		return "<empty>"
+	}
+	parts := make([]string, 0, len(path))
+	for i := range path {
+		parts = append(parts, path[i].String())
+	}
+	return strings.Join(parts, " -> ")
 }
 
 func (a *EinoAgentAdapter) buildMessageAttributes(messages []*eino_schema.Message) []attribute.KeyValue {
@@ -466,6 +658,14 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 		return nil, errors.New("no ADK agent available")
 	}
 
+	// 与 Chat 一致：全部模型熔断时快速失败，上层走关键词兜底
+	if a.circuits.AllUnavailable() {
+		return nil, errors.New("all LLM models are circuit-broken")
+	}
+
+	// Latency 策略：请求前按 EMA 延迟检查是否需要切换主模型
+	a.ensureLatencyAgent()
+
 	chatOpts := a.parseChatOptions(opts)
 	runOpts := a.buildRunOptions(chatOpts)
 	inputAttrs := a.buildInputAttributes(ctx, messages)
@@ -512,6 +712,7 @@ type streamState struct {
 	secondModelOut   strings.Builder
 	secondModelFinal *eino_schema.Message
 	startTime        time.Time
+	lastEventErr     error // 流式过程中最后一个事件错误；模型失败曾在此被静默吞掉导致统计失真，现供 finish 落熔断统计
 }
 
 func newStreamState(a *EinoAgentAdapter, origCtx context.Context, firstLLMSpan trace.Span) *streamState {
@@ -875,7 +1076,9 @@ func (s *streamState) finish(out chan<- *StreamResult, done <-chan struct{}) {
 
 	if s.modelName != "" {
 		latency := time.Since(s.startTime)
-		s.adapter.recordStats(s.modelName, latency, false, s.usage)
+		// 流式过程中的事件错误（模型调用失败）此前被静默吞掉、统一记为成功，
+		// 导致熔断器与统计失真；此处补记真实错误
+		s.adapter.recordStats(s.modelName, latency, s.lastEventErr, s.usage)
 	}
 
 	if s.finalMsg == nil {
@@ -942,8 +1145,16 @@ func (a *EinoAgentAdapter) runStream(origCtx context.Context, firstLLMSpan trace
 			return
 		}
 
-		// 框架内部错误事件静默丢弃，交由后续事件继续推进，避免单点错误中断整条流
+		// 流式分支的事件错误不返回给调用方（continue 推进后续事件，避免单点错误中断整条流），
+		// 但仍要打日志，否则下次出错时流式分支比同步 Chat 更难排查——只看日志根本不知道出过错。
+		// 与 runADK（同步分支）保持字段一致，便于统一检索。
 		if event.Err != nil {
+			a.logger.Error("[Stream] ADK event error",
+				"error", event.Err,
+				"primary_model", a.primaryModelName,
+				"agent_name", event.AgentName,
+				"run_path", formatRunPath(event.RunPath))
+			state.lastEventErr = event.Err // 供 finish 落熔断统计（事件仍 continue 推进，不中断流）
 			continue
 		}
 
@@ -1056,18 +1267,41 @@ func (a *EinoAgentAdapter) extractUsage(msg *eino_schema.Message) ChatUsage {
 	}
 }
 
-func (a *EinoAgentAdapter) recordStats(modelName string, latency time.Duration, isError bool, usage *ChatUsage) {
+// recordStats 记录单次模型调用的统计与熔断结果。
+// err 为 nil 表示成功；非 nil 时按 classifyModelError 分类计入对应模型的熔断器。
+func (a *EinoAgentAdapter) recordStats(modelName string, latency time.Duration, err error, usage *ChatUsage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	// LLM 响应返回的模型名是原始名（如含 . /），需归一化为内部 stats key
+	if key, ok := a.nameToKey[modelName]; ok {
+		modelName = key
+	}
+
+	// 失败归属：同步路径拿不到 finalMsg 时 modelName 为 unknown（failover 后无法确定
+	// 具体是哪一环失败），主模型必然被尝试过，将其保守记到主模型头上。
+	// 若错误实为配额类且主备同账号（当前配置即如此），一并熔断无偏差。
+	isError := err != nil
+	if isError && modelName == unknownModelName {
+		if key, ok := a.nameToKey[a.primaryModelName]; ok {
+			modelName = key
+		}
+	}
 
 	if _, ok := a.stats[modelName]; !ok {
 		a.stats[modelName] = &modelStats{}
 	}
-	a.stats[modelName].requestCount++
-	a.stats[modelName].totalLatency += latency
+	stats := a.stats[modelName]
+	stats.requestCount++
+	stats.totalLatency += latency
+	stats.updateEMA(latency)
 	if isError {
-		a.stats[modelName].errorCount++
+		stats.errorCount++
 	}
+
+	// 熔断记录放在锁外会导致状态窗口（stats 更新完、熔断未记），
+	// manager/modelCircuit 内部有自己的锁，此处嵌套持锁无死锁风险（锁序固定：a.mu → circuit.mu）
+	a.circuits.Record(modelName, err)
 
 	status := "success"
 	if isError {
