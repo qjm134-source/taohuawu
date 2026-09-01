@@ -374,6 +374,66 @@ func (a *EinoAgentAdapter) latencyBestLocked() (modelEntry, time.Duration, bool)
 	return best, bestEMA, bestEMA > 0
 }
 
+// switchPrimary 切换主模型并重建 agent/runner。调用方必须持有 a.mu 写锁，
+// 且需在调用前自行记录旧 primaryModelName 供日志使用。
+// 重建失败时回滚 primaryIndex/primaryModelName，旧 agent 继续服务。
+// 返回是否切换成功（false 时调用方不应记成功日志）。
+func (a *EinoAgentAdapter) switchPrimary(newIndex int) bool {
+	oldIndex, oldName := a.primaryIndex, a.primaryModelName
+	a.primaryIndex = newIndex
+	a.primaryModelName = a.models[newIndex].modelName
+
+	agent, err := a.buildADKAgent(a.tools)
+	if err != nil {
+		a.primaryIndex, a.primaryModelName = oldIndex, oldName
+		a.logger.Error("[Circuit] Failed to rebuild ADK agent",
+			"model", a.models[newIndex].modelName, "error", err)
+		return false
+	}
+	a.agent = agent
+	a.runner = a.buildRunner(agent)
+	return true
+}
+
+// ensureAgent 请求前检查：若当前主模型已被熔断，切到第一个健康模型并重建 agent。
+// 对所有策略生效，避免 primary 熔断后 ADK 仍用绑定的旧实例发起必然失败的调用。
+// 全部模型熔断时不切换，由 Chat/StreamChat 入口的 AllUnavailable 快速失败兜底。
+func (a *EinoAgentAdapter) ensureAgent() {
+	// 快路径：primary 健康，绝大多数请求在此返回
+	a.mu.RLock()
+	broken := !a.circuits.Available(a.models[a.primaryIndex].name)
+	a.mu.RUnlock()
+	if !broken {
+		return
+	}
+
+	// 慢路径：primary 熔断，切到第一个健康模型
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// 双重检查：其他 goroutine 可能已切换到健康模型
+	if a.circuits.Available(a.models[a.primaryIndex].name) {
+		return
+	}
+	newIndex := -1
+	for i, m := range a.models {
+		if i == a.primaryIndex {
+			continue
+		}
+		if a.circuits.Available(m.name) {
+			newIndex = i
+			break
+		}
+	}
+	if newIndex < 0 {
+		return // 全部熔断，交给入口 AllUnavailable 处理
+	}
+	oldName := a.primaryModelName
+	if a.switchPrimary(newIndex) {
+		a.logger.Info("[Circuit] Switched primary model (broken)",
+			"from", oldName, "to", a.models[newIndex].modelName)
+	}
+}
+
 // ensureLatencyAgent 在 StrategyLatency 下按各模型 EMA 延迟动态切换主模型。
 //
 // agent 构建时绑定模型，切换需重建 agent/runner；进行中的请求持有旧引用
@@ -420,21 +480,12 @@ func (a *EinoAgentAdapter) ensureLatencyAgent() {
 		return
 	}
 
-	// 先记旧值，重建失败时回滚，保证旧 agent 继续服务
-	oldIndex, oldName := a.primaryIndex, a.primaryModelName
-	a.primaryIndex, a.primaryModelName = newIndex, best.modelName
-
-	agent, err := a.buildADKAgent(a.tools)
-	if err != nil {
-		a.primaryIndex, a.primaryModelName = oldIndex, oldName
-		a.logger.Error("[Latency] Failed to rebuild ADK agent", "model", best.modelName, "error", err)
-		return
+	oldName := a.primaryModelName
+	if a.switchPrimary(newIndex) {
+		a.logger.Info("[Latency] Switched primary model by EMA",
+			"from", oldName, "to", best.modelName,
+			"old_ema", currentEMA, "new_ema", bestEMA)
 	}
-	a.agent = agent
-	a.runner = a.buildRunner(agent)
-	a.logger.Info("[Latency] Switched primary model by EMA",
-		"from", oldName, "to", best.modelName,
-		"old_ema", currentEMA, "new_ema", bestEMA)
 }
 
 func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Message, opts ...ChatOption) (*eino_schema.Message, *ChatUsage, error) {
@@ -448,7 +499,9 @@ func (a *EinoAgentAdapter) Chat(ctx context.Context, messages []*eino_schema.Mes
 		return nil, nil, errors.New("all LLM models are circuit-broken")
 	}
 
-	// Latency 策略：请求前按 EMA 延迟检查是否需要切换主模型
+	// 所有策略：primary 熔断则切到健康模型，避免无效调用
+	a.ensureAgent()
+	// Latency 策略：按 EMA 延迟选最优健康模型
 	a.ensureLatencyAgent()
 
 	chatOpts := a.parseChatOptions(opts)
@@ -663,7 +716,9 @@ func (a *EinoAgentAdapter) StreamChat(ctx context.Context, messages []*eino_sche
 		return nil, errors.New("all LLM models are circuit-broken")
 	}
 
-	// Latency 策略：请求前按 EMA 延迟检查是否需要切换主模型
+	// 所有策略：primary 熔断则切到健康模型，避免无效调用
+	a.ensureAgent()
+	// Latency 策略：按 EMA 延迟选最优健康模型
 	a.ensureLatencyAgent()
 
 	chatOpts := a.parseChatOptions(opts)

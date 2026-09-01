@@ -760,6 +760,12 @@ stateDiagram-v2
 | `recovery_time` | `circuit.recovery_time` | `30s` | Open → HalfOpen 的基础恢复时间 |
 | `half_open_limit` | `circuit.half_open_limit` | 1 | HalfOpen 需连续成功次数（=半开并发探测上限） |
 
+**统计方式：基于时间段的滑动窗口失败计数**（`WithFailureThresholdPeriod`）。failsafe-go 把 `failure_window` 切成若干时间片（bucket），每片记录该时段的失败数；时间推进时旧片自动过期，失败计数随之衰减。`max_failures` 是窗口内所有活跃片的失败数之和的阈值。
+
+这与无时间维度的计数器（如 gobreaker 的环形计数器）有本质区别：后者"昨天 3 次失败"与"刚才 3 次失败"权重相同、窗口不滚动，一次历史抖动会让模型长期被拒；本方案的滑动窗口让偶发 provider 5xx 在 `failure_window`（10 分钟）后自然"洗白"，只有持续失败才触发熔断。
+
+注意分层：此窗口只统计 `classSoft`（5xx/超时/网络错误）；`classHard`（配额/鉴权）走"单次即熔断 + wrapper 层 `hardUntil` 时间戳冷却"，不进窗口计数（见下节）。
+
 #### hard 冷却与指数退避
 
 failsafe 的 `WithDelay` 是固定值，状态迁移回调拿不到触发错误，无法按类别区分延迟。因此 hard 类（配额/鉴权）的冷却在 wrapper 层（`modelCircuit.hardUntil`）实现，独立于 breaker 的 `recovery_time`：
@@ -771,17 +777,21 @@ failsafe 的 `WithDelay` 是固定值，状态迁移回调拿不到触发错误�
 
 #### 接线点
 
-熔断器在 7 处接入请求生命周期，构成"选型 → 调用 → 记录"的闭环：
+熔断器在 9 处接入请求生命周期，构成"选型 → 调用 → 记录"的闭环：
 
 | 位置 | 文件:行 | 作用 |
 |---|---|---|
 | 构造期 `registerKeys` | `eino_agent.go:169` | 预注册全部模型 key，使 `AllUnavailable` 能感知未被调用过的备用模型 |
 | `selectPrimaryModel` | `eino_agent.go:313` | 选主时 `Available()` 跳过熔断模型（候选扫描，不消耗探测 permit） |
-| `getFailoverModel` | `eino_agent.go:277` | ADK failover 链跳过熔断候选 |
-| `ensureLatencyAgent` | `eino_agent.go:381` | Latency 策略切主时排除熔断模型 |
-| `Chat` 入口 | `eino_agent.go:447` | `AllUnavailable()` 快速失败，省掉必然失败的 LLM 调用 |
-| `StreamChat` 入口 | `eino_agent.go:662` | 同上，流式场景对称处理 |
-| `recordStats` | `eino_agent.go:1272` | 调用结束 `Record(model, err)` 更新熔断器状态 |
+| `switchPrimary` | `eino_agent.go:381` | 封装"切 primaryIndex + 重建 agent/runner + 失败回滚"，`ensureAgent` 和 `ensureLatencyAgent` 共用 |
+| `ensureAgent` | `eino_agent.go:401` | **所有策略**：请求前检查 primary 是否熔断，熔断则切到第一个健康模型并重建 agent |
+| `ensureLatencyAgent` | `eino_agent.go:441` | **仅 Latency 策略**：在 `ensureAgent` 之后，按 EMA 延迟从健康模型中选最优 |
+| `getFailoverModel` | `eino_agent.go:277` | ADK failover 链跳过熔断候选（同请求内主模型失败后的即时降级） |
+| `Chat` 入口 | `eino_agent.go:491` | `AllUnavailable()` 快速失败 → `ensureAgent()` → `ensureLatencyAgent()` |
+| `StreamChat` 入口 | `eino_agent.go:709` | 同上，流式场景对称处理 |
+| `recordStats` | `eino_agent.go:1327` | 调用结束 `Record(model, err)` 更新熔断器状态 |
+
+**`ensureAgent` 与 `ensureLatencyAgent` 的分层**：ADK agent 构造时把 primary model 实例绑死，运行时不感知熔断器。若非 Latency 策略下只有 `getFailoverModel` 做熔断过滤，会出现"每次请求先调已熔断的 primary → 收到 403 → 才 failover"的无效调用，且每次 403 还会把 hard 退避倍数反复翻倍。`ensureAgent` 作为**所有策略共用的前置屏障**，在请求发起前就把 primary 切到健康模型；`ensureLatencyAgent` 在此基础上做 Latency 策略特有的 EMA 优化，两者职责分离、无重复。
 
 **`Available` vs `Allow` 的区分**：`Available` 仅查询不消耗探测 permit（用于候选扫描），`Allow` 会消耗 permit（用于实际发起请求）。半开探测由 failsafe 惰性完成——`Open` 且 `RemainingDelay` 为 0 时，下一次 `TryAcquirePermit` 自动转入半开放行。
 

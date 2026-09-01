@@ -80,7 +80,7 @@ graph TB
     subgraph Backend["后端服务"]
         D[API网关<br/>路由 · 协议转换· 限流 · 会话管理]
         E[Agent Runtime]
-        F[模型网关<br/>多模型适配 · 路由 · 降级]
+        F[模型网关<br/>多模型路由 · 降级 · 熔断]
         G[情绪检测]
         H[记忆管理]
         I[知识库 / 工具注册表]
