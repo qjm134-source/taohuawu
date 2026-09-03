@@ -205,6 +205,33 @@ graph TB
 ### 多模型路由结构（基于 Eino）
 
 ```mermaid
+flowchart TD
+    A[收到 LLM 请求] --> B[EinoAdapter处理]
+    B --> C[Eino ChatModelAgent]
+    C --> D{路由策略选择主模型}
+    D -->|Fixed| E[固定模型]
+    D -->|Cost| F[成本最低模型]
+    D -->|Latency| G[EMA延迟最低]
+    D -->|Capability| H[任务分类匹配]
+    D -->|Fallback| I[配置顺序首个]
+    D -->|Weighted| J[权重随机]
+    E --> K[Eino OpenAI ChatModel调用]
+    F --> K
+    G --> K
+    H --> K
+    I --> K
+    J --> K
+    K --> L{调用成功?}
+    L -->|是| M[更新EMA统计]
+    L -->|否| N[ModelFailover判断]
+    N --> O{需要降级?}
+    O -->|是| P[选择下一个模型]
+    O -->|否| Q[返回错误]
+    P --> K
+    M --> R[返回ChatResponse]
+```
+
+```mermaid
 graph TB
     A["Application Layer"] --> B["llm.Adapter 接口"]
     B --> C["EinoAgentAdapter 桥接层"]
