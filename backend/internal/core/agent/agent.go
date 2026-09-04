@@ -266,8 +266,7 @@ func (r *Runtime) recordWelcomeMetrics(startTime time.Time, usage *llm.ChatUsage
 	model := normalizeModelName(usage.Model)
 	llmCost := cost.CalculateCost(model, usage.PromptTokens, usage.CompletionTokens)
 
-	r.recordLLMMetrics(model, "success", time.Since(startTime).Seconds(),
-		usage.PromptTokens, usage.CompletionTokens, llmCost)
+	r.recordLLMMetrics(model, llmCost)
 	observability.AgentRequestsTotal.WithLabelValues("welcome", "success").Inc()
 	observability.AgentRequestDuration.WithLabelValues("welcome").Observe(time.Since(startTime).Seconds())
 }
@@ -378,8 +377,7 @@ func (r *Runtime) processLLMResponse(span trace.Span,
 		CacheHit:     false,
 	}
 
-	r.recordLLMMetrics(usage.Model, "success", time.Since(metricsStart).Seconds(),
-		usage.PromptTokens, usage.CompletionTokens, stats.Cost)
+	r.recordLLMMetrics(usage.Model, stats.Cost)
 	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 	observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(metricsStart).Seconds())
 
@@ -659,8 +657,7 @@ func (r *Runtime) updateLLMStatsAndMetrics(llmCtx context.Context, llmSpan, span
 
 	model := normalizeModelName(stats.Model)
 
-	r.recordLLMMetrics(model, "success", time.Since(startTime).Seconds(),
-		stats.InputTokens, stats.OutputTokens, stats.Cost)
+	r.recordLLMMetrics(model, stats.Cost)
 	observability.AgentRequestsTotal.WithLabelValues("chat", "success").Inc()
 	observability.AgentRequestDuration.WithLabelValues("chat").Observe(time.Since(startTime).Seconds())
 
@@ -931,13 +928,11 @@ func normalizeModelName(model string) string {
 	return model
 }
 
-// recordLLMMetrics 记录 LLM 相关的 Prometheus 指标。
-func (r *Runtime) recordLLMMetrics(model, status string, durationSec float64, inputTokens, outputTokens int, costAmount float64) {
+// recordLLMMetrics 记录 LLM 成本指标。
+// LLM 请求计数 / 延迟 / Token 由底层 EinoAgentAdapter.recordStats 统一上报，
+// 此处仅记录成本（CostTotal 仅 Runtime 层持有，底层 adapter 拿不到费率配置）。
+func (r *Runtime) recordLLMMetrics(model string, costAmount float64) {
 	model = normalizeModelName(model)
-	observability.LLMRequestsTotal.WithLabelValues(model, status).Inc()
-	observability.LLMRequestDuration.WithLabelValues(model).Observe(durationSec)
-	observability.LLMRequestTokens.WithLabelValues(model).Add(float64(inputTokens))
-	observability.LLMCompletionTokens.WithLabelValues(model).Add(float64(outputTokens))
 	observability.CostTotal.WithLabelValues(model).Add(costAmount)
 }
 
