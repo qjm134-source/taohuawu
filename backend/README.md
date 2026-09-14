@@ -192,6 +192,7 @@ graph TB
 ```
 
 > **节点对应代码路径**（上面图里故意不写路径，避免渲染器对特殊字符的解析问题）：
+>
 > - H1 = `handler/http/gin.go` ｜ H2 = `handler/ws/manager.go` + `handler/ws/client.go`
 > - C1 = `core/agent/agent.go` ｜ C2 = `core/agent/*` + `core/context/summarizer.go` ｜ C3 = `core/session/manager.go` ｜ C4 = `core/cost/optimizer.go` ｜ C5 = `core/emotion/detector.go`
 > - I1/I2/I3/I4 接口定义分别位于 F1/F2/F3/F4 包内；I6 Repository 接口定义位于 `repository/*_repo.go` 上的 consumer 侧
@@ -200,7 +201,7 @@ graph TB
 >
 > 完整旧→新路径对照见文末「**重构路径映射总表**」。
 
----
+***
 
 ### 多模型路由结构（基于 Eino）
 
@@ -253,6 +254,7 @@ graph TB
 ```
 
 > 对应代码：
+>
 > - A = `core/agent.Runtime` + `handler/ws` + `handler/http`
 > - B = `internal/adapter/llm/adapter.go` ｜ C = `adapter/llm/eino_agent.go`
 > - D～N = 全部由 Eino ChatModelAgent 内置实现（无需本项目代码维护路由策略）
@@ -747,13 +749,13 @@ EMA 采集的是"慢"的信号（延迟），熔断器采集的是"不可用"的
 
 选用 [`failsafe-go`](https://github.com/failsafe-go/failsafe-go) 的 `circuitbreaker` 子包而非 `gobreaker`，核心差异：
 
-| 维度 | gobreaker | failsafe-go（本项目） |
-|---|---|---|
-| 状态机 | Closed/Open/HalfOpen 三态 | 同三态，但支持时间片滑动窗口 |
-| 失败计数 | 环形计数器，无时间衰减 | `WithFailureThresholdPeriod` 时间窗口，旧失败自动过期 |
-| 半开探测 | 固定 `MaxRequests` 并发 | `WithSuccessThreshold` 控制连续成功数 + permit 容量 |
-| 状态回调 | `OnStateChange` 单一钩子 | `OnStateChanged` 携带 `OldState`/`NewState`/`RemainingDelay` |
-| 与错误关联 | 无（状态迁移拿不到触发错误） | 状态迁移可读错误（standalone 用法下 DelayFunc 受限，故 hard 冷却在 wrapper 层实现，见下文） |
+| 维度    | gobreaker               | failsafe-go（本项目）                                                 |
+| ----- | ----------------------- | ---------------------------------------------------------------- |
+| 状态机   | Closed/Open/HalfOpen 三态 | 同三态，但支持时间片滑动窗口                                                   |
+| 失败计数  | 环形计数器，无时间衰减             | `WithFailureThresholdPeriod` 时间窗口，旧失败自动过期                        |
+| 半开探测  | 固定 `MaxRequests` 并发     | `WithSuccessThreshold` 控制连续成功数 + permit 容量                       |
+| 状态回调  | `OnStateChange` 单一钩子    | `OnStateChanged` 携带 `OldState`/`NewState`/`RemainingDelay`       |
+| 与错误关联 | 无（状态迁移拿不到触发错误）          | 状态迁移可读错误（standalone 用法下 DelayFunc 受限，故 hard 冷却在 wrapper 层实现，见下文） |
 
 时间窗口是关键差异：provider 偶发 5xx 会在 10 分钟窗口内自然衰减，而 gobreaker 的环形计数器无时间维度，"昨天 3 次失败"与"刚才 3 次失败"权重相同，不适合长周期运行的 LLM 网关。
 
@@ -761,11 +763,11 @@ EMA 采集的是"慢"的信号（延迟），熔断器采集的是"不可用"的
 
 底层 provider 错误经 ADK 包装为 `NodeRunError`，但其 `Error()` 字符串保留了原始状态码与响应体（如 `status code: 403 ... Free quota exhausted`）。基于小写子串匹配分类是可靠的：
 
-| 分类 | 触发条件（小写子串匹配） | 处理策略 | 示例 |
-|---|---|---|---|
-| `classExcluded` | `nil` 成功 / `context.Canceled` | 不计入统计 | 用户断连、主动取消 |
-| `classSoft` | 默认（5xx / 网络错误 / 超时 / 空响应 / 429） | 滑动窗口累计，满阈值开闸 | `500 Internal`、`connection refused`、`DeadlineExceeded` |
-| `classHard` | `401`/`unauthorized`/`invalid api key`/`quota`/`exhausted`/`arrearage`/`billing` | **单次即熔断** + 长冷却期 | 百炼 `AllocationQuota.FreeTierOnly`、Key 失效 |
+| 分类              | 触发条件（小写子串匹配）                                                                     | 处理策略             | 示例                                                     |
+| --------------- | -------------------------------------------------------------------------------- | ---------------- | ------------------------------------------------------ |
+| `classExcluded` | `nil` 成功 / `context.Canceled`                                                    | 不计入统计            | 用户断连、主动取消                                              |
+| `classSoft`     | 默认（5xx / 网络错误 / 超时 / 空响应 / 429）                                                  | 滑动窗口累计，满阈值开闸     | `500 Internal`、`connection refused`、`DeadlineExceeded` |
+| `classHard`     | `401`/`unauthorized`/`invalid api key`/`quota`/`exhausted`/`arrearage`/`billing` | **单次即熔断** + 长冷却期 | 百炼 `AllocationQuota.FreeTierOnly`、Key 失效               |
 
 > 注意：`context.DeadlineExceeded` 归为 `classSoft` 而非 `classExcluded`——模型响应过慢导致的超时是真实的质量信号，不应与用户主动取消混为一谈。
 
@@ -780,12 +782,12 @@ stateDiagram-v2
     HalfOpen --> Open: 探测失败（soft 继续 / hard 重 trip）
 ```
 
-| 参数 | 配置项 | 默认 | 含义 |
-|---|---|---|---|
-| `max_failures` | `circuit.max_failures` | 3 | 窗口内 soft 失败达此数开闸 |
-| `failure_window` | `circuit.failure_window` | `10m` | soft 失败的时间窗口（旧失败自动过期） |
-| `recovery_time` | `circuit.recovery_time` | `30s` | Open → HalfOpen 的基础恢复时间 |
-| `half_open_limit` | `circuit.half_open_limit` | 1 | HalfOpen 需连续成功次数（=半开并发探测上限） |
+| 参数                | 配置项                       | 默认    | 含义                          |
+| ----------------- | ------------------------- | ----- | --------------------------- |
+| `max_failures`    | `circuit.max_failures`    | 3     | 窗口内 soft 失败达此数开闸            |
+| `failure_window`  | `circuit.failure_window`  | `10m` | soft 失败的时间窗口（旧失败自动过期）       |
+| `recovery_time`   | `circuit.recovery_time`   | `30s` | Open → HalfOpen 的基础恢复时间     |
+| `half_open_limit` | `circuit.half_open_limit` | 1     | HalfOpen 需连续成功次数（=半开并发探测上限） |
 
 **统计方式：基于时间段的滑动窗口失败计数**（`WithFailureThresholdPeriod`）。failsafe-go 把 `failure_window` 切成若干时间片（bucket），每片记录该时段的失败数；时间推进时旧片自动过期，失败计数随之衰减。`max_failures` 是窗口内所有活跃片的失败数之和的阈值。
 
@@ -806,21 +808,21 @@ failsafe 的 `WithDelay` 是固定值，状态迁移回调拿不到触发错误�
 
 熔断器在 9 处接入请求生命周期，构成"选型 → 调用 → 记录"的闭环：
 
-| 位置 | 文件:行 | 作用 |
-|---|---|---|
-| 构造期 `registerKeys` | `eino_agent.go:169` | 预注册全部模型 key，使 `AllUnavailable` 能感知未被调用过的备用模型 |
-| `selectPrimaryModel` | `eino_agent.go:313` | 选主时 `Available()` 跳过熔断模型（候选扫描，不消耗探测 permit） |
-| `switchPrimary` | `eino_agent.go:381` | 封装"切 primaryIndex + 重建 agent/runner + 失败回滚"，`ensureAgent` 和 `ensureLatencyAgent` 共用 |
-| `ensureAgent` | `eino_agent.go:401` | **所有策略**：请求前检查 primary 是否熔断，熔断则切到第一个健康模型并重建 agent |
-| `ensureLatencyAgent` | `eino_agent.go:441` | **仅 Latency 策略**：在 `ensureAgent` 之后，按 EMA 延迟从健康模型中选最优 |
-| `getFailoverModel` | `eino_agent.go:277` | ADK failover 链跳过熔断候选（同请求内主模型失败后的即时降级） |
-| `Chat` 入口 | `eino_agent.go:491` | `AllUnavailable()` 快速失败 → `ensureAgent()` → `ensureLatencyAgent()` |
-| `StreamChat` 入口 | `eino_agent.go:709` | 同上，流式场景对称处理 |
-| `recordStats` | `eino_agent.go:1327` | 调用结束 `Record(model, err)` 更新熔断器状态 |
+| 位置                   | 文件:行                 | 作用                                                                                  |
+| -------------------- | -------------------- | ----------------------------------------------------------------------------------- |
+| 构造期 `registerKeys`   | `eino_agent.go:169`  | 预注册全部模型 key，使 `AllUnavailable` 能感知未被调用过的备用模型                                        |
+| `selectPrimaryModel` | `eino_agent.go:313`  | 选主时 `Available()` 跳过熔断模型（候选扫描，不消耗探测 permit）                                         |
+| `switchPrimary`      | `eino_agent.go:381`  | 封装"切 primaryIndex + 重建 agent/runner + 失败回滚"，`ensureAgent` 和 `ensureLatencyAgent` 共用 |
+| `ensureAgent`        | `eino_agent.go:401`  | **所有策略**：请求前检查 primary 是否熔断，熔断则切到第一个健康模型并重建 agent                                   |
+| `ensureLatencyAgent` | `eino_agent.go:441`  | **仅 Latency 策略**：在 `ensureAgent` 之后，按 EMA 延迟从健康模型中选最优                               |
+| `getFailoverModel`   | `eino_agent.go:277`  | ADK failover 链跳过熔断候选（同请求内主模型失败后的即时降级）                                               |
+| `Chat` 入口            | `eino_agent.go:491`  | `AllUnavailable()` 快速失败 → `ensureAgent()` → `ensureLatencyAgent()`                  |
+| `StreamChat` 入口      | `eino_agent.go:709`  | 同上，流式场景对称处理                                                                         |
+| `recordStats`        | `eino_agent.go:1327` | 调用结束 `Record(model, err)` 更新熔断器状态                                                   |
 
-**`ensureAgent` 与 `ensureLatencyAgent` 的分层**：ADK agent 构造时把 primary model 实例绑死，运行时不感知熔断器。若非 Latency 策略下只有 `getFailoverModel` 做熔断过滤，会出现"每次请求先调已熔断的 primary → 收到 403 → 才 failover"的无效调用，且每次 403 还会把 hard 退避倍数反复翻倍。`ensureAgent` 作为**所有策略共用的前置屏障**，在请求发起前就把 primary 切到健康模型；`ensureLatencyAgent` 在此基础上做 Latency 策略特有的 EMA 优化，两者职责分离、无重复。
+**`ensureAgent`** **与** **`ensureLatencyAgent`** **的分层**：ADK agent 构造时把 primary model 实例绑死，运行时不感知熔断器。若非 Latency 策略下只有 `getFailoverModel` 做熔断过滤，会出现"每次请求先调已熔断的 primary → 收到 403 → 才 failover"的无效调用，且每次 403 还会把 hard 退避倍数反复翻倍。`ensureAgent` 作为**所有策略共用的前置屏障**，在请求发起前就把 primary 切到健康模型；`ensureLatencyAgent` 在此基础上做 Latency 策略特有的 EMA 优化，两者职责分离、无重复。
 
-**`Available` vs `Allow` 的区分**：`Available` 仅查询不消耗探测 permit（用于候选扫描），`Allow` 会消耗 permit（用于实际发起请求）。半开探测由 failsafe 惰性完成——`Open` 且 `RemainingDelay` 为 0 时，下一次 `TryAcquirePermit` 自动转入半开放行。
+**`Available`** **vs** **`Allow`** **的区分**：`Available` 仅查询不消耗探测 permit（用于候选扫描），`Allow` 会消耗 permit（用于实际发起请求）。半开探测由 failsafe 惰性完成——`Open` 且 `RemainingDelay` 为 0 时，下一次 `TryAcquirePermit` 自动转入半开放行。
 
 #### AllUnavailable 快速失败
 
@@ -833,10 +835,10 @@ failsafe 的 `WithDelay` 是固定值，状态迁移回调拿不到触发错误�
 
 #### Prometheus 指标
 
-| 指标 | 类型 | 标签 | 含义 |
-|---|---|---|---|
-| `llm_circuit_state` | Gauge | `model` | 当前状态（0=closed 1=open 2=half-open） |
-| `llm_circuit_transitions_total` | Counter | `model`,`from`,`to` | 状态迁移累计次数 |
+| 指标                              | 类型      | 标签                  | 含义                                |
+| ------------------------------- | ------- | ------------------- | --------------------------------- |
+| `llm_circuit_state`             | Gauge   | `model`             | 当前状态（0=closed 1=open 2=half-open） |
+| `llm_circuit_transitions_total` | Counter | `model`,`from`,`to` | 状态迁移累计次数                          |
 
 通过 `OnStateChanged` 钩子在状态迁移时推送，可用于告警（如某模型 1 分钟内迁移 > N 次说明抖动严重）。
 
@@ -932,12 +934,12 @@ eino_openai.NewChatModel(ctx, &eino_openai.ChatModelConfig{
 
 资源共享矩阵：
 
-| 资源 | 是否共享 | 说明 |
-|---|---|---|
-| `*http.Transport`（连接池，TCP/TLS 长连接） | ✅ 共享 | 进程内唯一 |
-| `*http.Client` 包装体（超时/重定向策略等） | ✅ 共享 | 同一份指针 |
-| `eino_openai.ChatModel` 实例 | ❌ 独立 | 各自封装 model 名 / API key / baseURL |
-| HTTP/2 多路复用 | ✅ 自动生效 | 对同一 host 的并发请求复用单条 TCP |
+| 资源                                 | 是否共享   | 说明                               |
+| ---------------------------------- | ------ | -------------------------------- |
+| `*http.Transport`（连接池，TCP/TLS 长连接） | ✅ 共享   | 进程内唯一                            |
+| `*http.Client` 包装体（超时/重定向策略等）      | ✅ 共享   | 同一份指针                            |
+| `eino_openai.ChatModel` 实例         | ❌ 独立   | 各自封装 model 名 / API key / baseURL |
+| HTTP/2 多路复用                        | ✅ 自动生效 | 对同一 host 的并发请求复用单条 TCP           |
 
 #### 连接复用的收益与边界
 
@@ -1150,7 +1152,7 @@ func (t *MyTool) Execute(ctx context.Context, params map[string]interface{}) (in
 
 **不使用 LangChain**，以标准库为主，保持轻量。
 
----
+***
 
 ## 重构路径映射总表（旧 → 新）
 
@@ -1158,41 +1160,41 @@ func (t *MyTool) Execute(ctx context.Context, params map[string]interface{}) (in
 
 ### 分层重构（backend/internal/）
 
-| 旧路径 | 新路径 | 说明 |
-|--------|--------|------|
-| `internal/server/gin_server.go` | `internal/handler/http/gin.go` | Gin HTTP Server 从 `server` 包移入 `handler/http` |
-| `internal/server/websocket_handler.go` | `internal/handler/http/gin.go` + `internal/handler/ws/*` | WebSocket 升级在 http，处理逻辑移 ws 包 |
-| `internal/websocket/manager.go` | `internal/handler/ws/manager.go` | WebSocket Hub 移入接入层 ws |
-| `internal/websocket/message.go` | `internal/handler/ws/message.go` | 消息协议类型 |
-| `internal/websocket/client.go` | `internal/handler/ws/client.go` | 客户端连接封装 |
-| `internal/agent/runtime.go` | `internal/core/agent/agent.go` | Agent Runtime 移入核心层 core/agent |
-| `internal/agent/session.go` | `internal/core/session/manager.go` | 会话生命周期独立为 core/session 包 |
-| `internal/agent/tools.go` | `internal/adapter/tools/registry.go` | 工具实现属于 IO 边界，移 adapter/tools |
-| `internal/agent/prompts.go` | `internal/core/agent/prompts.go` | Prompt 模板属纯数据，留 core/agent |
-| `internal/llm/adapter.go` | `internal/adapter/llm/adapter.go` | LLM 接口属于 IO 边界，移 adapter/llm |
-| `internal/llm/eino_agent_adapter.go` | `internal/adapter/llm/eino_agent.go` | Eino 适配实现 + 文件名去冗余后缀 `_adapter` |
-| `internal/llm/fallback_adapter.go` | `internal/adapter/llm/fallback.go` | Fallback 实现 |
-| `internal/llm/eino_handler.go` | `internal/adapter/llm/eino_handler.go` | Eino Callbacks Handler |
-| `internal/llm/context.go` | `pkg/contextutil/contextutil.go` | 通用 context 工具，上升至 pkg |
-| `internal/llm/context_test.go` | `pkg/contextutil/contextutil_test.go` | 同上对应测试 |
-| `internal/cost/optimizer.go` | `internal/core/cost/optimizer.go` | 成本优化核心逻辑移 core/cost |
-| `internal/cost/summarizer_llm.go` | `internal/core/context/summarizer.go` | 摘要实现（构建上下文一部分）移 core/context |
-| `internal/cost/cache.go` | `internal/adapter/cache/cache.go` | 缓存接口定义属于 IO 边界，移 adapter/cache |
-| `internal/cost/layered_cache.go` | `internal/adapter/cache/layered.go` | 缓存具体实现 |
-| `internal/cost/embedding.go` | `internal/adapter/cache/embedding.go` | Embedding API 客户端 |
-| `internal/emotion/*` | `internal/core/emotion/*` | 纯规则检测，属于核心层 |
-| `internal/knowledge/*` | `internal/adapter/knowledge/*` | 外部 JSON 加载 + 查询，属于 IO 适配 |
-| `internal/weather/*` | `internal/adapter/weather/*` | 外部 HTTP API 调用，属于 IO 适配 |
-| `internal/database/models.go` | `internal/repository/model.go` | 数据模型 + GORM 实现合并为 repository 层 |
-| `internal/database/*_repo.go` | `internal/repository/*.go` | Player/Conversation/Audit 仓储 |
+| 旧路径                                    | 新路径                                                      | 说明                                            |
+| -------------------------------------- | -------------------------------------------------------- | --------------------------------------------- |
+| `internal/server/gin_server.go`        | `internal/handler/http/gin.go`                           | Gin HTTP Server 从 `server` 包移入 `handler/http` |
+| `internal/server/websocket_handler.go` | `internal/handler/http/gin.go` + `internal/handler/ws/*` | WebSocket 升级在 http，处理逻辑移 ws 包                 |
+| `internal/websocket/manager.go`        | `internal/handler/ws/manager.go`                         | WebSocket Hub 移入接入层 ws                        |
+| `internal/websocket/message.go`        | `internal/handler/ws/message.go`                         | 消息协议类型                                        |
+| `internal/websocket/client.go`         | `internal/handler/ws/client.go`                          | 客户端连接封装                                       |
+| `internal/agent/runtime.go`            | `internal/core/agent/agent.go`                           | Agent Runtime 移入核心层 core/agent                |
+| `internal/agent/session.go`            | `internal/core/session/manager.go`                       | 会话生命周期独立为 core/session 包                      |
+| `internal/agent/tools.go`              | `internal/adapter/tools/registry.go`                     | 工具实现属于 IO 边界，移 adapter/tools                  |
+| `internal/agent/prompts.go`            | `internal/core/agent/prompts.go`                         | Prompt 模板属纯数据，留 core/agent                    |
+| `internal/llm/adapter.go`              | `internal/adapter/llm/adapter.go`                        | LLM 接口属于 IO 边界，移 adapter/llm                  |
+| `internal/llm/eino_agent_adapter.go`   | `internal/adapter/llm/eino_agent.go`                     | Eino 适配实现 + 文件名去冗余后缀 `_adapter`               |
+| `internal/llm/fallback_adapter.go`     | `internal/adapter/llm/fallback.go`                       | Fallback 实现                                   |
+| `internal/llm/eino_handler.go`         | `internal/adapter/llm/eino_handler.go`                   | Eino Callbacks Handler                        |
+| `internal/llm/context.go`              | `pkg/contextutil/contextutil.go`                         | 通用 context 工具，上升至 pkg                         |
+| `internal/llm/context_test.go`         | `pkg/contextutil/contextutil_test.go`                    | 同上对应测试                                        |
+| `internal/cost/optimizer.go`           | `internal/core/cost/optimizer.go`                        | 成本优化核心逻辑移 core/cost                           |
+| `internal/cost/summarizer_llm.go`      | `internal/core/context/summarizer.go`                    | 摘要实现（构建上下文一部分）移 core/context                  |
+| `internal/cost/cache.go`               | `internal/adapter/cache/cache.go`                        | 缓存接口定义属于 IO 边界，移 adapter/cache                |
+| `internal/cost/layered_cache.go`       | `internal/adapter/cache/layered.go`                      | 缓存具体实现                                        |
+| `internal/cost/embedding.go`           | `internal/adapter/cache/embedding.go`                    | Embedding API 客户端                             |
+| `internal/emotion/*`                   | `internal/core/emotion/*`                                | 纯规则检测，属于核心层                                   |
+| `internal/knowledge/*`                 | `internal/adapter/knowledge/*`                           | 外部 JSON 加载 + 查询，属于 IO 适配                      |
+| `internal/weather/*`                   | `internal/adapter/weather/*`                             | 外部 HTTP API 调用，属于 IO 适配                       |
+| `internal/database/models.go`          | `internal/repository/model.go`                           | 数据模型 + GORM 实现合并为 repository 层                |
+| `internal/database/*_repo.go`          | `internal/repository/*.go`                               | Player/Conversation/Audit 仓储                  |
 
 ### 部署目录
 
-| 旧路径 | 新路径 | 说明 |
-|--------|--------|------|
+| 旧路径               | 新路径               | 说明                                     |
+| ----------------- | ----------------- | -------------------------------------- |
 | `grafana/`（项目根目录） | `deploy/grafana/` | Grafana 与 prometheus.yml 聚合到 deploy 目录 |
 
----
+***
 
 ## 许可证
 
