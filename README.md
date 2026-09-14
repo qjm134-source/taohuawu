@@ -526,6 +526,7 @@ npm run dev
 | [Memory 系统设计](./backend/docs/MEMORY_SYSTEM.md)  | 记忆管理、摘要方案、成本优化                                           |
 | [可观测性指南](./backend/docs/OBSERVABILITY.md)       | Prometheus 指标、OpenTelemetry 追踪、Langfuse LLM 可观测、生产环境方案选型 |
 | [Render 部署指南](./RENDER_DEPLOY.md)               | 云平台部署步骤                                                  |
+| [LLM 智能网关设计](./backend/docs/LLM_Gateway/llm-gateway-design.md) | 统一 LLM 网关技术方案：OpenAI 兼容协议、多供应商路由、五维限流、熔断降级、Token 计量对账 |
 
 ***
 
