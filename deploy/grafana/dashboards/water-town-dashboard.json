@@ -141,13 +141,13 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le)) * 1000",
+          "expr": "histogram_quantile(0.99, sum(rate(llm_first_token_duration_seconds[1m]))) * 1000",
           "interval": "",
-          "legendFormat": "P99",
+          "legendFormat": "TTFT P99",
           "refId": "A"
         }
       ],
-      "title": "P99 延迟（HTTP）",
+      "title": "TTFT P99",
       "type": "stat"
     },
     {
@@ -461,11 +461,17 @@
         {
           "expr": "sum by (model) (rate(llm_request_duration_seconds_sum[5m])) / sum by (model) (rate(llm_request_duration_seconds_count[5m])) * 1000",
           "interval": "",
-          "legendFormat": "{{model}}",
+          "legendFormat": "{{model}} 总耗时",
           "refId": "A"
+        },
+        {
+          "expr": "sum by (model) (rate(llm_first_token_duration_seconds_sum[5m])) / sum by (model) (rate(llm_first_token_duration_seconds_count[5m])) * 1000",
+          "interval": "",
+          "legendFormat": "{{model}} TTFT",
+          "refId": "B"
         }
       ],
-      "title": "各模型平均延迟对比（TTFT 分布留二期）",
+      "title": "各模型平均延迟 & TTFT 对比",
       "type": "timeseries"
     },
     {

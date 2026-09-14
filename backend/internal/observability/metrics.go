@@ -26,6 +26,19 @@ var (
 		[]string{"model"},
 	)
 
+	// LLMFirstTokenDuration 首 Token 延迟（TTFT），即从发起流式请求到首个 chunk 到达的耗时。
+	// 采用 Native Histogram 自动分桶，按 model 标签聚合，供 L1 核心指标看板计算 TTFT P99。
+	LLMFirstTokenDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:                            "llm_first_token_duration_seconds",
+			Help:                            "LLM time to first token (TTFT) in seconds",
+			Buckets:                         []float64{},
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMinResetDuration: 5 * 60 * 1e9,
+		},
+		[]string{"model"},
+	)
+
 	LLMRequestTokens = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "llm_request_tokens_total",

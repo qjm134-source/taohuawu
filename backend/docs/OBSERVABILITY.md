@@ -71,6 +71,7 @@
 |---|---|---|---|
 | `llm_requests_total` | Counter | `model`, `status` | 每个模型的调用次数与状态 |
 | `llm_request_duration_seconds` | Histogram | `model` | 每个模型的调用耗时 |
+| `llm_first_token_duration_seconds` | Histogram | `model` | 每个模型的首 Token 延迟（TTFT） |
 | `llm_request_tokens_total` | Counter | `model` | 每个模型的输入 Token 累计 |
 | `llm_completion_tokens_total` | Counter | `model` | 每个模型的输出 Token 累计 |
 | `cost_total` | Counter | `model` | 每个模型的累计成本（美元） |
@@ -581,9 +582,9 @@ cd deploy && docker-compose up -d
 
 | 层级 | 内容 | 说明 |
 |---|---|---|
-| **L1 核心指标** | QPS、LLM 成本（$/h）、HTTP P99 延迟、LLM 调用成功率、缓存命中率 | 5 秒规则，一眼看到系统死活 |
+| **L1 核心指标** | QPS、LLM 成本（$/h）、TTFT P99、LLM 调用成功率、缓存命中率 | 5 秒规则，一眼看到系统死活 |
 | **L2 成本归因** | 各模型成本占比饼图、成本趋势（按模型）、Token 消耗趋势（input/output） | 回答"钱花在哪儿" |
-| **L3 延迟拆解** | HTTP P50/P95/P99 趋势、各模型平均延迟对比 | 区分网络延迟和模型推理延迟 |
+| **L3 延迟拆解** | HTTP P50/P95/P99 趋势、各模型总耗时与 TTFT 均值对比 | 区分网络延迟和模型推理延迟 |
 | **L4 流量与缓存** | 请求量趋势、缓存命中率趋势、缓存命中类型分布 | 容量规划 |
 | **L5 Agent 行为** | Agent 请求成功率、请求量分布（按 action） | 业务健康度 |
 | **L6 基础设施** | HTTP 状态码分布、在线连接数 | 传统运维视角 |
@@ -719,6 +720,12 @@ sum by (path) (rate(http_requests_total[1m]))
 
 # HTTP P99 延迟
 histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[1m])) by (le, path))
+
+# LLM 首 Token 延迟（TTFT）P99（Native Histogram，无需 _bucket 后缀）
+histogram_quantile(0.99, sum(rate(llm_first_token_duration_seconds[1m]))) * 1000
+
+# 各模型 TTFT 均值（ms）
+sum by (model) (rate(llm_first_token_duration_seconds_sum[5m])) / sum by (model) (rate(llm_first_token_duration_seconds_count[5m])) * 1000
 
 # LLM 调用错误率
 sum(rate(llm_requests_total{status="error"}[5m])) / sum(rate(llm_requests_total[5m]))

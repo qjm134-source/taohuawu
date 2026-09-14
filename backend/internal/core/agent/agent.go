@@ -558,6 +558,10 @@ func (r *Runtime) consumeStream(ctx context.Context, stream llm.EventStream,
 				// TTFT：从发起 streamChat 到首个流式 chunk 到达的等待时间，挂到 LLM.StreamChat 便于 Langfuse 展示
 				stats.TTFTMs = time.Since(llmStart).Milliseconds()
 				llmSpan.SetAttributes(attribute.Int("llm.ttft_ms", int(stats.TTFTMs)))
+				// 同步上报 Prometheus TTFT Histogram，供 L1 核心看板计算 P99。
+				// chunk 事件已携带 model 名，直接用 event.Model 归一化后打标签。
+				observability.LLMFirstTokenDuration.WithLabelValues(normalizeModelName(event.Model)).
+					Observe(float64(stats.TTFTMs) / 1000.0)
 			}
 			chunkCount++
 			if reason := r.updateStatsFromChunk(event, fullReply, stats); reason != "" {
